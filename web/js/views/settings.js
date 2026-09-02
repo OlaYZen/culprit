@@ -272,7 +272,19 @@ export function createSettings() {
    * spirit — a borrowed open session must prove it owns the account before it
    * can change a credential). Renaming re-issues the session cookie server-side.
    */
-  function renderAccount() {
+  function renderAccount(force = false) {
+    // Never rebuild the account form from a live update while it is being
+    // filled in: it holds fields the user types into (current/new/confirm
+    // password, username), and recreating the inputs wipes a half-entered
+    // password. Skip if focus is inside it, or any field already holds user
+    // input. `force` is for deliberate re-seeds (e.g. after a rename), which
+    // must rebuild it regardless.
+    if (!force
+        && (accountSlot.contains(document.activeElement)
+            || [...accountSlot.querySelectorAll("input")].some((i) => i.value
+                && i.value !== i.getAttribute("value")))) {
+      return;
+    }
     const auth = store.state.auth || {};
     if (!auth.enabled || !auth.username) {
       render(accountSlot, panel({
@@ -310,8 +322,8 @@ export function createSettings() {
         store.state.auth = { ...auth, username: payload.username };
         namePw.value = "";
         inlineResult(nameResult, `Renamed to ${payload.username}.`, "ok");
-        renderNodes();                       // reflects the signed-in name
-        setTimeout(renderAccount, 1000);     // re-seed the form with the new name
+        renderNodes();                        // reflects the signed-in name
+        setTimeout(() => renderAccount(true), 1000);  // re-seed with the new name
       } catch (error) {
         inlineResult(nameResult, error.message, "error");
       }
@@ -774,8 +786,15 @@ export function createSettings() {
     store.on(["snapshot", "tick:fast"], () => {
       if (root.isActive) updateCost();
     }),
-    store.on(["nodes", "auth"], () => {
-      if (root.isActive && config) { renderNodes(); renderAccount(); }
+    // Node-status frames arrive roughly every second; only the input-free
+    // nodes summary repaints on them. The account form (which has fields the
+    // user types into) repaints only when auth actually changes — and even
+    // then renderAccount bails out if the form is mid-edit.
+    store.on("nodes", () => {
+      if (root.isActive && config) renderNodes();
+    }),
+    store.on("auth", () => {
+      if (root.isActive && config) renderAccount();
     }),
   ];
   return root;
