@@ -246,9 +246,15 @@ export function createPorts() {
         style: { display: "flex", gap: "5px", alignItems: "center", flexWrap: "wrap" },
       }, bits);
     } else {
+      const owners = entry.owners || [];
+      // We can name *who* owns it (from /proc/net) even when the process
+      // itself is out of reach — better than a blank "another user".
+      const label = owners.length
+        ? `${owners.join(", ")}’s process`
+        : (entry.unattributed ? "another user’s process" : fmt.dash);
       serviceCell = el("span.faint", {
-        text: entry.unattributed ? "another user’s process" : fmt.dash,
-        title: "Attributing this socket needs CAP_SYS_PTRACE or root",
+        text: label,
+        title: "Killing this socket’s process needs CAP_SYS_PTRACE or root",
       });
     }
 
@@ -261,7 +267,10 @@ export function createPorts() {
       }, ["Kill"]);
     } else {
       const reason = primary?.kill_reason
-        || (entry.unattributed ? "owned by another user — needs root"
+        || (entry.unattributed
+          ? ((entry.owners || []).length
+            ? `owned by ${entry.owners.join(", ")} — needs CAP_SYS_PTRACE or root`
+            : "owned by another user — needs root")
           : "nothing here can be signalled");
       actionCell = el("button.btn.btn--sm", {
         type: "button", disabled: true, title: reason,
