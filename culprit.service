@@ -1,0 +1,35 @@
+# culprit -- systemd *user* unit.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp culprit.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now culprit
+#   loginctl enable-linger $USER     # keep it running when you log out
+#
+# Runs unprivileged on purpose. Journal access comes from your group
+# membership (systemd-journal or adm); nothing here needs root. If you want a
+# *system* unit instead, grant only what is needed rather than running as
+# root, e.g.:
+#   [Service]
+#   User=culprit
+#   SupplementaryGroups=systemd-journal
+#   AmbientCapabilities=CAP_DAC_READ_SEARCH
+
+[Unit]
+Description=culprit machine-health dashboard
+After=network.target
+
+[Service]
+Type=simple
+# %h expands to the home directory; adjust if you cloned elsewhere.
+WorkingDirectory=%h/culprit
+ExecStart=%h/culprit/.venv/bin/python -m culprit --no-browser
+Restart=on-failure
+RestartSec=5
+# The dashboard binds 127.0.0.1 only and has no authentication -- do not
+# loosen this to 0.0.0.0 without putting an authenticating proxy in front.
+Environment=CULPRIT_HOST=127.0.0.1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>culprit</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/css/theme.css">
+<link rel="stylesheet" href="/assets/css/layout.css">
+<link rel="stylesheet" href="/assets/css/components.css">
+</head>
+<body>
+
+<!-- ══ Title bar ═══════════════════════════════════════════════════════════ -->
+<header class="titlebar">
+  <div class="titlebar__brand">
+    <svg class="titlebar__logo" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2.5" y="4" width="19" height="13" rx="2"/>
+      <path d="M8 20.5h8M12 17.5v3"/>
+    </svg>
+    <span class="titlebar__name">culprit</span>
+  </div>
+
+  <div class="titlebar__identity">
+    <button class="chip chip--copy" data-copy-target="hostname"
+            title="Copy machine name">
+      <span class="chip__label" data-bind="hostname">—</span>
+      <span class="copy-affordance" aria-hidden="true">
+        <svg class="copy-affordance__copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+        <svg class="copy-affordance__done" viewBox="0 0 24 24"><path d="M4 12.5l5 5L20 6.5"/></svg>
+      </span>
+    </button>
+    <span class="titlebar__sep" aria-hidden="true"></span>
+    <span class="chip chip--quiet" title="Time since last boot">
+      up <strong data-bind="uptime">—</strong>
+    </span>
+  </div>
+
+  <div class="titlebar__status">
+    <!-- Node picker: which machine every view describes. A native select,
+         because it must work with a keyboard and cost nothing. -->
+    <div class="nodesel" id="nodesel-wrap" hidden
+         title="Which machine the dashboard shows. Agents report in on their own cadence.">
+      <span class="nodesel__dot" data-bind="node-dot"></span>
+      <select id="node-select" aria-label="Node">
+        <option value="local">this host</option>
+      </select>
+    </div>
+    <span class="chip chip--quiet" data-bind="node-stale" hidden></span>
+    <!-- Health pill: the one-glance verdict for the selected node. -->
+    <button class="health-pill" data-nav="doctor" title="Open Lag Doctor">
+      <span class="health-pill__dot" data-bind="health-dot"></span>
+      <span class="health-pill__text" data-bind="health-text">Starting…</span>
+    </button>
+  </div>
+
+  <div class="titlebar__actions">
+    <!-- Segmented control, not a dropdown: four mutually exclusive options
+         that benefit from being visible (uxgoodpatterns: visible options). -->
+    <div class="segmented" role="group" aria-label="Refresh interval"
+         title="Sampling rate of the selected node, for this session only. Use Settings to save a host default.">
+      <span class="segmented__label">Refresh</span>
+      <button class="segmented__option" data-interval="0.5">0.5s</button>
+      <button class="segmented__option is-active" data-interval="1">1s</button>
+      <button class="segmented__option" data-interval="2">2s</button>
+      <button class="segmented__option" data-interval="5">5s</button>
+    </div>
+
+    <!-- Toggle switch, not a checkbox: takes effect immediately, no submit. -->
+    <label class="switch" title="Pause pauses the display, not the sampler">
+      <input type="checkbox" id="live-toggle" checked>
+      <span class="switch__track"><span class="switch__thumb"></span></span>
+      <span class="switch__text">Live</span>
+    </label>
+
+    <button class="icon-button" id="theme-toggle" title="Switch theme"
+            aria-label="Switch between dark and light theme">
+      <svg class="icon-button__dark" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+      <svg class="icon-button__light" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6"/></svg>
+    </button>
+
+    <button class="icon-button" id="logout" hidden title="Sign out"
+            aria-label="Sign out">
+      <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ══ Connection banner (system notification -> allowed as a toast) ═══════ -->
+<div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+
+<div class="shell">
+
+  <!-- ══ Sidebar ══════════════════════════════════════════════════════════ -->
+  <nav class="sidebar" id="sidebar" aria-label="Sections">
+    <div class="sidebar__group">
+      <div class="sidebar__heading">Monitor</div>
+      <button class="navitem is-active" data-nav="overview">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.5"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.5"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.5"/></svg>
+        <span>Overview</span>
+      </button>
+      <button class="navitem" data-nav="doctor">
+        <svg viewBox="0 0 24 24"><path d="M3 13h4l2.5-7 3.5 14 3-7h5"/></svg>
+        <span>Lag Doctor</span>
+        <span class="navitem__badge" data-bind="badge-doctor" hidden></span>
+      </button>
+      <button class="navitem" data-nav="processes">
+        <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="4" rx="1"/><rect x="3" y="11" width="18" height="4" rx="1"/><rect x="3" y="17" width="18" height="4" rx="1"/></svg>
+        <span>Processes</span>
+        <span class="navitem__count" data-bind="badge-processes"></span>
+      </button>
+      <button class="navitem" data-nav="services">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+        <span>Services</span>
+        <span class="navitem__badge" data-bind="badge-services" hidden></span>
+      </button>
+    </div>
+
+    <div class="sidebar__group">
+      <div class="sidebar__heading">Resources</div>
+      <button class="navitem" data-nav="storage">
+        <svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        <span>Storage</span>
+        <span class="navitem__badge" data-bind="badge-storage" hidden></span>
+      </button>
+      <button class="navitem" data-nav="network">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
+        <span>Network</span>
+      </button>
+      <button class="navitem" data-nav="ports">
+        <svg viewBox="0 0 24 24"><path d="M9 2v5M15 2v5"/><rect x="6" y="7" width="12" height="8" rx="2"/><path d="M12 15v7"/></svg>
+        <span>Ports</span>
+        <span class="navitem__count" data-bind="badge-ports"></span>
+      </button>
+      <button class="navitem" data-nav="sync">
+        <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-13.7 5.6L4 15.4"/><path d="M4 12a8 8 0 0 1 13.7-5.6L20 8.6"/><path d="M20 4v4.6h-4.6M4 20v-4.6h4.6"/></svg>
+        <span>Sync</span>
+        <span class="navitem__badge" data-bind="badge-sync" hidden></span>
+      </button>
+    </div>
+
+    <div class="sidebar__group">
+      <div class="sidebar__heading">History</div>
+      <button class="navitem" data-nav="events">
+        <svg viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.5"/><path d="M10.3 3.6L2.5 18a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 3.6a2 2 0 0 0-3.4 0z"/></svg>
+        <span>Events</span>
+        <span class="navitem__badge" data-bind="badge-events" hidden></span>
+      </button>
+      <button class="navitem" data-nav="sessions">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 21c0-4 3.4-6.5 7.5-6.5s7.5 2.5 7.5 6.5"/></svg>
+        <span>Sessions</span>
+      </button>
+      <button class="navitem" data-nav="trends">
+        <svg viewBox="0 0 24 24"><path d="M3 20V4M3 20h18"/><path d="M6.5 16l4-5 3.5 3 4.5-7"/></svg>
+        <span>Trends</span>
+      </button>
+    </div>
+
+    <div class="sidebar__group sidebar__group--bottom">
+      <button class="navitem" data-nav="nodes">
+        <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="5" rx="1"/><rect x="2.5" y="16" width="6" height="5" rx="1"/><rect x="15.5" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5.5 16v-2a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v2"/></svg>
+        <span>Nodes</span>
+        <span class="navitem__badge" data-bind="badge-nodes" hidden></span>
+      </button>
+      <button class="navitem" data-nav="settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.8"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 2.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.7-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 2.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.7l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21.4 11a2 2 0 1 1 0 4z"/></svg>
+        <span>Settings</span>
+      </button>
+    </div>
+
+    <!-- Compact always-visible vitals, so switching views never loses sight
+         of the machine's state. -->
+    <div class="sidebar__vitals" id="sidebar-vitals">
+      <div class="minivital" data-vital="cpu">
+        <div class="minivital__top"><span>CPU</span><b data-bind="mini-cpu">—</b></div>
+        <div class="minivital__bar"><i data-bind="mini-cpu-bar"></i></div>
+      </div>
+      <div class="minivital" data-vital="mem">
+        <div class="minivital__top"><span>RAM</span><b data-bind="mini-mem">—</b></div>
+        <div class="minivital__bar"><i data-bind="mini-mem-bar"></i></div>
+      </div>
+      <div class="minivital" data-vital="gpu">
+        <div class="minivital__top"><span>GPU</span><b data-bind="mini-gpu">—</b></div>
+        <div class="minivital__bar"><i data-bind="mini-gpu-bar"></i></div>
+      </div>
+      <div class="minivital" data-vital="disk">
+        <div class="minivital__top"><span>Disk</span><b data-bind="mini-disk">—</b></div>
+        <div class="minivital__bar"><i data-bind="mini-disk-bar"></i></div>
+      </div>
+      <div class="sidebar__cost" data-bind="overhead" title="What this tool costs to run"></div>
+    </div>
+  </nav>
+
+  <!-- ══ Main ═════════════════════════════════════════════════════════════ -->
+  <main class="main" id="main">
+    <!-- Warm-up state: progressive messages, not a bare spinner
+         (uxgoodpatterns: progressive loading messages). -->
+    <div class="warmup" id="warmup">
+      <div class="warmup__card">
+        <div class="warmup__spinner" aria-hidden="true"></div>
+        <div class="warmup__title">Reading this machine</div>
+        <div class="warmup__stage" id="warmup-stage">Starting…</div>
+        <div class="warmup__hint">
+          Rate counters need two samples before they mean anything, and the
+          first journal query on a cold cache can take several seconds.
+        </div>
+      </div>
+    </div>
+
+    <div class="views" id="views" hidden></div>
+  </main>
+</div>
+
+<!-- ══ Modal host ═════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop" id="modal-backdrop" hidden>
+  <div class="modal" id="modal" role="dialog" aria-modal="true"
+       aria-labelledby="modal-title">
+    <header class="modal__head">
+      <h2 class="modal__title" id="modal-title"></h2>
+      <button class="icon-button modal__close" id="modal-close"
+              aria-label="Close" title="Close (Esc)">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="modal__body" id="modal-body"></div>
+    <footer class="modal__foot" id="modal-foot" hidden></footer>
+  </div>
+</div>
+
+<!-- Floating scroll-to-top, shown past 400px on long views. -->
+<button class="scrolltop" id="scrolltop" hidden aria-label="Scroll to top"
+        title="Back to top">
+  <svg viewBox="0 0 24 24"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg>
+</button>
+
+<script type="module" src="/assets/js/app.js"></script>
+</body>
+</html>
