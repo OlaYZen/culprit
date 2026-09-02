@@ -155,7 +155,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "network_detail.sockets.established",
             "network_detail.connectivity.checked_at",
             "network_detail.vpn.active", "network_detail.vpn.adapters",
-            "network_detail.vpn.full_tunnel",
+            "network_detail.vpn.full_tunnel", "network_detail.vpn.via_exit_ip",
             "network_detail.wan_ip.available",
         ],
     },
