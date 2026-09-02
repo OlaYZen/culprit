@@ -230,7 +230,8 @@ export function createSessions() {
     }
     patchText(nodes.bootMeta, `${bootEvents.length} event(s)`);
 
-    // Current sessions, with per-session lock/idle state from logind.
+    // Current sessions — named by user and typed, so an SSH login reads as
+    // "olayzen · SSH · from 192.168.1.4" rather than a bare session id.
     const current = sessions.current || [];
     if (!current.length) {
       render(nodes.locks, emptyState("No active sessions",
@@ -238,12 +239,19 @@ export function createSessions() {
     } else {
       const list = el("div.kvlist");
       for (const session of current) {
-        const bits = [session.type || "session"];
+        const isSsh = session.service === "sshd"
+          || (session.remote && session.remote_host);
+        const kind = isSsh ? "SSH"
+          : session.remote ? "remote"
+          : session.class === "greeter" ? "login screen"
+          : (session.type || "session");
+        const bits = [kind];
         if (session.remote_host) bits.push(`from ${session.remote_host}`);
         if (session.tty) bits.push(session.tty);
-        list.append(kv(`Session ${session.id}`,
-          `${bits.join(" · ")} — ${session.locked ? "locked" : "unlocked"}`
-          + `${session.idle ? ", idle" : ""}`,
+        bits.push(session.locked ? "locked" : "unlocked");
+        if (session.idle) bits.push("idle");
+        const who = session.user || `session ${session.id}`;
+        list.append(kv(who, bits.join(" · "),
           { state: session.locked ? null : "ok" }));
       }
       render(nodes.locks, list);

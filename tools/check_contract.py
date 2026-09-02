@@ -190,6 +190,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "sessions.source", "sessions.exact", "sessions.requires_elevation",
             "sessions.note",
             "sessions.current[].id", "sessions.current[].type",
+            "sessions.current[].user", "sessions.current[].service",
+            "sessions.current[].remote", "sessions.current[].remote_host",
             "sessions.current[].locked", "sessions.current[].idle",
             "sessions.timeline[].user", "sessions.timeline[].start",
             "sessions.timeline[].end", "sessions.timeline[].duration",
