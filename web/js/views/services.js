@@ -186,6 +186,20 @@ export function createServices() {
               + "unit failed (oom-kill, timeout, exit-code, watchdog).",
         }),
       }));
+    } else if (payload.degraded) {
+      render(problemsSlot, panel({
+        title: "Limited view",
+        icon: icons.warn,
+        cls: "panel--warn",
+        body: emptyState(
+          "Showing active units only",
+          payload.degraded_reason
+          || "The systemd bus is unreachable, so only the running units found "
+          + "in process cgroups are shown — no per-unit CPU/memory, and no "
+          + "inactive or failed units.",
+          icons.warn,
+        ),
+      }));
     } else {
       render(problemsSlot, panel({
         title: "Unit health",
