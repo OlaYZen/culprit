@@ -28,6 +28,7 @@ import { createSync } from "./views/sync.js";
 import { createTrends } from "./views/trends.js";
 import { createNodes } from "./views/nodes.js";
 import { createSettings } from "./views/settings.js";
+import { initMobile } from "./mobile.js";
 
 const FACTORIES = {
   overview: createOverview,
@@ -81,9 +82,13 @@ function navigate(name, { push = true } = {}) {
   }
   current = name;
 
-  for (const item of $$(".navitem")) {
+  // Reflect the active view on every nav trigger — the sidebar, the mobile
+  // bottom bar, and the sheet's view tiles all use [data-nav].
+  for (const item of $$("[data-nav]")) {
     patchClass(item, "is-active", item.dataset.nav === name);
   }
+  // Let the mobile chrome react (close the sheet, light the More tab).
+  document.dispatchEvent(new CustomEvent("culprit:navigate", { detail: name }));
 
   document.title = `${TITLES[name]} — culprit`;
   $("#main").scrollTop = 0;
@@ -455,6 +460,7 @@ function boot() {
     }
   });
 
+  initMobile();
   store.connect();
   navigate(location.hash.slice(1) || "overview", { push: false });
   updateWarmup(store.state);
