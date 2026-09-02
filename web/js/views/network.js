@@ -20,6 +20,21 @@ const KIND_TAG = {
   virtual: null, loopback: null, cellular: "accent", other: null,
 };
 
+/** One-line VPN summary: local interface(s), and/or an upstream exit-IP VPN. */
+function vpnDescription(vpn) {
+  const parts = (vpn.interfaces || []).map((v) => `${v.type} (${v.name})`);
+  if (vpn.via_exit_ip && !parts.length) {
+    // Detected only from the exit IP — the VPN runs upstream (on the router).
+    parts.push(`${vpn.exit_provider || "VPN/proxy"} (upstream, no local interface)`);
+  } else if (vpn.via_exit_ip && vpn.exit_provider) {
+    parts.push(`exit ${vpn.exit_provider}`);
+  }
+  const label = parts.join(", ") || (vpn.adapters || []).join(", ") || "detected";
+  return `${label} — ${vpn.full_tunnel
+    ? "full tunnel, all traffic exits through the VPN"
+    : "split tunnel, only specific routes use the VPN"}`;
+}
+
 export function createNetwork() {
   const root = el("div.view", { dataset: { view: "network" } });
   const nodes = {};
@@ -185,7 +200,8 @@ export function createNetwork() {
     const wan = detail.wan_ip;
     if (wan) {
       list.append(wan.available
-        ? kv("Public IP (WAN)", wan.ip, { mono: true, state: "ok" })
+        ? kv("Public IP (WAN)", wan.org ? `${wan.ip} · ${wan.org}` : wan.ip,
+            { mono: true, state: "ok" })
         : kv("Public IP (WAN)", "unavailable", { state: "info" }));
     }
     for (const [key, label] of probes) {
@@ -219,12 +235,8 @@ export function createNetwork() {
       detail.vpn?.active
         ? el("div.hint", {
             style: { marginTop: "8px" },
-            html: `${icons.info}<div><strong>VPN active:</strong> ${fmt.esc(
-              (detail.vpn.interfaces || []).map((v) => `${v.type} (${v.name})`)
-                .join(", ") || (detail.vpn.adapters || []).join(", "))} — ${
-              detail.vpn.full_tunnel
-                ? "<strong>full tunnel</strong>, all traffic exits through the VPN"
-                : "split tunnel, only specific routes use the VPN"}</div>`,
+            html: `${icons.info}<div><strong>VPN active:</strong> ${
+              fmt.esc(vpnDescription(detail.vpn))}</div>`,
           })
         : null,
     ].filter(Boolean)));
