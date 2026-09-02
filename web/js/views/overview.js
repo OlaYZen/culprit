@@ -556,9 +556,13 @@ export function createOverview() {
       coreCells = cores.map((_, index) => {
         const canvas = el("canvas.lcore__canvas");
         const pct = el("div.lcore__pct");
-        const cell = el("div.lcore", { title: `Logical core ${index}` }, [
+        // Displayed 1-based (Core 1..N) — humans count from one; the 0-based
+        // kernel id (cpuN, what taskset/htop use) stays in the hover tooltip.
+        const cell = el("div.lcore", {
+          title: `Core ${index + 1} · kernel cpu${index}`,
+        }, [
           canvas,
-          el("div.lcore__id", { text: String(index) }),
+          el("div.lcore__id", { text: String(index + 1) }),
           pct,
         ]);
         const chart = createChart(canvas, {
