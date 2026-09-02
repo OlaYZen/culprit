@@ -1,0 +1,28 @@
+# Virtual environment — recreate with install.sh
+.venv/
+
+# Runtime state — never commit (these hold live config and credentials)
+config.json
+agent.json
+
+# SQLite database (holds scrypt password hashes + agent token hashes) + sidecars
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
