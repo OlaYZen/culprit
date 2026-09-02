@@ -180,6 +180,14 @@ export function createNetwork() {
       ["internet", "Public internet"],
     ];
     const list = el("div.kvlist");
+    // The machine's public (WAN) IP leads the reachability list. On a full
+    // tunnel VPN this is the VPN's exit address.
+    const wan = detail.wan_ip;
+    if (wan) {
+      list.append(wan.available
+        ? kv("Public IP (WAN)", wan.ip, { mono: true, state: "ok" })
+        : kv("Public IP (WAN)", "unavailable", { state: "info" }));
+    }
     for (const [key, label] of probes) {
       const probe = connectivity[key];
       if (!probe) continue;
@@ -211,8 +219,12 @@ export function createNetwork() {
       detail.vpn?.active
         ? el("div.hint", {
             style: { marginTop: "8px" },
-            html: `${icons.info}<div><strong>VPN active:</strong>
-              ${fmt.esc((detail.vpn.adapters || []).join(", "))}</div>`,
+            html: `${icons.info}<div><strong>VPN active:</strong> ${fmt.esc(
+              (detail.vpn.interfaces || []).map((v) => `${v.type} (${v.name})`)
+                .join(", ") || (detail.vpn.adapters || []).join(", "))} — ${
+              detail.vpn.full_tunnel
+                ? "<strong>full tunnel</strong>, all traffic exits through the VPN"
+                : "split tunnel, only specific routes use the VPN"}</div>`,
           })
         : null,
     ].filter(Boolean)));
