@@ -1,0 +1,48 @@
+# One-command culprit demo: the host dashboard + one reporting agent.
+#
+#   git clone https://github.com/OlaYZen/culprit.git
+#   git clone https://github.com/OlaYZen/culprit-agent.git    # as a sibling folder
+#   cd culprit
+#   docker compose -f demo/docker-compose.yml up --build
+#   # then open http://localhost:8787   (login: admin / admin)
+#
+# The host enrolls a "demo-agent" on startup and shares its token with the agent
+# over a volume, so there is no manual token step. This is a demo: the agent
+# reports from inside its own container (it still sees the machine's CPU and
+# memory via /proc). For real host monitoring, use the agent repo's
+# docker-compose.yml, which runs it with the host's PID and network namespaces.
+name: culprit-demo
+
+services:
+  host:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "/demo/host-entrypoint.sh"]
+    environment:
+      CULPRIT_HOST: "0.0.0.0"
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./:/demo:ro         # the demo/ folder (this file + host-entrypoint.sh)
+      - demo-token:/shared  # the enrolled agent's token, handed to the agent
+
+  agent:
+    # Build the sibling culprit-agent repo. To pull the published image instead,
+    # comment `build:` and use:  image: ghcr.io/olayzen/culprit-agent:latest
+    build:
+      context: ../../culprit-agent
+    depends_on:
+      - host
+    environment:
+      CULPRIT_HOST: "http://host:8787"
+      CULPRIT_TOKEN_FILE: "/shared/token"
+    volumes:
+      - demo-token:/shared:ro
+      # Show the host distro + Ubuntu Pro rather than the image's Debian base.
+      - /etc/os-release:/etc/os-release:ro
+      - /var/lib/ubuntu-advantage:/var/lib/ubuntu-advantage:ro
+    restart: unless-stopped
+
+volumes:
+  demo-token:
