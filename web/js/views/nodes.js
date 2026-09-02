@@ -108,6 +108,21 @@ export function createNodes() {
 
   /* ── Token reveal (the only time a token is visible) ─────────────────── */
   function showToken(payload, verb) {
+    // A code box + Copy button, reused for the token and each install command.
+    const cmdRow = (text, copyLabel) => el("div", {
+      style: { display: "flex", gap: "8px", alignItems: "center" },
+    }, [
+      el("code.mono", {
+        style: {
+          flex: "1 1 auto", padding: "8px 10px", fontSize: "12px",
+          background: "var(--bg-sunken)", borderRadius: "6px",
+          overflowWrap: "anywhere", userSelect: "all",
+        },
+        text,
+      }),
+      copyButton(text, copyLabel),
+    ]);
+
     const body = el("div", {}, [
       el("div.hint.hint--warn", {
         html: `${icons.warn}<div><strong>Copy this now.</strong> The token is
@@ -115,35 +130,29 @@ export function createNodes() {
           it cannot be displayed again. Losing it means rotating it.</div>`,
       }),
       el("div.subhead", { text: "Token" }),
-      el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [
-        el("code.mono", {
-          style: {
-            flex: "1 1 auto", padding: "8px 10px", fontSize: "12px",
-            background: "var(--bg-sunken)", borderRadius: "6px",
-            overflowWrap: "anywhere", userSelect: "all",
-          },
-          text: payload.token,
-        }),
-        copyButton(payload.token, "Copy token"),
-      ]),
-      el("div.subhead", { text: "Run on the target server" }),
-      el("div", { style: { display: "flex", gap: "8px", alignItems: "center" } }, [
-        el("code.mono", {
-          style: {
-            flex: "1 1 auto", padding: "8px 10px", fontSize: "12px",
-            background: "var(--bg-sunken)", borderRadius: "6px",
-            overflowWrap: "anywhere", userSelect: "all",
-          },
-          text: payload.deploy_command,
-        }),
-        copyButton(payload.deploy_command, "Copy command"),
-      ]),
+      cmdRow(payload.token, "Copy token"),
+
+      // Docker is the featured install: one paste-ready command, this host's
+      // URL and the token already filled in.
+      el("div.subhead", { text: "Docker host — paste and run" }),
+      cmdRow(payload.docker_command, "Copy command"),
+      el("div.faint", {
+        style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.5" },
+        text: "Runs the agent privileged in the host's namespaces (full port "
+            + "attribution) and auto-updates on re-run. Some managed hosts "
+            + "(e.g. TrueNAS SCALE) disallow privileged/host mounts — there, "
+            + "use the native install below.",
+      }),
+
+      el("div.subhead", { text: "Or native (agent.sh bundle)" }),
+      cmdRow(payload.deploy_command, "Copy command"),
       el("div.faint", {
         style: { fontSize: "11px", marginTop: "8px", lineHeight: "1.5" },
         text: "Copy the culprit-agent/ folder to that server and run the "
-            + "command inside it. It saves the config to agent.json; install "
-            + "culprit-agent.service afterwards to keep it running. Adjust the "
-            + "URL if agents reach this host by a different address.",
+            + "command inside it (as root for full attribution). It saves the "
+            + "config to agent.json; install culprit-agent.service afterwards "
+            + "to keep it running. Adjust the URL if agents reach this host by "
+            + "a different address.",
       }),
     ]);
 
@@ -205,6 +214,10 @@ export function createNodes() {
       const status = revoked ? tag("revoked", "crit")
         : node.online ? tag("online", "ok")
         : tag("offline", "warn");
+
+      // Badge a containerised agent (Docker); native agents get no label.
+      const isDocker = node.container === "docker"
+        || node.container === "containerd";
 
       const actions = el("div", {
         style: { display: "flex", gap: "5px", justifyContent: "flex-end" },
@@ -270,7 +283,14 @@ export function createNodes() {
       actions.append(remove);
 
       tbody.append(el("tr", {}, [
-        el("td", {}, [el("div.strong", { text: node.name })]),
+        el("td", {}, [
+          el("div", {
+            style: { display: "flex", gap: "6px", alignItems: "center" },
+          }, [
+            el("div.strong", { text: node.name }),
+            ...(isDocker ? [tag("Docker", "info")] : []),
+          ]),
+        ]),
         el("td", {}, [status]),
         el("td.faint", { text: node.hostname || fmt.dash }),
         el("td.mono.faint", {
