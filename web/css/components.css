@@ -58,6 +58,10 @@
 
 /* ── Metric card ───────────────────────────────────────────────────────── */
 .metric { position: relative; }
+/* A metric card with no data source to show at all (e.g. the Graphics card on a
+   node with no GPU) is hidden entirely rather than left as a dead "unavailable"
+   tile; the auto-fit grid reflows the rest. Explicit so it beats .panel's display. */
+.metric[hidden] { display: none; }
 .metric__top {
   display: flex;
   align-items: flex-start;
