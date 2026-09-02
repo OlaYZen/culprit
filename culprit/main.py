@@ -382,20 +382,42 @@ def _valid_agent_name(name: str) -> str | None:
     return None
 
 
-def _deploy_command(request: Request, token: str) -> str:
-    # The address and runner command are both configurable in Settings. When
-    # `deploy_host` is blank the host is inferred from how the browser reached
-    # the dashboard (usually the same address an agent can reach); a bare
-    # host/host:port is given an http:// scheme. `agent_command` defaults to
-    # ./agent.sh and can be, e.g., "sudo ./agent.sh".
+def _deploy_base(request: Request) -> str:
+    # The address an agent should report to. Configurable in Settings; when
+    # `deploy_host` is blank it is inferred from how the browser reached the
+    # dashboard (usually the same address an agent can reach). A bare
+    # host/host:port is given an http:// scheme.
     cfg = config_module.get()
     base = (cfg.deploy_host or "").strip()
     if not base:
         base = f"{request.url.scheme}://{request.url.hostname}:{request.url.port or 8787}"
     elif "://" not in base:
         base = f"http://{base}"
-    command = (cfg.agent_command or "").strip() or "./agent.sh"
-    return f"{command} {base} {token}"
+    return base
+
+
+def _deploy_command(request: Request, token: str) -> str:
+    # `agent_command` defaults to ./agent.sh and can be, e.g., "sudo ./agent.sh".
+    command = (config_module.get().agent_command or "").strip() or "./agent.sh"
+    return f"{command} {_deploy_base(request)} {token}"
+
+
+def _docker_command(request: Request, token: str) -> str:
+    # The privileged `docker run` installer with this host's URL and the agent's
+    # token filled in -- the exact one-liner the agent README documents, so an
+    # operator can paste it straight onto a Docker host. Single line on purpose.
+    base = _deploy_base(request)
+    return (
+        "docker run -d --name culprit-agent --restart unless-stopped --pull always"
+        " --privileged --pid host --network host"
+        f" -e CULPRIT_HOST={base} -e CULPRIT_TOKEN={token}"
+        " -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro"
+        " -v /etc/os-release:/etc/os-release:ro"
+        " -v /var/lib/ubuntu-advantage:/var/lib/ubuntu-advantage:ro"
+        " -v /var/log/journal:/var/log/journal:ro -v /etc/machine-id:/etc/machine-id:ro"
+        " -v /run/systemd:/run/systemd:ro -v /run/dbus:/run/dbus:ro"
+        " ghcr.io/olayzen/culprit-agent:latest"
+    )
 
 
 @app.post("/api/agents", summary="Enroll an agent; returns its token ONCE")
@@ -419,6 +441,7 @@ async def api_agent_create(
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name, "token": token,
             "deploy_command": _deploy_command(request, token),
+            "docker_command": _docker_command(request, token),
             "note": "this token is shown once; only its hash is stored"}
 
 
@@ -434,6 +457,7 @@ async def api_agent_rotate(name: str, request: Request) -> dict[str, Any]:
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name, "token": token,
             "deploy_command": _deploy_command(request, token),
+            "docker_command": _docker_command(request, token),
             "note": "the previous token stopped working the moment this one "
                     "was minted; update the agent's config"}
 

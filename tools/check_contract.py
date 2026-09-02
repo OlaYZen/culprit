@@ -213,7 +213,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "/api/nodes": [
             "nodes[].name", "nodes[].online", "nodes[].enabled",
             "nodes[].last_seen", "nodes[].last_addr", "nodes[].hostname",
-            "nodes[].agent_version",
+            "nodes[].agent_version", "nodes[].container",
         ],
     },
     "trends": {

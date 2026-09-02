@@ -172,7 +172,7 @@ class NodeRegistry:
             meta = live.get(name) or {
                 "name": name, "online": False, "last_seen": agent.get("last_seen"),
                 "report_interval": None, "agent_version": None,
-                "hostname": None, "os": None,
+                "hostname": None, "os": None, "container": None,
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -198,6 +198,9 @@ class NodeRegistry:
             "agent_version": node.agent_version,
             "hostname": system.get("hostname"),
             "os": (system.get("os") or {}).get("product"),
+            # "docker"/"lxc"/... when the agent runs in a container, else None.
+            # The Nodes view badges only containerised agents.
+            "container": system.get("container"),
             "severity": (node.snapshot.get("diagnosis") or {}).get("severity"),
         }
 
