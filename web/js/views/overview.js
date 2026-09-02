@@ -496,6 +496,11 @@ export function createOverview() {
     setFact(nodes.mem, 3, fmt.bytes(mem.cached));
 
     // ── GPU
+    // No usable GPU telemetry → hide the card entirely rather than leave a dead
+    // "unavailable" tile (a headless server, a virtual/BMC display, or an NVIDIA
+    // card the container can't reach). The auto-fit grid reflows the rest; the
+    // card reappears the moment a backend reports (e.g. after `--gpus all`).
+    nodes.gpu.node.hidden = gpu.available === false;
     if (gpu.available === false) {
       setMetric(nodes.gpu, null, "none");
       nodes.gpu.aside.replaceChildren(el("div.faint", { text: "unavailable" }));
