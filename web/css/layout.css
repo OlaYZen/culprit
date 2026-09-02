@@ -344,18 +344,6 @@
 @keyframes toastin  { from { opacity: 0; transform: translateY(-8px); } }
 @keyframes toastout { to   { opacity: 0; transform: translateY(-8px); } }
 
-/* ── Narrow layout ─────────────────────────────────────────────────────── */
-@media (max-width: 860px) {
-  :root { --sidebar-w: 56px; }
-  .sidebar__heading,
-  .navitem > span:not([class]),
-  .navitem__count,
-  .sidebar__vitals { display: none; }
-  .navitem { justify-content: center; padding: 8px; }
-  .titlebar__identity { display: none; }
-}
-
-@media (max-width: 620px) {
-  .segmented__label { display: none; }
-  .switch__text { display: none; }
-}
+/* Narrow / mobile layout lives in mobile.css: below its breakpoint the sidebar
+   is replaced by a bottom tab bar + a "More" sheet, so the old icon-rail rules
+   that used to sit here would only conflict. */
