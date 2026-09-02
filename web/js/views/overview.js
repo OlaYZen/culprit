@@ -61,6 +61,32 @@ function coreGridShape(n, width, height) {
   return best;
 }
 
+// Friendly names for Ubuntu Pro services (the raw ids are terse).
+const PRO_LABELS = {
+  "esm-infra": "ESM Infra", "esm-apps": "ESM Apps", "livepatch": "Livepatch",
+  "fips": "FIPS", "fips-updates": "FIPS Updates", "fips-preview": "FIPS Preview",
+  "usg": "USG", "cis": "CIS", "realtime-kernel": "Realtime Kernel",
+  "landscape": "Landscape", "ros": "ROS ESM", "ros-updates": "ROS Updates",
+  "anbox-cloud": "Anbox Cloud", "cc-eal": "CC-EAL",
+};
+const proLabel = (name) => PRO_LABELS[name] || name;
+
+// The pro client's `origin` field: "free" is Canonical's free personal plan.
+const PRO_ORIGIN = { free: "free personal" };
+const proOrigin = (origin) => PRO_ORIGIN[origin] || origin;
+
+/** One-line Ubuntu Pro summary for the identity panel. */
+function proSummary(pro) {
+  if (!pro.available) return pro.reason || "client not available";
+  if (!pro.attached) return "not attached";
+  const enabled = (pro.enabled || []).map(proLabel);
+  const services = enabled.length ? enabled.join(", ") : "no services enabled";
+  const origin = pro.origin ? ` (${proOrigin(pro.origin)})` : "";
+  const expiry = (!pro.perpetual && fmt.isNum(pro.expires_epoch))
+    ? ` · expires ${fmt.dayTime(pro.expires_epoch)}` : "";
+  return `attached${origin} · ${services}${expiry}`;
+}
+
 export function createOverview() {
   const root = el("div.view", { dataset: { view: "overview" } });
   const charts = {};
@@ -640,9 +666,13 @@ export function createOverview() {
     const gpus = system.gpus || [];
 
     const access = system.access || {};
+    // Ubuntu Pro row appears only when the payload carries it (Ubuntu only).
+    const pro = system.ubuntu_pro;
     render(nodes.identity, el("div.kvlist", {}, [
       kv("Name", system.hostname || fmt.dash),
       kv("Operating system", os.product || "Linux"),
+      ...(pro ? [kv("Ubuntu Pro", proSummary(pro),
+        { state: pro.attached ? "ok" : null })] : []),
       kv("Kernel", os.build_full || fmt.dash, { mono: true }),
       kv("Model", `${machine.manufacturer || ""} ${machine.model || ""}`.trim() || fmt.dash),
       kv("Processor", cpu.name || fmt.dash),

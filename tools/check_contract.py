@@ -63,6 +63,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "system.machine.bios_version", "system.virtualization",
             "system.container", "system.psi_available", "system.access.journal.ok",
             "system.user",
+            # Ubuntu-only; absent (and OPTIONAL) on other distros.
+            "system.ubuntu_pro.available", "system.ubuntu_pro.attached",
+            "system.ubuntu_pro.enabled",
         ],
         "/api/fleet": [
             "nodes[].name", "nodes[].online", "nodes[].severity",
@@ -245,6 +248,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
 
 # Paths allowed to be absent because the machine legitimately may not have them.
 OPTIONAL = {
+    "system.ubuntu_pro.available",    # only on Ubuntu
+    "system.ubuntu_pro.attached",
+    "system.ubuntu_pro.enabled",
     "volumes.media[].serial",         # lsblk hides serials for virtual disks
     "system.machine.bios_version",
     "sessions.timeline[].end_inferred",
