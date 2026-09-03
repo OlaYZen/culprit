@@ -99,7 +99,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="culprit",
+    title="Culprit",
     description="Live Linux health, process and event monitoring.",
     version="2.0.1",
     lifespan=lifespan,
