@@ -325,6 +325,12 @@
 .input svg { width: 14px; height: 14px; color: var(--fg-3); flex: 0 0 auto; }
 .input input { border: 0; background: none; outline: none; min-width: 0; width: 100%; font-size: var(--fs-s); }
 .input input::placeholder { color: var(--fg-3); }
+.input--area { height: auto; padding: 6px 9px; align-items: stretch; }
+.input textarea {
+  border: 0; background: none; outline: none; width: 100%; min-height: 64px; resize: vertical;
+  font-family: var(--mono); font-size: var(--fs-s); line-height: 1.5; color: inherit;
+}
+.input textarea::placeholder { color: var(--fg-3); }
 .input--search { min-width: 220px; }
 .input__clear { display: grid; place-items: center; color: var(--fg-3); }
 .input__clear:hover { color: var(--fg-1); }

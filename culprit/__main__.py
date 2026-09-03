@@ -25,6 +25,7 @@ import sys
 import time
 
 from . import config as config_module
+from . import trust
 
 
 def _env_int(name: str) -> int | None:
@@ -167,6 +168,16 @@ def _serve(args: argparse.Namespace) -> int:
     if args.no_browser:
         os.environ["CULPRIT_NO_BROWSER"] = "1"
 
+    if args.trust_proxy:
+        try:
+            trust.parse_proxies(trust.split_entries(args.trust_proxy))
+        except ValueError as exc:
+            print(f"error: --trust-proxy: {exc}", file=sys.stderr)
+            return 1
+        # Read by the app per request (culprit.trust.runtime_proxies) and
+        # merged with the saved list; never written to config.json.
+        os.environ[trust.ENV_PROXIES] = args.trust_proxy
+
     uvicorn.run(
         "culprit.main:app",
         host=host,
@@ -180,11 +191,12 @@ def _serve(args: argparse.Namespace) -> int:
         access_log=False,
         # No need to advertise the server software on every response.
         server_header=False,
-        # uvicorn trusts X-Forwarded-For from loopback by default. Without a
-        # proxy that lets any local client pick its own address for the login
-        # limiter, so it is off unless a proxy is declared with --trust-proxy.
-        proxy_headers=bool(args.trust_proxy),
-        forwarded_allow_ips=args.trust_proxy or None,
+        # uvicorn would trust X-Forwarded-For from loopback by default, which
+        # lets any local client pick the address the login limiter keys on.
+        # Off for good: culprit.trust does the job in the app, against the
+        # saved proxy list plus --trust-proxy, and refuses undeclared proxies
+        # instead of silently ignoring their headers.
+        proxy_headers=False,
     )
     return 0
 
@@ -204,12 +216,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="TLS certificate; enables https")
     parser.add_argument("--ssl-keyfile", default=None,
                         help="TLS private key")
-    parser.add_argument("--trust-proxy", default=os.environ.get("CULPRIT_TRUST_PROXY"),
+    parser.add_argument("--trust-proxy", default=os.environ.get(trust.ENV_PROXIES),
                         metavar="IPS",
-                        help="comma-separated proxy addresses whose X-Forwarded-For "
-                             "is trusted (e.g. 127.0.0.1 for a TLS proxy on this "
-                             "host); off by default so clients cannot spoof the "
-                             "address the login limiter keys on")
+                        help="comma-separated proxy addresses or CIDR ranges whose "
+                             "forwarding headers are honoured for this run, on top "
+                             "of Settings > Network trust (e.g. 127.0.0.1 for a "
+                             "TLS proxy on this host). Reverse proxies are refused "
+                             "until declared; this is the bootstrap for a host "
+                             "only reachable through one")
     parser.add_argument("--log-level", default="info",
                         choices=("critical", "error", "warning", "info", "debug"))
     subparsers = parser.add_subparsers(dest="command")

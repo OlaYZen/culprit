@@ -20,6 +20,9 @@ every property the security design promises:
 * startup safety: default user creation and the exposed-without-users refusal
 * config patches: locked fields and out-of-range values are rejected
 * the gate: which paths are open, session-gated, or agent-gated
+* network trust: forwarding headers are refused from an undeclared peer and
+  honoured (right-most untrusted hop) from a declared proxy; the Host
+  allow-list, wildcards, loopback always; list entries are validated
 
     .venv/bin/python tools/check_auth.py           # ~2 s, exit 1 on any failure
     .venv/bin/python tools/check_auth.py -v        # print every assertion
@@ -386,7 +389,110 @@ def test_config(r: Runner) -> None:
     r.check("default bind is loopback",
             config_module.Config().host in ("127.0.0.1", "localhost", "::1"))
     r.check("public config drops db_path", "db_path" not in _public_config_keys())
-    r.summary("config patches", "locked fields, ranges, types; defaults bind loopback")
+    r.check("trusted_proxies: bad entry rejected",
+            any("not an IP" in e for e in errors({"trusted_proxies": "10.0.0.1, gateway"})))
+    r.check("trusted_hosts: port rejected", bool(errors({"trusted_hosts": ["dash:8787"]})))
+    r.check("trusted_hosts: bad wildcard rejected", bool(errors({"trusted_hosts": ["*."]})))
+    r.check("trusted lists: non-text rejected", bool(errors({"trusted_hosts": [1, 2]})))
+    cfg, errs = config_module.update({"trusted_proxies": "127.0.0.1\n10.0.0.0/8, [::1]",
+                                      "trusted_hosts": ["Dash.Example.COM.", "*.lan", "[::1]"]},
+                                     persist=False)
+    r.check("trusted lists: accepted and normalised", not errs
+            and cfg.trusted_proxies == ["127.0.0.1", "10.0.0.0/8", "::1"]
+            and cfg.trusted_hosts == ["dash.example.com", "*.lan", "::1"],
+            f"{errs} {cfg.trusted_proxies} {cfg.trusted_hosts}")
+    config_module.update({"trusted_proxies": [], "trusted_hosts": []}, persist=False)
+    r.check("default: no trusted proxies", config_module.Config().trusted_proxies == [])
+    r.check("default: Host check off", config_module.Config().trusted_hosts == [])
+    r.summary("config patches", "locked fields, ranges, types, trust lists; defaults bind loopback")
+
+
+def test_trust(r: Runner) -> None:
+    from culprit import trust
+    r.section("network trust")
+    os.environ.pop(trust.ENV_PROXIES, None)
+    none = trust.policy([], [])
+    direct = trust.resolve("192.168.1.9", {"host": "dash.lan:8787"}, none)
+    r.check("direct request passes", direct.refusal is None and direct.client == "192.168.1.9"
+            and direct.host == "dash.lan" and not direct.via_proxy)
+    for name, value in (("x-forwarded-for", "10.9.9.9"), ("forwarded", "for=10.9.9.9"),
+                        ("x-real-ip", "10.9.9.9"), ("x-forwarded-host", "evil.example"),
+                        ("x-forwarded-proto", "https"), ("x-forwarded-prefix", "/x"),
+                        ("cf-connecting-ip", "10.9.9.9"), ("true-client-ip", "10.9.9.9")):
+        a = trust.resolve("192.168.1.9", {"host": "dash.lan", name: value}, none)
+        r.check(f"{name} from an undeclared peer refused",
+                a.reason == "untrusted_proxy" and a.client == "192.168.1.9", str(a))
+    r.check("refused even from loopback", trust.resolve(
+        "127.0.0.1", {"host": "localhost", "x-forwarded-for": "10.9.9.9"}, none).reason == "untrusted_proxy")
+    r.check("unknown peer refused", trust.resolve(
+        None, {"host": "x", "x-forwarded-for": "10.9.9.9"}, none).reason == "untrusted_proxy")
+
+    pol = trust.policy(["127.0.0.1", "10.0.0.0/8", "::1"], [])
+    a = trust.resolve("127.0.0.1", {"host": "127.0.0.1:8787", "x-forwarded-for": "203.0.113.5",
+                                     "x-forwarded-proto": "https", "x-forwarded-host": "dash.example.com:443"}, pol)
+    r.check("declared proxy: client, scheme and host taken from the headers",
+            a.refusal is None and a.via_proxy and a.client == "203.0.113.5"
+            and a.scheme == "https" and a.host == "dash.example.com", str(a))
+    a = trust.resolve("10.1.2.3", {"host": "h", "x-forwarded-for": "1.1.1.1, 203.0.113.5, 10.0.0.7"}, pol)
+    r.check("chain: right-most untrusted hop is the client (spoofed left part ignored)",
+            a.client == "203.0.113.5", a.client)
+    a = trust.resolve("10.1.2.3", {"host": "h", "x-forwarded-for": "10.0.0.7"}, pol)
+    r.check("chain of only trusted hops: the proxy itself", a.client == "10.0.0.7", a.client)
+    a = trust.resolve("10.1.2.3", {"host": "h", "x-forwarded-for": "not-an-ip"}, pol)
+    r.check("garbage from a trusted proxy: falls back to the peer", a.client == "10.1.2.3", a.client)
+    a = trust.resolve("10.1.2.3", {"host": "h", "forwarded": 'for="[2001:db8::1]:4711";proto=https, for=10.0.0.9'}, pol)
+    r.check("RFC 7239 Forwarded parsed (quoted, bracketed, port)",
+            a.client == "2001:db8::1" and a.scheme == "https", str(a))
+    a = trust.resolve("10.1.2.3", {"host": "h", "x-forwarded-proto": "ftp"}, pol)
+    r.check("unknown forwarded proto ignored", a.scheme == "http")
+    a = trust.resolve("::ffff:127.0.0.1", {"host": "h", "x-real-ip": "203.0.113.9"}, pol)
+    r.check("IPv4-mapped IPv6 peer matches a v4 entry", a.client == "203.0.113.9", str(a))
+    a = trust.resolve("10.1.2.3", {"host": "h"}, pol)
+    r.check("declared proxy without headers: plain, not via_proxy",
+            a.refusal is None and not a.via_proxy and a.client == "10.1.2.3")
+    r.check("only address headers count, not Via",
+            trust.resolve("1.2.3.4", {"host": "h", "via": "1.1 x"}, none).refusal is None)
+
+    hosts = trust.policy([], ["dash.example.com", "*.lan", "192.168.1.5", "::1"])
+    for header, ok in (("dash.example.com", True), ("DASH.example.com:8787", True),
+                       ("dash.example.com.", True), ("a.lan", True), ("x.y.lan", True),
+                       ("lan", False), ("evil.example", False), ("192.168.1.5:8787", True),
+                       ("192.168.1.6", False), ("[::1]:8787", True), ("localhost", True),
+                       ("127.0.0.1:8787", True), ("", False), ("dash.example.com.evil", False)):
+        a = trust.resolve("192.168.1.9", {"host": header}, hosts)
+        r.check(f"Host {header!r} -> {'allowed' if ok else 'refused'}",
+                (a.refusal is None) == ok, str(a.refusal))
+    a = trust.resolve("192.168.1.9", {"host": "evil.example"}, hosts)
+    r.check("refusal names the reason", a.reason == "untrusted_host")
+    both = trust.policy(["10.0.0.0/8"], ["dash.example.com"])
+    a = trust.resolve("10.0.0.2", {"host": "10.0.0.1", "x-forwarded-host": "dash.example.com"}, both)
+    r.check("forwarded Host from a declared proxy is the one checked", a.refusal is None, str(a))
+    a = trust.resolve("10.0.0.2", {"host": "dash.example.com", "x-forwarded-host": "evil.example"}, both)
+    r.check("...and a foreign forwarded Host is refused", a.reason == "untrusted_host")
+    r.check("empty host list accepts anything", trust.host_allowed("whatever", []))
+
+    os.environ[trust.ENV_PROXIES] = "172.16.0.1"
+    a = trust.resolve("172.16.0.1", {"host": "h", "x-forwarded-for": "203.0.113.5"}, trust.policy([], []))
+    r.check("--trust-proxy adds to the saved list for this run", a.client == "203.0.113.5", str(a))
+    os.environ.pop(trust.ENV_PROXIES, None)
+    r.check("...and is gone with the variable", trust.resolve(
+        "172.16.0.1", {"host": "h", "x-forwarded-for": "203.0.113.5"}, trust.policy([], [])).refusal is not None)
+
+    r.check("split_entries: string forms", trust.split_entries("a, b\nc  a") == ["a", "b", "c"])
+    r.check("parse_hosts rejects port / space / slash", all(
+        _raises(trust.parse_hosts, [x]) for x in ("dash:80", "a b", "a/b", "-bad.example", "*.")))
+    r.check("parse_proxies rejects names", _raises(trust.parse_proxies, ["gateway"]))
+    r.check("host_of strips port, brackets, case, dot",
+            trust.host_of("[::1]:8787") == "::1" and trust.host_of("Dash.LAN.:80") == "dash.lan")
+    r.summary("network trust", "undeclared proxies refused, declared ones honoured right-to-left, Host list with wildcards + loopback")
+
+
+def _raises(fn, *args):  # type: ignore[no-untyped-def]
+    try:
+        fn(*args)
+    except ValueError:
+        return True
+    return False
 
 
 def _public_config_keys() -> set[str]:
@@ -417,6 +523,7 @@ def main() -> int:
         test_inflate(r)
         test_startup(r, tmp)
         test_config(r)
+        test_trust(r)
     took = time.perf_counter() - started
     print(f"\n{BOLD}summary{RESET}  {r.passed} passed  {len(r.failed)} failed  "
           f"{DIM}({took:.1f}s){RESET}")

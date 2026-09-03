@@ -22,11 +22,12 @@ from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
-                               StreamingResponse)
+from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
+                               RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 from . import config as config_module
+from . import trust
 from .auth import SESSION_COOKIE, Auth, ensure_default_user
 from .db import LOCAL_NODE, History
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
@@ -142,6 +143,22 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
     """
     if auth is None:  # startup race: nothing is served before lifespan runs
         return await call_next(request)
+    # Network trust first: who the peer is decides whether the forwarding
+    # headers mean anything, and that decides the address the limiter sees.
+    cfg = config_module.get()
+    access = trust.resolve(
+        request.client.host if request.client else None, request.headers,
+        trust.policy(cfg.trusted_proxies, cfg.trusted_hosts),
+        scheme=request.url.scheme)
+    request.state.access = access
+    if access.refusal:
+        return _harden(request, _refuse(request, access))
+    if access.via_proxy:
+        # Rewrite the scope the way uvicorn's own proxy middleware would, so
+        # every handler's request.client / request.url sees the real client
+        # and scheme -- but only after the peer proved to be a declared proxy.
+        request.scope["client"] = (access.client, 0)
+        request.scope["scheme"] = access.scheme
     gate = auth.gate(request.url.path)
     response = None
     if gate == "session":
@@ -157,6 +174,25 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
     if response is None:
         response = await call_next(request)
     return _harden(request, response)
+
+
+_refusals_logged: dict[tuple[str, str], float] = {}
+
+
+def _refuse(request: Request, access: trust.Access):  # noqa: ANN201
+    """400 for a request whose network path is not trusted. Logged once a
+    minute per peer and reason: an undeclared proxy would otherwise write a
+    line per SSE reconnect."""
+    key = (access.peer, access.reason or "")
+    now = time.monotonic()
+    if now - _refusals_logged.get(key, 0.0) > 60.0:
+        _refusals_logged[key] = now
+        log.warning("refused %s %s from %s: %s", request.method,
+                    request.url.path, access.peer, access.refusal)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"detail": access.refusal, "reason": access.reason},
+                            status_code=400)
+    return PlainTextResponse(access.refusal + "\n", status_code=400)
 
 
 def _harden(request: Request, response):  # noqa: ANN001, ANN201
@@ -815,16 +851,54 @@ async def api_history_stats() -> dict[str, Any]:
 
 # ------------------------------------------------------------------- settings
 @app.get("/api/settings")
-async def api_get_settings() -> dict[str, Any]:
+async def api_get_settings(request: Request) -> dict[str, Any]:
     return {
         "config": _public_config(),
         "limits": {k: list(v) for k, v in config_module.LIMITS.items()},
         "editable": sorted(config_module.EDITABLE),
+        "access": _access_info(request),
     }
+
+
+def _access_info(request: Request) -> dict[str, Any]:
+    """How this very request reached the host, so the Network trust panel
+    can say "you are 10.0.0.7 via proxy 127.0.0.1, Host dash.local" and the
+    lock-out guard below has something concrete to point at."""
+    access = getattr(request.state, "access", None)
+    info: dict[str, Any] = access.public() if access else {}
+    info["runtime_proxies"] = trust.runtime_proxies()
+    return info
+
+
+def _lockout_guard(request: Request, patch: dict[str, Any]) -> dict[str, str]:
+    """Would the patched trust lists refuse the connection that is saving
+    them? Then refuse the save instead: a list that cuts off the only session
+    able to correct it is the one mistake here that is not reversible from
+    the browser. Entries that do not parse are left for config.update() to
+    report field by field."""
+    access = getattr(request.state, "access", None)
+    if access is None:
+        return {}
+    cfg = config_module.get()
+    try:
+        proxies = trust.split_entries(patch.get("trusted_proxies", cfg.trusted_proxies))
+        hosts = trust.split_entries(patch.get("trusted_hosts", cfg.trusted_hosts))
+        trust.parse_proxies(proxies)
+        trust.parse_hosts(hosts)
+    except ValueError:
+        return {}
+    again = trust.resolve(access.peer, request.headers, trust.policy(proxies, hosts),
+                          scheme=request.url.scheme)
+    if not again.refusal:
+        return {}
+    field = "trusted_hosts" if again.reason == "untrusted_host" else "trusted_proxies"
+    return {field: f"not saved: this would refuse your own connection ({again.refusal}). "
+                   "Include it, or save from a connection that stays allowed."}
 
 
 @app.put("/api/settings")
 async def api_put_settings(
+    request: Request,
     patch: dict[str, Any] = Body(...),
     persist: bool = Query(
         True,
@@ -841,6 +915,14 @@ async def api_put_settings(
     """
     if not isinstance(patch, dict) or not patch:
         raise HTTPException(400, "expected a non-empty object of settings")
+    if "trusted_proxies" in patch or "trusted_hosts" in patch:
+        blocked = _lockout_guard(request, patch)
+        if blocked:
+            return JSONResponse(
+                status_code=422,
+                content={"ok": False, "field_errors": blocked, "errors": [],
+                         "config": _public_config()},
+            )
     cfg, errors = config_module.update(patch, persist=persist)
     if errors:
         field_errors: dict[str, str] = {}
