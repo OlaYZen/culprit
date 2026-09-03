@@ -2,10 +2,10 @@
    Culprit — base: design tokens, reset, typography
 
    The look is an instrument panel, not a card wall: flat surfaces separated by
-   hairline rules, one restrained accent, and status colours that are muted
-   enough to live on screen all day. Dark is the default and is deliberately
-   low-saturation — greys are neutral (no blue cast) and every status hue sits
-   well below full chroma so the one thing that is actually red still reads.
+   hairline rules and one accent. The chrome is quiet (greys with a faint cool
+   cast, no boxes inside boxes) so that the colour that IS there — status,
+   metric hues, the accent — can be vivid and still read as signal rather than
+   decoration. Dark is the default.
 
    Every colour, size and duration is a token; nothing downstream hard-codes a
    value, which is also what lets the canvas charts follow the theme toggle.
@@ -14,47 +14,53 @@
 :root,
 :root[data-theme="dark"] {
   /* Surfaces: ground → chrome → surface → raised → pressed. Steps are small
-     on purpose; hierarchy comes from rules and type, not from stacking boxes. */
-  --bg:       #141517;
-  --bg-1:     #18191c;
-  --bg-2:     #1c1d21;
-  --bg-3:     #222327;
-  --bg-4:     #2a2b30;
+     on purpose; hierarchy comes from rules and type, not from stacking boxes.
+     The greys carry a faint cool cast so the panel reads as a colour, not as
+     a print-out. */
+  --bg:       #121419;
+  --bg-1:     #16191f;
+  --bg-2:     #1a1d24;
+  --bg-3:     #21252d;
+  --bg-4:     #2a2f38;
 
-  --line:     #26272c;
-  --line-2:   #33343a;
+  --line:     #262a33;
+  --line-2:   #353b47;
 
-  --fg:       #cfd0d4;
-  --fg-1:     #eeeef0;
-  --fg-2:     #8b8d94;
-  --fg-3:     #5f6167;
+  --fg:       #d2d6de;
+  --fg-1:     #f0f2f5;
+  --fg-2:     #8d94a1;
+  --fg-3:     #626a77;
 
-  /* One accent, a desaturated steel blue. It marks the active nav item, the
-     focus ring and primary buttons — and nothing else. */
-  --accent:    #8a9db8;
-  --accent-1:  #a6b5cb;
-  --accent-bg: rgba(138, 157, 184, 0.13);
-  --on-accent: #101114;
+  /* One accent, a clear blue. It marks the active nav item, the focus ring
+     and primary buttons — and nothing else. */
+  --accent:    #4f8ef7;
+  --accent-1:  #7eaefc;
+  --accent-bg: rgba( 79, 142, 247, 0.16);
+  --on-accent: #0b1220;
 
-  /* Status, ordered by severity. Each has a soft tint for backgrounds. */
-  --ok:        #7ea98a;  --ok-bg:   rgba(126, 169, 138, 0.13);
-  --info:      #7f98b8;  --info-bg: rgba(127, 152, 184, 0.13);
-  --warn:      #c1a15f;  --warn-bg: rgba(193, 161,  95, 0.13);
-  --high:      #c08a5f;  --high-bg: rgba(192, 138,  95, 0.13);
-  --crit:      #c06c6c;  --crit-bg: rgba(192, 108, 108, 0.14);
+  /* Status, ordered by severity. Each has a soft tint for backgrounds.
+     Vivid on purpose: a status colour has to be recognisable from across the
+     room, and on a dark ground a saturated mid-light hue does that without
+     glare. */
+  --ok:        #4ade80;  --ok-bg:   rgba( 74, 222, 128, 0.16);
+  --info:      #60a5fa;  --info-bg: rgba( 96, 165, 250, 0.16);
+  --warn:      #fbbf24;  --warn-bg: rgba(251, 191,  36, 0.16);
+  --high:      #fb923c;  --high-bg: rgba(251, 146,  60, 0.16);
+  --crit:      #f87171;  --crit-bg: rgba(248, 113, 113, 0.18);
 
-  /* Metric hues for charts and meters — distinct at small sizes, all muted. */
-  --m-cpu:   #7f98b8;
-  --m-mem:   #9d8fbb;
-  --m-gpu:   #7dab9d;
-  --m-disk:  #b9a27a;
-  --m-down:  #7eadb3;
-  --m-up:    #b98ea5;
-  --m-queue: #c08a5f;
+  /* Metric hues for charts and meters — distinct at small sizes, spaced
+     around the wheel so two series on one chart never share a family. */
+  --m-cpu:   #60a5fa;
+  --m-mem:   #a78bfa;
+  --m-gpu:   #2dd4bf;
+  --m-disk:  #facc15;
+  --m-down:  #22d3ee;
+  --m-up:    #f472b6;
+  --m-queue: #fb923c;
 
-  --grid-line:         rgba(255, 255, 255, 0.05);
-  --chart-fill-top:    0.20;
-  --chart-fill-bottom: 0.01;
+  --grid-line:         rgba(255, 255, 255, 0.06);
+  --chart-fill-top:    0.24;
+  --chart-fill-bottom: 0.02;
 
   --shadow:  0 10px 34px rgba(0, 0, 0, 0.5);
   --scrim:   rgba(0, 0, 0, 0.55);
@@ -63,42 +69,44 @@
 }
 
 :root[data-theme="light"] {
-  --bg:       #f2f2f0;
-  --bg-1:     #e9e9e6;
-  --bg-2:     #fafaf9;
-  --bg-3:     #f1f1ef;
-  --bg-4:     #e5e5e2;
+  --bg:       #f3f4f7;
+  --bg-1:     #e9ebf0;
+  --bg-2:     #fbfbfd;
+  --bg-3:     #f1f2f6;
+  --bg-4:     #e4e6ec;
 
-  --line:     #dadad6;
-  --line-2:   #c5c5c0;
+  --line:     #d8dbe3;
+  --line-2:   #c3c7d2;
 
-  --fg:       #2a2b2f;
-  --fg-1:     #121317;
-  --fg-2:     #63656c;
-  --fg-3:     #8e9097;
+  --fg:       #262a33;
+  --fg-1:     #10131a;
+  --fg-2:     #5e6572;
+  --fg-3:     #8a919e;
 
-  --accent:    #4d6485;
-  --accent-1:  #3f5573;
-  --accent-bg: rgba(77, 100, 133, 0.10);
+  --accent:    #1f6feb;
+  --accent-1:  #1a5fcc;
+  --accent-bg: rgba( 31, 111, 235, 0.12);
   --on-accent: #ffffff;
 
-  --ok:        #35784b;  --ok-bg:   rgba( 53, 120,  75, 0.10);
-  --info:      #35618f;  --info-bg: rgba( 53,  97, 143, 0.10);
-  --warn:      #8a6b22;  --warn-bg: rgba(138, 107,  34, 0.11);
-  --high:      #995a26;  --high-bg: rgba(153,  90,  38, 0.10);
-  --crit:      #a64444;  --crit-bg: rgba(166,  68,  68, 0.10);
+  /* Light needs darker, fully saturated hues: they are used as text on a
+     near-white ground, so every one stays at or above 4.5:1 on --bg-2. */
+  --ok:        #15843f;  --ok-bg:   rgba( 21, 132,  63, 0.12);
+  --info:      #1f6feb;  --info-bg: rgba( 31, 111, 235, 0.12);
+  --warn:      #a16207;  --warn-bg: rgba(161,  98,   7, 0.13);
+  --high:      #c2410c;  --high-bg: rgba(194,  65,  12, 0.12);
+  --crit:      #dc2626;  --crit-bg: rgba(220,  38,  38, 0.12);
 
-  --m-cpu:   #3d63a0;
-  --m-mem:   #6a54a6;
-  --m-gpu:   #2f8a72;
-  --m-disk:  #977a2c;
-  --m-down:  #2b8a95;
-  --m-up:    #9d4c7a;
-  --m-queue: #ad5e2a;
+  --m-cpu:   #2563eb;
+  --m-mem:   #7c3aed;
+  --m-gpu:   #0d9488;
+  --m-disk:  #ca8a04;
+  --m-down:  #0891b2;
+  --m-up:    #db2777;
+  --m-queue: #ea580c;
 
-  --grid-line:         rgba(0, 0, 0, 0.06);
-  --chart-fill-top:    0.16;
-  --chart-fill-bottom: 0.01;
+  --grid-line:         rgba(0, 0, 0, 0.07);
+  --chart-fill-top:    0.20;
+  --chart-fill-bottom: 0.02;
 
   --shadow:  0 10px 34px rgba(20, 20, 30, 0.16);
   --scrim:   rgba(20, 20, 30, 0.35);

@@ -692,8 +692,13 @@
 .node__row { display: grid; grid-template-columns: 30px 1fr 42px; align-items: center; gap: 8px; margin-bottom: 5px; font-size: var(--fs-xs); }
 .node__row .label { font-size: 10px; }
 .node__row .num { text-align: right; }
-.node__foot { margin-top: 6px; font-size: 10.5px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.node__alert { margin-top: 6px; font-size: var(--fs-xs); color: var(--crit); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* One fixed-height line: network rates left, leading offender right. The
+   rates keep their width (they are the point of the line); the offender
+   takes what is left and truncates, so a long process name can never wrap
+   the footer onto a second line and change the card's height. */
+.node__foot { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 10.5px; line-height: 1.5; color: var(--fg-3); }
+.node__net { flex: 0 0 auto; white-space: nowrap; }
+.node__alert { flex: 0 1 auto; min-width: 0; text-align: right; color: var(--crit); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .node__alert--info { color: var(--fg-2); }
 .node__dead { font-size: var(--fs-xs); color: var(--fg-3); padding: 6px 0 2px; }
 
