@@ -3,6 +3,9 @@ contact_links:
   - name: Report a security vulnerability (private)
     url: https://github.com/OlaYZen/culprit/security/advisories/new
     about: Please report security issues privately, never in a public issue. See SECURITY.md.
+  - name: Ask a question or share your setup (Discussions)
+    url: https://github.com/OlaYZen/culprit/discussions
+    about: Q&A, ideas, and show-and-tell for the community.
   - name: Read the documentation
     url: https://github.com/OlaYZen/culprit#readme
     about: Install, agents, security, the privilege matrix, and known limits are all in the README.
