@@ -260,7 +260,8 @@ web/                   no-build ES-module frontend
     js/ui.js           primitives: dialog, banner, combobox, skeleton slots …
     js/views/          one module per view; shared.js = section/figure/pill/…
 tools/                 smoketest, module-graph check, API-contract check,
-                       security audit (static) + security scanner (live)
+                       security audit (static), security scanner (live),
+                       auth-logic tests (offline), ingest/token-bypass fuzzer (live)
 docs/                  ux-rules.md (uxgoodpatterns UI reference)
 install.sh  run.sh  culprit.service          # host artifacts
 ```
@@ -302,13 +303,31 @@ from a host checkout after shared-code changes.
                                            # for the authenticated half; --active
                                            # also proves the agent-token lifecycle
                                            # and the login lockout (locks the
-                                           # scanning address out for 5 minutes)
+                                           # scanning address out for 5 minutes);
+                                           # --throwaway-user makes a temporary
+                                           # login via the CLI and also proves a
+                                           # password change revokes sessions;
+                                           # --only/--skip pick groups, --json for CI
+.venv/bin/python tools/check_auth.py       # offline, ~7s: the credential logic
+                                           # against a throwaway database --
+                                           # hashing, session tamper/expiry/
+                                           # revocation, the limiter, agent tokens,
+                                           # command scoping, bounded gzip, the
+                                           # startup refusal, config patches
+.venv/bin/python tools/check_ingest.py --throwaway-user
+                                           # live: every forged/misplaced token
+                                           # shape must 401, then 45 hostile reports
+                                           # from a valid token must neither 5xx the
+                                           # ingest nor break the node list, fleet,
+                                           # node snapshot or SSE frame for anyone
 ```
 
-Run the security pair before exposing a host to a network, and again through
+Run the security tools before exposing a host to a network, and again through
 any TLS proxy you put in front of it — the header checks prove what the proxy
-actually forwards. A CRIT or HIGH finding fails the exit status so it can gate
-a deploy.
+actually forwards, and if the proxy sits on the same machine start the host
+with `--trust-proxy 127.0.0.1` so the login limiter sees real client
+addresses. A CRIT or HIGH finding fails the exit status so it can gate a
+deploy.
 
 The smoketest asserts process coverage against `len(psutil.pids())` — ground
 truth, not assumption. Destructive actions are refused for PID 1, kernel

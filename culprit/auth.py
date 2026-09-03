@@ -84,20 +84,23 @@ class Auth:
     # --------------------------------------------------------------- sessions
     _KEY_TTL = 5.0
 
-    def _key(self, username: str) -> bytes:
+    def _key(self, username: str) -> bytes | None:
         """Per-user signing key: the install secret mixed with the user's
-        stored password hash. Cached briefly (this runs per request) and only
-        for users that exist, so a flood of forged cookies for made-up names
-        cannot grow the cache -- their lookup is one indexed SELECT."""
+        stored password hash, or None when no such user exists -- a cookie
+        can never verify for a name that is not in the table. Cached briefly
+        (this runs per request) and only for users that exist, so a flood of
+        forged cookies for made-up names cannot grow the cache -- their
+        lookup is one indexed SELECT."""
         now = time.monotonic()
         cached = self._keys.get(username)
         if cached and now - cached[0] < self._KEY_TTL:
             return cached[1]
         stored = self.history.password_hash(username)
-        key = hmac.new(self.secret(), (stored or "").encode(), "sha256").digest()
-        if stored:
-            with self._lock:
-                self._keys[username] = (now, key)
+        if not stored:
+            return None
+        key = hmac.new(self.secret(), stored.encode(), "sha256").digest()
+        with self._lock:
+            self._keys[username] = (now, key)
         return key
 
     def invalidate(self, username: str) -> None:
@@ -107,9 +110,12 @@ class Auth:
             self._keys.pop(username, None)
 
     def issue_session(self, username: str) -> str:
+        key = self._key(username)
+        if key is None:
+            raise ValueError(f"no such user: {username!r}")
         expiry = int(time.time() + SESSION_HOURS * 3600)
         body = f"{username}:{expiry}"
-        sig = hmac.new(self._key(username), body.encode(), "sha256").hexdigest()
+        sig = hmac.new(key, body.encode(), "sha256").hexdigest()
         return f"{body}:{sig}"
 
     def verify_session(self, cookie: str | None) -> str | None:
@@ -121,8 +127,11 @@ class Auth:
             expiry = int(expiry_text)
         except ValueError:
             return None
+        key = self._key(username)
+        if key is None:
+            return None
         body = f"{username}:{expiry}"
-        expected = hmac.new(self._key(username), body.encode(), "sha256").hexdigest()
+        expected = hmac.new(key, body.encode(), "sha256").hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
         if expiry < time.time():

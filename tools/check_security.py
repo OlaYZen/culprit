@@ -27,6 +27,12 @@ checks that do mutate: enrolling (and deleting) a throwaway agent to prove the
 token lifecycle end to end, and deliberately exhausting the login rate limit,
 which locks the scanner's own address out for five minutes.
 
+`--throwaway-user` creates a temporary dashboard user through the CLI (so the
+server must share this checkout's database), which also unlocks the one check
+that must change a password: that changing it revokes every other session.
+`--only`/`--skip` select groups (surface, gate, browser, credentials,
+robustness, authenticated, active); `--json` writes the findings for CI.
+
 Exit status is 1 when any CRIT or HIGH finding exists (`--strict` promotes
 WARN), so it can gate a deploy.
 """
@@ -39,8 +45,11 @@ import http.client
 import json
 import re
 import secrets
+import socket
 import ssl
+import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +84,11 @@ LOGIN_FAILURE_BUDGET = 8       # auth.Auth._MAX_ATTEMPTS
 SAFE_LOGIN_FAILURES = 5        # what safe mode may spend of that budget
 
 UNAUTH_API_BODY = {"detail": "authentication required"}
+GROUPS = ("surface", "gate", "browser", "credentials", "robustness",
+          "authenticated", "active")
+# Strings that mean an exception or an internal path escaped into a response.
+LEAK_HIGH = ("Traceback (most recent call last)", 'File "/', "Exception:")
+LEAK_WARN = ("sqlite3.", "psutil.", "uvicorn", "starlette", str(ROOT))
 # What a leaked credential row actually looks like (the *name* password_hash
 # appears legitimately when a probe string is echoed back).
 HASH_VALUE_RE = re.compile(r"scrypt\$[0-9a-f]{16,}\$[0-9a-f]{32,}")
@@ -112,6 +126,9 @@ class Http:
         self.host = parts.hostname or "127.0.0.1"
         self.port = parts.port or (443 if self.scheme == "https" else 80)
         self.timeout = timeout
+        # Called with (method, target, Resp) for every response, so one place
+        # can scan every body for a leaked traceback or path.
+        self.observer = None
         self.context: ssl.SSLContext | None = None
         if self.scheme == "https":
             self.context = ssl.create_default_context()
@@ -151,10 +168,39 @@ class Http:
             raw = conn.getresponse()
             # Streaming responses (SSE) never end: read a bounded slice.
             data = raw.read(max_read)
-            return Resp(raw.status, {k.lower(): v for k, v in raw.getheaders()},
+            resp = Resp(raw.status, {k.lower(): v for k, v in raw.getheaders()},
                         data)
+            if self.observer is not None:
+                self.observer(method, target, resp)
+            return resp
         finally:
             conn.close()
+
+    def raw(self, data: bytes, timeout: float = 6.0) -> tuple[int | None, bytes]:
+        """Send bytes verbatim -- HTTP/1.0, a smuggling-shaped request, a
+        header the client library would refuse to build -- and return the
+        status (None if the server just closed the connection) and body."""
+        sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        try:
+            if self.context is not None:
+                sock = self.context.wrap_socket(sock, server_hostname=self.host)
+            sock.sendall(data)
+            chunks: list[bytes] = []
+            total = 0
+            try:
+                while total < 65536:
+                    part = sock.recv(16384)
+                    if not part:
+                        break
+                    chunks.append(part)
+                    total += len(part)
+            except (socket.timeout, OSError):
+                pass
+        finally:
+            sock.close()
+        body = b"".join(chunks)
+        m = re.match(rb"HTTP/\d\.\d (\d{3})", body)
+        return (int(m.group(1)) if m else None), body
 
 
 @dataclass
@@ -171,9 +217,12 @@ LEVEL_ORDER = ["PASS", "INFO", "WARN", "HIGH", "CRIT"]
 class Report:
     findings: list[Finding] = field(default_factory=list)
     login_failures: int = 0
+    quiet: bool = False
 
     def add(self, level: str, check: str, detail: str) -> None:
         self.findings.append(Finding(level, check, detail))
+        if self.quiet and level == "PASS":
+            return
         colour = {"CRIT": RED + BOLD, "HIGH": RED, "WARN": YELLOW,
                   "INFO": BLUE, "PASS": GREEN}[level]
         print(f"  {colour}{level:<4}{RESET} {check}: {detail}")
@@ -195,6 +244,9 @@ class Ctx:
     auth_enabled: bool | None = None
     routes: list[tuple[str, frozenset[str]]] = field(default_factory=list)
     agent_names: list[str] = field(default_factory=list)
+    # (name, password) of the user --throwaway-user created; only that user
+    # is subjected to the checks that change a password.
+    throwaway: tuple[str, str] | None = None
 
 
 def section(title: str) -> None:
@@ -540,6 +592,9 @@ def login(ctx: Ctx, username: str, password: str, count: bool = True) -> Resp:
                      json_body={"username": username, "password": password})
     if count and r.status == 401:
         ctx.report.login_failures += 1
+    elif r.status == 200:
+        # Mirror the server: a successful login clears the address's count.
+        ctx.report.login_failures = 0
     return r
 
 
@@ -689,6 +744,9 @@ def do_login(ctx: Ctx) -> None:
         problems.append("Path missing")
     if ctx.http.scheme == "https" and "secure" not in flags:
         problems.append("Secure missing on https")
+    if "max-age=" not in flags and "expires=" not in flags:
+        problems.append("no Max-Age (a session cookie that never expires "
+                        "client-side)")
     if problems:
         ctx.report.add("HIGH", "cookie", "; ".join(problems))
     else:
@@ -1049,8 +1107,9 @@ def check_rate_limit(ctx: Ctx) -> None:
         return
     rep = ctx.report
     user = ctx.args.user or "admin"
-    remaining = LOGIN_FAILURE_BUDGET - rep.login_failures + 1
-    for _ in range(max(remaining, 1)):
+    # The budget accounting above is best-effort (any successful login in
+    # between reset it); spend the whole budget again to be sure.
+    for _ in range(LOGIN_FAILURE_BUDGET):
         login(ctx, user, "wrong-" + secrets.token_hex(4))
     r = login(ctx, user, "wrong-" + secrets.token_hex(4))
     if r.status != 401:
@@ -1069,6 +1128,467 @@ def check_rate_limit(ctx: Ctx) -> None:
                 "prove it also blocks the correct one")
 
 
+def install_leak_observer(ctx: Ctx) -> None:
+    """Every response the scan receives is scanned for an escaped exception
+    or an internal path -- the one class of leak that can appear anywhere."""
+    seen: set[tuple[str, str]] = set()
+
+    def observe(method: str, target: str, resp: Resp) -> None:
+        if len(resp.body) > 1_000_000:
+            return
+        text = resp.text
+        for marker in LEAK_HIGH:
+            if marker in text and (target, marker) not in seen:
+                seen.add((target, marker))
+                ctx.report.add("HIGH", "error-leak",
+                               f"{method} {target} -> {resp.status}: body contains "
+                               f"{marker!r} (an exception escaped to the client)")
+        if resp.status >= 400:
+            for marker in LEAK_WARN:
+                if marker in text and (target, marker) not in seen:
+                    seen.add((target, marker))
+                    ctx.report.add("WARN", "error-leak",
+                                   f"{method} {target} -> {resp.status}: error "
+                                   f"body mentions {marker!r}")
+    ctx.http.observer = observe
+
+
+def check_robustness(ctx: Ctx) -> None:
+    """Malformed and abusive requests must get a 4xx (or a closed socket),
+    never a 500, and the server must still answer afterwards. A 500 here is
+    an unhandled exception, which is where tracebacks and denial of service
+    both start."""
+    rep = ctx.report
+    bad = 0
+    probes = 0
+
+    def judge(label: str, status: int | None, ok: tuple[int, ...] = (),
+              authed: bool = False) -> None:
+        nonlocal bad, probes
+        probes += 1
+        if status is None:
+            return  # connection closed: a fine answer to garbage
+        if status >= 500 or (not authed and 200 <= status < 300):
+            bad += 1
+            rep.add("HIGH", "robustness", f"{label} -> {status}")
+        elif ok and status not in ok:
+            rep.add("INFO", "robustness", f"{label} -> {status}")
+
+    for method in ("TRACE", "CONNECT", "PROPFIND", "PURGE", "BREW", "get"):
+        r = safe_req(ctx, method, "/api/snapshot", max_read=65536)
+        judge(f"{method} /api/snapshot", r.status if r else None)
+    status, _ = ctx.http.raw(b"GET /api/snapshot HTTP/1.0\r\n\r\n")
+    judge("HTTP/1.0 without Host", status)
+    status, _ = ctx.http.raw(b"GET /api/snapshot HTTP/1.1\r\n\r\n")
+    judge("HTTP/1.1 without Host", status)
+    status, _ = ctx.http.raw(
+        b"POST /api/login HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+        b"Content-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+    judge("Content-Length + Transfer-Encoding (smuggling shape)", status, (400,))
+    status, _ = ctx.http.raw(
+        b"POST /api/login HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\n\r\n")
+    judge("negative Content-Length", status, (400,))
+    status, _ = ctx.http.raw(b"GET /api/snapshot HTTP/9.9\r\nHost: x\r\n\r\n")
+    judge("HTTP/9.9", status)
+    status, _ = ctx.http.raw(b"\x16\x03\x01\x00\x00garbage\r\n\r\n")
+    judge("TLS bytes on a plain socket" if ctx.http.scheme == "http"
+          else "binary garbage", status)
+    r = safe_req(ctx, "GET", "/api/snapshot?" + "a" * 16384, max_read=65536)
+    judge("16KB query string", r.status if r else None)
+    r = safe_req(ctx, "GET", "/api/" + "a" * 8192, max_read=65536)
+    judge("8KB path", r.status if r else None)
+    r = safe_req(ctx, "GET", "/api/snapshot",
+                 headers={"Cookie": "culprit_session=" + "a" * 65536}, max_read=65536)
+    judge("64KB cookie", r.status if r else None)
+    r = safe_req(ctx, "GET", "/api/snapshot",
+                 headers={f"X-Filler-{i}": "v" * 100 for i in range(300)}, max_read=65536)
+    judge("300 headers", r.status if r else None)
+    for target in ("/api/snap%00shot", "/api/%c0%ae%c0%ae/snapshot", "/api/snapshot%ff",
+                   "/%e2%80%ae/api/snapshot", "/api/snapshot/%2e%2e/%2e%2e/etc/passwd",
+                   "/api/history/series?since=1e999", "/api/history/series?since=NaN",
+                   "/api/history/top?limit=-1", "/api/history/top?limit=99999999999999999999",
+                   "/api/history/processes?ts=abc", "/api/nodes/%ff/snapshot",
+                   "/api/nodes/" + "n" * 4096 + "/snapshot", "/api/processes/-1",
+                   "/api/processes/99999999999999999999", "/api/live?keys=" + "x," * 5000):
+        r = safe_req(ctx, "GET", target, cookie=ctx.cookie, max_read=65536)
+        judge(f"GET {target[:60]}", r.status if r else None, authed=bool(ctx.cookie))
+    # Parser abuse on the one public JSON endpoint. Deep nesting is the
+    # classic: Python's json raises RecursionError, which is not a
+    # ValueError, so an unguarded handler answers 500; a float that JSON
+    # cannot represent (1e400 -> inf, NaN) breaks the 422 serializer when
+    # the error echoes the input. Every body here omits the password field,
+    # so even a fully parsed one stops at validation and never spends a
+    # login attempt.
+    json_ct = {"Content-Type": "application/json"}
+    for label, body in (
+        ("100k-deep JSON array", b"[" * 100_000 + b"]" * 100_000),
+        ("100k-deep JSON object", b'{"a":' * 100_000 + b"1" + b"}" * 100_000),
+        ("1e400 number", b'{"username": 1e400}'),
+        ("NaN literal", b'{"username": NaN}'),
+        ("Infinity literal", b'{"username": -Infinity}'),
+        ("invalid UTF-8", b'{"username": "\xff\xfe"}'),
+        ("BOM prefix", b'\xef\xbb\xbf{"username": "a"}'),
+        ("duplicate keys", b'{"username": "a", "username": "b"}'),
+        ("2MB string", b'{"username": "' + b"a" * 2_000_000 + b'"}'),
+        ("null byte in string", b'{"username": "a\\u0000b"}'),
+        ("surrogate escape", b'{"username": "\\ud800"}'),
+    ):
+        r = safe_req(ctx, "POST", "/api/login", body=body, headers=json_ct,
+                     max_read=65536, timeout=20.0)
+        if r is not None and r.status == 401:
+            rep.login_failures += 1
+        judge(f"login with {label}", r.status if r else None)
+    for encoding in ("gzip", "br", "deflate", "chunked, gzip"):
+        r = safe_req(ctx, "POST", "/api/login", body=b'{"username":"a"}',
+                     headers={**json_ct, "Content-Encoding": encoding}, max_read=65536)
+        if r is not None and r.status == 401:
+            rep.login_failures += 1
+        judge(f"login with Content-Encoding {encoding}", r.status if r else None)
+    # A 422 must describe the problem without echoing what was sent: the
+    # default FastAPI body repeats the input, which for this endpoint is a
+    # password.
+    marker = "sectest-" + secrets.token_hex(4)
+    r = safe_req(ctx, "POST", "/api/login", headers=json_ct,
+                 body=json.dumps({"username": 5, "password": marker}).encode())
+    if r is not None and marker in r.text:
+        bad += 1
+        rep.add("WARN", "robustness", "the 422 validation response echoes the "
+                "submitted password back (it ends up in proxy and browser logs)")
+
+    # A burst of concurrent requests: nothing may 500 and nothing may be
+    # answered to the wrong client (a snapshot leaking through a shared
+    # response object would show as a 200 on an unauthenticated request).
+    n = max(1, int(ctx.args.concurrency))
+    statuses: list[int | None] = []
+    lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        pick = i % 3
+        try:
+            if pick == 0:
+                r = ctx.http.req("GET", "/api/snapshot", max_read=65536)
+            elif pick == 1:
+                r = ctx.http.req("GET", "/api/auth", max_read=65536)
+            else:
+                r = ctx.http.req("POST", "/api/login", body=b"{", headers=json_ct,
+                                 max_read=65536)
+            status: int | None = r.status
+            if pick == 0 and 200 <= r.status < 300:
+                status = 299  # marker: data without a session
+        except (OSError, http.client.HTTPException):
+            status = None
+        with lock:
+            statuses.append(status)
+
+    threads = [threading.Thread(target=worker, args=(i,), daemon=True)
+               for i in range(n * 3)]
+    started = time.perf_counter()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    took = time.perf_counter() - started
+    dropped = statuses.count(None)
+    errors = sum(1 for st in statuses if st and st >= 500)
+    leaked = statuses.count(299)
+    if leaked:
+        bad += 1
+        rep.add("CRIT", "robustness", f"{leaked} unauthenticated requests got data during a burst")
+    if errors:
+        bad += 1
+        rep.add("HIGH", "robustness", f"{errors} responses >= 500 during a {len(threads)}-way burst")
+    if dropped:
+        rep.add("WARN", "robustness", f"{dropped} of {len(threads)} connections dropped "
+                f"during the burst ({took:.1f}s)")
+    probes += len(threads)
+    try:
+        alive = ctx.http.req("GET", "/api/healthz", timeout=4.0).status == 200
+    except OSError:
+        alive = False
+    if not alive:
+        bad += 1
+        rep.add("CRIT", "robustness", "server stopped answering after the probes")
+    if not bad:
+        rep.ok("robustness", f"{probes} malformed/abusive requests: no 5xx, no data, "
+               f"still answering ({len(threads)}-way burst in {took:.1f}s)")
+
+
+def check_session_hygiene(ctx: Ctx) -> None:
+    """The cookie is the only credential a browser holds; how it is handled
+    on ordinary requests matters as much as how it is issued."""
+    if not ctx.cookie:
+        return
+    rep = ctx.report
+    bad = 0
+    r = ctx.http.req("GET", "/api/auth", cookie=ctx.cookie)
+    if r.header("set-cookie"):
+        bad += 1
+        rep.add("WARN", "session", "cookie re-issued on a plain GET: every request "
+                "extends the session, so an idle stolen cookie never expires")
+    try:
+        expiry = int(ctx.cookie.rsplit(":", 2)[1])
+        days = (expiry - time.time()) / 86400
+        if days > 30:
+            bad += 1
+            rep.add("WARN", "session", f"session lifetime is {days:.0f} days")
+        else:
+            rep.add("INFO", "session", f"session lifetime {days:.1f} days, "
+                    "stateless (revoked by a password change)")
+    except (ValueError, IndexError):
+        pass
+    # The cookie must be accepted only as a cookie.
+    for label, target, headers in (
+        ("query parameter", "/api/auth?culprit_session=" + quote(ctx.cookie, safe=""), {}),
+        ("bearer header", "/api/auth", {"Authorization": "Bearer " + ctx.cookie}),
+        ("custom header", "/api/auth", {"X-Session": ctx.cookie}),
+        ("basic auth", "/api/auth", {"Authorization": "Basic " + __import__("base64").b64encode(
+            f"{ctx.args.user or 'x'}:{ctx.args.password or 'x'}".encode()).decode()}),
+    ):
+        r = ctx.http.req("GET", target, headers=headers)
+        if (r.json() or {}).get("username"):
+            bad += 1
+            rep.add("HIGH", "session", f"session accepted via {label}")
+    # Two cookies in one header: the first must win deterministically and a
+    # forged second must not be consulted.
+    r = ctx.http.req("GET", "/api/auth", headers={
+        "Cookie": f"culprit_session=forged; culprit_session={ctx.cookie}"})
+    r2 = ctx.http.req("GET", "/api/auth", headers={
+        "Cookie": f"culprit_session={ctx.cookie}; culprit_session=forged"})
+    if (r.json() or {}).get("username") and (r2.json() or {}).get("username"):
+        rep.add("INFO", "session", "duplicate cookie names: either wins "
+                "(harmless -- both are checked against the HMAC)")
+    if not bad:
+        rep.ok("session", "cookie not re-issued per request, bounded lifetime, "
+               "accepted only as a cookie")
+
+
+def check_password_revocation(ctx: Ctx) -> None:
+    """--throwaway-user only: change the password and prove that every other
+    session for the account dies at once, while the changing session is
+    re-issued."""
+    if not (ctx.throwaway and ctx.cookie):
+        return
+    rep = ctx.report
+    user, old_pw = ctx.throwaway
+    second = login(ctx, user, old_pw, count=False)
+    m = re.search(r"culprit_session=([^;]+)", second.header("set-cookie") or "")
+    if not m:
+        rep.add("WARN", "revocation", "could not open a second session; skipped")
+        return
+    cookie2 = m.group(1)
+    new_pw = "sectest-" + secrets.token_urlsafe(12)
+    r = ctx.http.req("POST", "/api/account/password",
+                     json_body={"current_password": old_pw, "new_password": new_pw},
+                     cookie=ctx.cookie)
+    if r.status != 200:
+        rep.add("WARN", "revocation", f"password change -> {r.status}; skipped")
+        return
+    m = re.search(r"culprit_session=([^;]+)", r.header("set-cookie") or "")
+    reissued = m.group(1) if m else None
+    bad = 0
+    for label, cookie in (("the changing session's old cookie", ctx.cookie),
+                          ("a second session", cookie2)):
+        if (ctx.http.req("GET", "/api/auth", cookie=cookie).json() or {}).get("username"):
+            bad += 1
+            rep.add("HIGH", "revocation", f"{label} still valid after a password change")
+    if not reissued:
+        bad += 1
+        rep.add("HIGH", "revocation", "no fresh cookie issued with the password change "
+                "(the user who changed it is logged out)")
+    elif (ctx.http.req("GET", "/api/auth", cookie=reissued).json() or {}).get("username") != user:
+        bad += 1
+        rep.add("HIGH", "revocation", "the re-issued cookie does not verify")
+    if login(ctx, user, old_pw).status == 200:
+        bad += 1
+        rep.add("CRIT", "revocation", "the OLD password still signs in")
+    if login(ctx, user, new_pw, count=False).status != 200:
+        bad += 1
+        rep.add("HIGH", "revocation", "the new password does not sign in")
+    ctx.cookie = reissued or ctx.cookie
+    ctx.throwaway = (user, new_pw)
+    ctx.args.password = new_pw
+    if not bad:
+        rep.ok("revocation", "password change killed both other sessions and the "
+               "old password; the changing session was re-issued")
+
+
+def check_limiter_bypass(ctx: Ctx) -> None:
+    """--active, after the lockout: forwarding headers must not give an
+    attacker a fresh address. (If a trusted proxy sets these, run the scan
+    through the proxy -- the app itself must never honour them.)"""
+    if not (ctx.args.active and ctx.args.password and ctx.auth_enabled):
+        return
+    user = ctx.args.user or "admin"
+    plain = login(ctx, user, ctx.args.password, count=False)
+    if plain.status == 200:
+        ctx.report.add("INFO", "rate-limit", "no lockout in effect; bypass check skipped")
+        return
+    bad = 0
+    for headers in ({"X-Forwarded-For": "10.9.9.9"}, {"X-Real-IP": "10.9.9.9"},
+                    {"Forwarded": "for=10.9.9.9"},
+                    {"X-Forwarded-For": "127.0.0.1, 10.9.9.9"},
+                    {"X-Client-IP": "10.9.9.9"}, {"True-Client-IP": "10.9.9.9"},
+                    {"CF-Connecting-IP": "10.9.9.9"}):
+        r = ctx.http.req("POST", "/api/login", headers=headers,
+                         json_body={"username": user, "password": ctx.args.password})
+        if r.status == 200:
+            bad += 1
+            ctx.report.add("HIGH", "rate-limit",
+                           f"lockout bypassed with {headers} -- the server trusts "
+                           "forwarding headers from this address (uvicorn "
+                           "proxy_headers); only a real proxy should be trusted "
+                           "(see --trust-proxy)")
+    if not bad:
+        ctx.report.ok("rate-limit", "lockout holds against 7 forwarding-header spoofs")
+
+
+def check_agent_isolation(ctx: Ctx) -> None:
+    """--active: two throwaway agents. One must not be able to write the
+    other's snapshot or answer the other's pending command -- the properties
+    that keep one compromised machine from lying about the rest."""
+    if not (ctx.args.active and ctx.cookie):
+        return
+    rep = ctx.report
+    c = ctx.cookie
+    names = [f"sectest-a-{secrets.token_hex(2)}", f"sectest-b-{secrets.token_hex(2)}"]
+    tokens: dict[str, str] = {}
+    try:
+        for name in names:
+            r = ctx.http.req("POST", "/api/agents", json_body={"name": name}, cookie=c)
+            token = (r.json() or {}).get("token")
+            if not token:
+                rep.add("WARN", "agent-isolation", f"could not enrol {name}: {r.status}")
+                return
+            tokens[name] = token
+        a, b = names
+
+        def report(name: str, payload: dict[str, Any]) -> Resp:
+            body = json.dumps({"agent": {"report_interval": 1, "version": "sectest"},
+                               "snapshot": {"system": {"hostname": name}}, **payload})
+            return ctx.http.req("POST", "/api/agents/report", body=body.encode(),
+                                headers={"Content-Type": "application/json",
+                                         "Authorization": f"Bearer {tokens[name]}"},
+                                timeout=30.0)
+        report(a, {})
+        report(b, {})
+        bad = 0
+        # 1. A claims to be B in its payload.
+        report(a, {"agent": {"name": b, "report_interval": 1},
+                   "snapshot": {"system": {"hostname": "spoofed-by-a"}}})
+        snap_b = ctx.http.req("GET", f"/api/nodes/{b}/snapshot", cookie=c).json() or {}
+        if ((snap_b.get("system") or {}).get("hostname")) == "spoofed-by-a":
+            bad += 1
+            rep.add("CRIT", "agent-isolation", "an agent overwrote another node's "
+                    "snapshot by naming it in the payload")
+        # 2. Command results: A answers a command queued for B.
+        results: dict[str, Resp | None] = {}
+
+        def fetch(node: str, key: str) -> None:
+            results[key] = safe_req(ctx, "GET", f"/api/nodes/{node}/processes/1",
+                                    cookie=c, timeout=40.0)
+        ta = threading.Thread(target=fetch, args=(a, "a"), daemon=True)
+        ta.start()
+        time.sleep(0.6)
+        reply = report(a, {}).json() or {}
+        cmds = [cmd for cmd in reply.get("commands") or [] if cmd.get("action") == "process_detail"]
+        if not cmds:
+            rep.add("WARN", "agent-isolation", "the queued command never reached the "
+                    "agent; cannot test result scoping")
+            ta.join(45)
+            return
+        own_id = str(cmds[0]["id"])
+        seq = int(own_id.rsplit(":", 1)[1])
+        report(a, {"command_results": [{"id": own_id, "ok": True,
+                                        "result": {"pid": 1, "name": "sectest-own"}}]})
+        ta.join(45)
+        ra = results.get("a")
+        if not (ra and ra.status == 200 and "sectest-own" in ra.text):
+            rep.add("WARN", "agent-isolation", "the legitimate command path did not "
+                    f"round-trip ({ra.status if ra else 'no answer'}); scoping test "
+                    "is inconclusive")
+        tb = threading.Thread(target=fetch, args=(b, "b"), daemon=True)
+        tb.start()
+        time.sleep(0.6)
+        fake = [{"id": f"{b}:{n}", "ok": True,
+                 "result": {"pid": 1, "name": "spoofed-by-a"}}
+                for n in range(max(1, seq - 5), seq + 80)]
+        report(a, {"command_results": fake})
+        time.sleep(0.4)
+        if results.get("b") is not None:
+            bad += 1
+            rep.add("CRIT", "agent-isolation", "agent A resolved a command queued "
+                    "for agent B with a fabricated result")
+        reply_b = report(b, {}).json() or {}
+        report(b, {"command_results": [{"id": cmd["id"], "ok": False, "status": 404,
+                                        "error": "sectest"} for cmd in
+                                       reply_b.get("commands") or []]})
+        tb.join(45)
+        rb = results.get("b")
+        if rb and rb.status == 200 and "spoofed-by-a" in rb.text:
+            bad += 1
+            rep.add("CRIT", "agent-isolation", "the dashboard showed A's fabricated "
+                    "detail as B's")
+        elif not (rb and rb.status == 404):
+            rep.add("INFO", "agent-isolation",
+                    f"B's own answer arrived as {rb.status if rb else 'no answer'}")
+        if not bad:
+            rep.ok("agent-isolation", "payload node names ignored; command results "
+                   "accepted only from the node they were queued for")
+    finally:
+        for name in names:
+            ctx.http.req("DELETE", f"/api/agents/{name}", cookie=c)
+
+
+# ------------------------------------------------------------ throwaway user
+def create_throwaway_user(ctx: Ctx) -> tuple[str, str] | None:
+    """Make a temporary dashboard user through the CLI (same machine, same
+    database as the server), wait for the server's 5s auth cache, and hand
+    back the credentials. Removed again by remove_throwaway_user()."""
+    name = f"sectest-{secrets.token_hex(3)}"
+    password = secrets.token_urlsafe(16)
+    try:
+        subprocess.run([sys.executable, "-m", "culprit", "users", "add", name],
+                       input=f"{password}\n{password}\n", text=True,
+                       capture_output=True, cwd=ROOT, check=True, timeout=30)
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        ctx.report.add("WARN", "throwaway-user", f"could not create a user via the CLI: "
+                       f"{getattr(exc, 'stderr', exc)!s:.120}")
+        return None
+    deadline = time.time() + 12
+    while time.time() < deadline:
+        r = login(ctx, name, password, count=False)
+        if r.status == 200:
+            ctx.report.add("INFO", "throwaway-user",
+                           f"created {name!r} for this scan (removed at the end)")
+            return name, password
+        time.sleep(1.0)
+    ctx.report.add("WARN", "throwaway-user", f"{name!r} was created but cannot sign in "
+                   "-- is the server using the same database as this checkout?")
+    remove_throwaway_user(name)
+    return None
+
+
+def remove_throwaway_user(name: str) -> None:
+    subprocess.run([sys.executable, "-m", "culprit", "users", "remove", name],
+                   capture_output=True, cwd=ROOT, timeout=30)
+
+
+def write_json(path: str, url: str, args: argparse.Namespace, report: Report,
+               result: str) -> None:
+    payload = {
+        "url": url, "mode": "active" if args.active else "safe",
+        "generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "result": result,
+        "counts": {lvl: sum(1 for f in report.findings if f.level == lvl)
+                   for lvl in ("CRIT", "HIGH", "WARN", "INFO", "PASS")},
+        "login_failures_spent": report.login_failures,
+        "findings": [{"level": f.level, "check": f.check, "detail": f.detail}
+                     for f in report.findings],
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2)
+
+
 # ---------------------------------------------------------------------- main
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -1083,16 +1603,46 @@ def main() -> int:
                         help="also run state-changing checks: throwaway agent "
                              "lifecycle, and exhausting the login limiter "
                              "(locks this address out for 5 minutes)")
+    parser.add_argument("--throwaway-user", action="store_true",
+                        help="create a temporary dashboard user via the CLI for "
+                             "the authenticated checks (server must share this "
+                             "checkout's database); enables the password-change "
+                             "revocation check; the user is removed afterwards")
     parser.add_argument("--insecure", action="store_true",
                         help="accept a self-signed certificate")
     parser.add_argument("--strict", action="store_true",
                         help="exit 1 on WARN as well as HIGH/CRIT")
+    parser.add_argument("--only", default="",
+                        help="comma-separated groups to run: " + ", ".join(GROUPS))
+    parser.add_argument("--skip", default="",
+                        help="comma-separated groups to skip")
+    parser.add_argument("--timeout", type=float, default=8.0,
+                        help="per-request timeout in seconds (default 8)")
+    parser.add_argument("--concurrency", type=int, default=8,
+                        help="parallel clients per kind in the burst probe "
+                             "(default 8 -> 24 requests); 0 disables")
+    parser.add_argument("--quiet", action="store_true",
+                        help="print only non-PASS findings")
+    parser.add_argument("--json", metavar="PATH",
+                        help="also write every finding to a JSON file")
     args = parser.parse_args()
     url = args.url or f"http://127.0.0.1:{args.port}"
 
-    http_ = Http(url, args.insecure)
-    report = Report()
+    only = {g for g in args.only.split(",") if g}
+    skip = {g for g in args.skip.split(",") if g}
+    unknown = (only | skip) - set(GROUPS)
+    if unknown:
+        print(f"{RED}unknown group(s) {sorted(unknown)}; choose from "
+              f"{', '.join(GROUPS)}{RESET}")
+        return 2
+
+    def want(group: str) -> bool:
+        return (not only or group in only) and group not in skip
+
+    http_ = Http(url, args.insecure, timeout=args.timeout)
+    report = Report(quiet=args.quiet)
     ctx = Ctx(http_, report, args)
+    install_leak_observer(ctx)
     print(f"{BOLD}culprit security check{RESET} -> {url}"
           f"{'  [active]' if args.active else '  [safe: read-only probes]'}")
     try:
@@ -1105,39 +1655,62 @@ def main() -> int:
     load_routes(ctx)
     check_transport(ctx)
     check_auth_state(ctx)
-    # Sign in first: a successful login clears this address's failure count,
-    # so the unauthenticated probes below start with the full budget.
-    do_login(ctx)
+    if args.throwaway_user and ctx.auth_enabled:
+        ctx.throwaway = create_throwaway_user(ctx)
+        if ctx.throwaway:
+            args.user, args.password = ctx.throwaway
+    try:
+        # Sign in first: a successful login clears this address's failure
+        # count, so the unauthenticated probes below start with the full
+        # budget.
+        do_login(ctx)
 
-    section("Gate")
-    check_route_gate(ctx)
-    check_public_routes(ctx)
-    check_path_bypass(ctx)
-    check_static(ctx)
+        if want("gate"):
+            section("Gate")
+            check_route_gate(ctx)
+            check_public_routes(ctx)
+            check_path_bypass(ctx)
+            check_static(ctx)
 
-    section("Browser-facing")
-    check_headers(ctx)
-    check_cors(ctx)
+        if want("browser"):
+            section("Browser-facing")
+            check_headers(ctx)
+            check_cors(ctx)
 
-    section("Credentials")
-    check_login(ctx)
-    check_session_forgery(ctx)
-    check_agent_ingest_unauth(ctx)
+        if want("credentials"):
+            section("Credentials")
+            check_login(ctx)
+            check_session_forgery(ctx)
+            check_agent_ingest_unauth(ctx)
 
-    if ctx.cookie:
-        section("Authenticated")
-        check_authenticated_reads(ctx)
-        check_injection(ctx)
-        check_authenticated_writes(ctx)
-        check_agent_lifecycle(ctx)
-        check_logout(ctx)
-    else:
-        print(f"\n{DIM}(pass --user/--password for the authenticated checks: "
-              f"secret leakage, injection, write validation){RESET}")
+        if want("robustness"):
+            section("Robustness")
+            check_robustness(ctx)
 
-    if args.active:
-        section("Active")
-        check_rate_limit(ctx)
+        if ctx.cookie and want("authenticated"):
+            section("Authenticated")
+            check_session_hygiene(ctx)
+            check_authenticated_reads(ctx)
+            check_injection(ctx)
+            check_authenticated_writes(ctx)
+            check_password_revocation(ctx)
+            if want("active"):
+                check_agent_lifecycle(ctx)
+                check_agent_isolation(ctx)
+            check_logout(ctx)
+        elif not ctx.cookie:
+            print(f"\n{DIM}(pass --user/--password or --throwaway-user for the "
+                  f"authenticated checks: secret leakage, injection, write "
+                  f"validation, revocation){RESET}")
+
+        if args.active and want("active"):
+            section("Active")
+            check_rate_limit(ctx)
+            check_limiter_bypass(ctx)
+    finally:
+        if ctx.throwaway:
+            remove_throwaway_user(ctx.throwaway[0])
+            report.add("INFO", "throwaway-user", f"removed {ctx.throwaway[0]!r}")
 
     counts = {level: sum(1 for f in report.findings if f.level == level)
               for level in ("CRIT", "HIGH", "WARN", "INFO", "PASS")}
@@ -1145,7 +1718,11 @@ def main() -> int:
         f"{lvl} {n}" for lvl, n in counts.items() if n or lvl in ("CRIT", "HIGH")))
     worst = report.worst()
     failing = worst in ("CRIT", "HIGH") or (args.strict and worst == "WARN")
-    print(f"{RED if failing else GREEN}{'FAIL' if failing else 'OK'}{RESET}")
+    result = "FAIL" if failing else "OK"
+    print(f"{RED if failing else GREEN}{result}{RESET}")
+    if args.json:
+        write_json(args.json, url, args, report, result)
+        print(f"{DIM}findings written to {args.json}{RESET}")
     return 1 if failing else 0
 
 

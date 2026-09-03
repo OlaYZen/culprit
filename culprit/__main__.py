@@ -180,6 +180,11 @@ def _serve(args: argparse.Namespace) -> int:
         access_log=False,
         # No need to advertise the server software on every response.
         server_header=False,
+        # uvicorn trusts X-Forwarded-For from loopback by default. Without a
+        # proxy that lets any local client pick its own address for the login
+        # limiter, so it is off unless a proxy is declared with --trust-proxy.
+        proxy_headers=bool(args.trust_proxy),
+        forwarded_allow_ips=args.trust_proxy or None,
     )
     return 0
 
@@ -199,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="TLS certificate; enables https")
     parser.add_argument("--ssl-keyfile", default=None,
                         help="TLS private key")
+    parser.add_argument("--trust-proxy", default=os.environ.get("CULPRIT_TRUST_PROXY"),
+                        metavar="IPS",
+                        help="comma-separated proxy addresses whose X-Forwarded-For "
+                             "is trusted (e.g. 127.0.0.1 for a TLS proxy on this "
+                             "host); off by default so clients cannot spoof the "
+                             "address the login limiter keys on")
     parser.add_argument("--log-level", default="info",
                         choices=("critical", "error", "warning", "info", "debug"))
     subparsers = parser.add_subparsers(dest="command")

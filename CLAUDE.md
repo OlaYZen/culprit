@@ -46,10 +46,20 @@ cd culprit-agent && ./agent.sh <host-url> <token>   # bootstrap venv (psutil onl
                                            # CORS, injection, write validation. Safe by default;
                                            # --active adds a throwaway-agent lifecycle and exhausts
                                            # the login limiter (locks that address out for 5 min)
+.venv/bin/python tools/check_auth.py       # offline (~7s): the credential logic against a temp DB --
+                                           # scrypt, session HMAC/tamper/expiry/revocation, limiter,
+                                           # agent tokens, command-result scoping, bounded gzip,
+                                           # startup refusal, config patches, the gate table
+.venv/bin/python tools/check_ingest.py --throwaway-user   # live: 94 token-bypass shapes must all
+                                           # 401; then 45 hostile reports from a valid token (wrong
+                                           # types, NaN, JSON bombs, overflow ints, huge strings,
+                                           # absurd intervals, made-up sections) must never 5xx the
+                                           # ingest or break /api/nodes, /api/fleet, the node
+                                           # snapshot or the SSE frame; plus the two-agent isolation
 .venv/bin/python -m pyflakes culprit tools # lint
 ```
 
-Security invariants the two security tools pin down (a change to any of them must update the tool in the same commit): the public path allowlist in `auth.py` is mirrored as `EXPECTED_PUBLIC_*` in both tools; every response carries nosniff / `X-Frame-Options: DENY` / `frame-ancestors 'none'` / `Referrer-Policy`, and `/api/*` is `Cache-Control: no-store` (`_harden` in `main.py`); gzip reports are inflated through a bounded `decompressobj` (`_inflate`), never `gzip.decompress`; session signatures mix in the user's password hash (`Auth._key`) so a password change revokes every session; the unknown-user login path costs exactly one scrypt (`_dummy_hash`) so latency cannot enumerate usernames. Values interpolated into `innerHTML`/`html:` templates in `web/js` must go through `esc()` or be a static `icons.*` string — the audit fails otherwise.
+Security invariants the two security tools pin down (a change to any of them must update the tool in the same commit): the public path allowlist in `auth.py` is mirrored as `EXPECTED_PUBLIC_*` in both tools; every response carries nosniff / `X-Frame-Options: DENY` / `frame-ancestors 'none'` / `Referrer-Policy`, and `/api/*` is `Cache-Control: no-store` (`_harden` in `main.py`); gzip reports are inflated through a bounded `decompressobj` (`_inflate`), never `gzip.decompress`; session signatures mix in the user's password hash (`Auth._key`) so a password change revokes every session; the unknown-user login path costs exactly one scrypt (`_dummy_hash`) so latency cannot enumerate usernames. Values interpolated into `innerHTML`/`html:` templates in `web/js` must go through `esc()` or be a static `icons.*` string — the audit fails otherwise. Reports are sanitised before they touch node state (`sanitise_report` in `nodes.py`: allow-listed sections, dict-typed, depth-capped, ints that fit a float, no lone surrogates, intervals clamped to 0.2–60s) and NaN/Infinity is refused at parse; a bad report gets a 400, never a 500, and a poisoned snapshot is impossible by construction. `CommandBroker.resolve` accepts a result only from the node the command was queued for. A session can only verify for a user that exists (`Auth._key` returns None otherwise). uvicorn's proxy-header trust is off unless `--trust-proxy` names the proxy, so a client cannot pick its own address for the login limiter. The 422 handler never echoes the input.
 
 There is **no unit-test suite** by design: what breaks here is environmental (a sysfs path a distro moved, a kernel without PSI, a gated journal), which only the real machine reveals — hence `smoketest.py`. When you add or rename a payload field, update `tools/check_contract.py`'s `CONTRACT` map in the same change or the frontend silently degrades.
 

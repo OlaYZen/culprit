@@ -13,6 +13,11 @@ data/
 *.sqlite
 *.sqlite-*
 
+# TLS material for --ssl-certfile/--ssl-keyfile -- never commit
+*.pem
+*.key
+*.crt
+
 # Python
 __pycache__/
 *.py[cod]

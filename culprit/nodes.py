@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 from typing import Any
@@ -29,6 +30,121 @@ log = logging.getLogger("culprit.nodes")
 MAX_REPORT_BYTES = 8 * 1024 * 1024
 
 _SEVERITY_RANK = {"ok": 0, "info": 1, "warn": 2, "critical": 3}
+
+# What a report may carry. A valid token proves the sender holds a secret,
+# not that its payload is sane -- an agent can be an old version, a fork, or
+# a compromised box. Anything outside this shape is dropped (never 500s, and
+# never lands in the snapshot every viewer receives). tools/check_ingest.py
+# sends the malformed variants and asserts every read endpoint survives.
+DICT_SECTIONS = frozenset({
+    "cpu", "memory", "pressures", "gpu", "disk", "network", "network_detail",
+    "ports", "sync", "process_table", "diagnosis", "services", "system",
+    "volumes", "events", "errors", "timings", "sampler",
+})
+SCALAR_META = frozenset({"warm", "warmup_stage", "server_started_at", "now",
+                         "ts", "elevated"})
+MAX_DEPTH = 24            # a real snapshot is ~6 deep; JSON bombs are thousands
+MAX_META_CHARS = 128      # hostname / os / version as shown in every node list
+INTERVAL_RANGE = (0.2, 60.0)
+
+
+def _finite(value: Any, low: float, high: float) -> float | None:
+    """A float within [low, high], or None for anything else (str, NaN,
+    inf, an int too big for a float)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return min(high, max(low, number))
+
+
+def _short(value: Any, limit: int = MAX_META_CHARS) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if len(value) <= limit else value[:limit - 1] + "\u2026"
+
+
+def _d(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _scrub(root: Any) -> str | None:
+    """Walk one section in place, iteratively (so the walk itself cannot be
+    made to recurse): reject if nested deeper than MAX_DEPTH, replace ints
+    that do not fit a float (they break the rollup and json.dumps in JS),
+    and repair strings carrying lone surrogates (SQLite refuses them).
+    Returns a reason to drop the section, or None."""
+    stack: list[tuple[Any, int]] = [(root, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_DEPTH:
+            return f"nested deeper than {MAX_DEPTH}"
+        items: Any = node.items() if isinstance(node, dict) else \
+            enumerate(node) if isinstance(node, list) else ()
+        for key, value in items:
+            if isinstance(value, (dict, list)):
+                stack.append((value, depth + 1))
+            elif isinstance(value, bool):
+                continue
+            elif isinstance(value, int) and abs(value) > 2 ** 63:
+                node[key] = None
+            elif isinstance(value, str):
+                try:
+                    value.encode("utf-8")
+                except UnicodeEncodeError:
+                    node[key] = value.encode("utf-8", "replace").decode("utf-8")
+    return None
+
+
+def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any],
+                                                     list[str]]:
+    """(agent meta, snapshot sections, dropped) from a raw report.
+
+    Raises ValueError when the envelope itself is not a report. Sections of
+    the wrong type, unknown names and over-deep structures are dropped and
+    named in `dropped` so the agent can log it, rather than refused with
+    a 400 that would leave the node permanently stale.
+    """
+    raw_meta = payload.get("agent")
+    if raw_meta is not None and not isinstance(raw_meta, dict):
+        raise ValueError("'agent' must be an object")
+    raw_snapshot = payload.get("snapshot")
+    if raw_snapshot is not None and not isinstance(raw_snapshot, dict):
+        raise ValueError("'snapshot' must be an object")
+    meta = _d(raw_meta)
+    clean_meta = {
+        "report_interval": _finite(meta.get("report_interval"), *INTERVAL_RANGE),
+        "interval_fast": _finite(meta.get("interval_fast"), *INTERVAL_RANGE),
+        "version": _short(meta.get("version"), 64),
+        "name_claim": _short(meta.get("name"), 64),
+    }
+    snapshot: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in _d(raw_snapshot).items():
+        if not isinstance(key, str):
+            continue
+        if key in DICT_SECTIONS:
+            if not isinstance(value, dict):
+                dropped.append(f"{key}: expected an object")
+                continue
+            reason = _scrub(value)
+            if reason:
+                dropped.append(f"{key}: {reason}")
+                continue
+            snapshot[key] = value
+        elif key in SCALAR_META:
+            if isinstance(value, bool) or isinstance(value, (int, float)) and \
+                    math.isfinite(value) and abs(value) < 2 ** 63:
+                snapshot[key] = value
+            elif isinstance(value, str):
+                snapshot[key] = _short(value)
+            else:
+                dropped.append(f"{key}: expected a scalar")
+        else:
+            dropped.append(f"{key}: unknown section")
+    return clean_meta, snapshot, dropped
 
 
 class _Node:
@@ -70,24 +186,23 @@ class NodeRegistry:
         whether the host already had a snapshot for it (False after a host
         restart -> the agent sends a full one next).
         """
-        meta = payload.get("agent") or {}
-        snapshot = payload.get("snapshot") or {}
+        # Validate everything before touching node state, so a bad report
+        # changes nothing rather than half of something.
+        meta, snapshot, dropped = sanitise_report(payload)
+        if dropped:
+            log.warning("report from %s: dropped %s", name, "; ".join(dropped[:5]))
         now = time.time()
         with self._lock:
             node = self._nodes.setdefault(name, _Node(name))
             known = bool(node.snapshot)
             node.snapshot.update(snapshot)
             node.last_seen = now
-            try:
-                node.report_interval = float(meta.get("report_interval") or 1.0)
-            except (TypeError, ValueError):
-                pass
-            try:
-                if meta.get("interval_fast") is not None:
-                    node.interval_fast = float(meta["interval_fast"])
-            except (TypeError, ValueError):
-                pass
-            node.agent_version = meta.get("version")
+            if meta["report_interval"] is not None:
+                node.report_interval = meta["report_interval"]
+            if meta["interval_fast"] is not None:
+                node.interval_fast = meta["interval_fast"]
+            if meta["version"] is not None:
+                node.agent_version = meta["version"]
             settings = dict(node.settings)
             merged = node.snapshot
 
@@ -103,7 +218,10 @@ class NodeRegistry:
             )
             if everything:
                 self.history.write_events(everything, node=name)
-        return {"known": known, "settings": settings}
+        reply: dict[str, Any] = {"known": known, "settings": settings}
+        if dropped:
+            reply["dropped"] = dropped[:20]
+        return reply
 
     def set_node_settings(self, name: str,
                           patch: dict[str, float]) -> dict[str, float]:
@@ -125,7 +243,7 @@ class NodeRegistry:
         """
         if not self.history.ready:
             return
-        severity = str((snapshot.get("diagnosis") or {}).get("severity") or "ok")
+        severity = str(_d(snapshot.get("diagnosis")).get("severity") or "ok")
         width = max(1, int(self.rollup_seconds))
         bucket = int(now // width) * width
         if node.bucket_ts is not None and bucket != node.bucket_ts:
@@ -185,7 +303,7 @@ class NodeRegistry:
         return out
 
     def _meta(self, node: _Node) -> dict[str, Any]:
-        system = node.snapshot.get("system") or {}
+        system = _d(node.snapshot.get("system"))
         age = time.time() - node.last_seen if node.last_seen else None
         return {
             "name": node.name,
@@ -196,12 +314,14 @@ class NodeRegistry:
             "report_interval": node.report_interval,
             "interval_fast": node.interval_fast,
             "agent_version": node.agent_version,
-            "hostname": system.get("hostname"),
-            "os": (system.get("os") or {}).get("product"),
+            # Clamped: these travel in every node list and every SSE snapshot
+            # frame, so a 2 MB "hostname" would be amplified to every viewer.
+            "hostname": _short(system.get("hostname")),
+            "os": _short(_d(system.get("os")).get("product")),
             # "docker"/"lxc"/... when the agent runs in a container, else None.
             # The Nodes view badges only containerised agents.
-            "container": system.get("container"),
-            "severity": (node.snapshot.get("diagnosis") or {}).get("severity"),
+            "container": _short(system.get("container")),
+            "severity": _short(_d(node.snapshot.get("diagnosis")).get("severity")),
         }
 
     def fleet(self) -> list[dict[str, Any]]:
@@ -276,9 +396,24 @@ class CommandBroker:
         """Hand this agent everything queued for it (called during its report)."""
         return self._pending.pop(node, [])
 
-    def resolve(self, results: list[dict[str, Any]] | None) -> None:
+    def resolve(self, node: str, results: list[dict[str, Any]] | None) -> None:
+        """Deliver results from `node` -- and only for its own commands.
+
+        Ids are `<node>:<seq>` and the sequence is global, so without this
+        check one agent holding a valid token could answer another node's
+        pending command with a fabricated process detail or a fake
+        "terminated" result. tools/check_security.py --active proves the
+        scoping with two throwaway agents.
+        """
+        prefix = f"{node}:"
         for result in results or []:
-            fut = self._futures.pop(str(result.get("id")), None)
+            if not isinstance(result, dict):
+                continue
+            cmd_id = str(result.get("id"))
+            if not cmd_id.startswith(prefix):
+                log.warning("agent %s tried to resolve command %s", node, cmd_id)
+                continue
+            fut = self._futures.pop(cmd_id, None)
             if fut and not fut.done():
                 fut.set_result(result)
 
@@ -294,21 +429,24 @@ def summarise_snapshot(meta: dict[str, Any],
                        snapshot: dict[str, Any]) -> dict[str, Any]:
     """One node's headline numbers. Used for agents and the host alike, so
     the fleet grid renders every card from the same shape."""
-    cpu = snapshot.get("cpu") or {}
-    memory = snapshot.get("memory") or {}
-    disk = (snapshot.get("disk") or {}).get("total") or {}
-    net = (snapshot.get("network") or {}).get("total") or {}
-    diagnosis = snapshot.get("diagnosis") or {}
-    system = snapshot.get("system") or {}
-    offenders = diagnosis.get("offenders") or []
-    top = offenders[0] if offenders else None
+    cpu = _d(snapshot.get("cpu"))
+    memory = _d(snapshot.get("memory"))
+    disk = _d(_d(snapshot.get("disk")).get("total"))
+    net = _d(_d(snapshot.get("network")).get("total"))
+    diagnosis = _d(snapshot.get("diagnosis"))
+    system = _d(snapshot.get("system"))
+    offenders = diagnosis.get("offenders")
+    top = next((o for o in offenders if isinstance(o, dict)), None) \
+        if isinstance(offenders, list) else None
+    findings = diagnosis.get("findings")
     return {
         **meta,
-        "status": diagnosis.get("status"),
-        "severity": diagnosis.get("severity") or meta.get("severity"),
-        "headline": diagnosis.get("headline"),
-        "findings": len(diagnosis.get("findings") or []),
-        "offender": ({"name": top.get("name"), "lag_score": top.get("lag_score")}
+        "status": _short(diagnosis.get("status")),
+        "severity": _short(diagnosis.get("severity")) or meta.get("severity"),
+        "headline": _short(diagnosis.get("headline"), 256),
+        "findings": len(findings) if isinstance(findings, list) else 0,
+        "offender": ({"name": _short(top.get("name")),
+                      "lag_score": _finite(top.get("lag_score"), -1e9, 1e9)}
                      if top else None),
         "cpu": cpu.get("total"),
         "memory": memory.get("percent"),
@@ -317,7 +455,6 @@ def summarise_snapshot(meta: dict[str, Any],
         "net_down": net.get("recv_bytes_sec"),
         "net_up": net.get("sent_bytes_sec"),
         "load_1": cpu.get("load_1"),
-        "process_count": ((snapshot.get("process_table") or {}).get("totals")
-                          or {}).get("count"),
+        "process_count": _d(_d(snapshot.get("process_table")).get("totals")).get("count"),
         "uptime_seconds": system.get("uptime_seconds"),
     }
