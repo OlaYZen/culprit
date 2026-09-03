@@ -378,7 +378,7 @@ def main() -> int:
                 payload = fetch(endpoint)
             except urllib.error.URLError as exc:
                 print(f"{RED}FAIL{RESET} {view}: cannot reach {endpoint} — {exc}")
-                print(f"\n{YELLOW}Is the server running?  ./run.sh --port "
+                print(f"\n{YELLOW}Is the server running?  ./culprit.sh --port "
                       f"{args.port}{RESET}\n")
                 return 1
             for path in paths:
