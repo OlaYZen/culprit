@@ -27,8 +27,13 @@ WorkingDirectory=%h/culprit
 ExecStart=%h/culprit/.venv/bin/python -m culprit --no-browser
 Restart=on-failure
 RestartSec=5
-# The dashboard binds 127.0.0.1 only and has no authentication -- do not
-# loosen this to 0.0.0.0 without putting an authenticating proxy in front.
+# The app cancels its open SSE streams three seconds after SIGTERM (uvicorn's
+# timeout_graceful_shutdown); this is the backstop so a restart can never wait
+# out systemd's default 90 s if that ever regresses.
+TimeoutStopSec=15
+# Binds 127.0.0.1 by default. A user must exist before a network bind is
+# accepted (the host refuses to start exposed without one); set
+# CULPRIT_HOST=0.0.0.0 here or in config.json to reach it from the LAN.
 Environment=CULPRIT_HOST=127.0.0.1
 
 [Install]

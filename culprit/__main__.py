@@ -197,6 +197,13 @@ def _serve(args: argparse.Namespace) -> int:
         # saved proxy list plus --trust-proxy, and refuses undeclared proxies
         # instead of silently ignoring their headers.
         proxy_headers=False,
+        # On SIGTERM uvicorn waits for every open connection to finish its
+        # response before exiting -- forever, by default. The SSE stream is a
+        # response that never finishes, so `systemctl restart` sat there until
+        # the browser tab's stream dropped or systemd's 90s kill fired. Three
+        # seconds is plenty for any real request; the streams are cancelled
+        # and the browser's EventSource reconnects on its own.
+        timeout_graceful_shutdown=3,
     )
     return 0
 
