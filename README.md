@@ -228,53 +228,6 @@ Total: well under 5% of one core, ~65 MB resident.
 
 ---
 
-## Layout
-
-```
-culprit/
-  config.py            defaults + config.json overrides + validation
-  linux.py             /proc, /sys, cgroup, journal, systemctl helpers
-  util.py              rate maths, ring buffer, sustain counters
-  state.py             snapshot store + SSE fan-out
-  db.py                SQLite: history rollups + users + agent tokens
-  auth.py              sessions, password hashing, the request gate
-  nodes.py             host-side registry of agent snapshots + rollups
-  sampler.py           the four sampling loops
-  main.py              FastAPI routes
-  collectors/
-    cpu_mem.py         /proc/stat, meminfo, vmstat, PSI      (fast tier)
-    gpu.py             fdinfo / NVML / amdgpu backend chain  (fast tier)
-    disks.py           diskstats + mountinfo/statvfs         (fast + slow)
-    network.py         rates + config + sockets + probes     (fast + slow)
-    processes.py       direct /proc scan + psutil detail     (proc tier)
-    lag.py             pressures, scoring, findings
-    services.py        systemd units + per-unit cgroup stats (slow tier)
-    ports.py           listening-port map + kill attribution (slow tier)
-    sync.py            sync-client plugins + inotify         (slow tier)
-    events.py          journald, boots, sessions, reboots    (events tier)
-    sysinfo.py         identity, virt/container, privilege map
-web/                   no-build ES-module frontend
-    index.html         shell + a static boot skeleton (painted before any JS)
-    css/               base (tokens) · shell (chrome, grids) · ui (components) · mobile
-    js/stream.js       SSE client + per-node store; js/app.js routing + chrome
-    js/ui.js           primitives: dialog, banner, combobox, skeleton slots …
-    js/views/          one module per view; shared.js = section/figure/pill/…
-tools/                 smoketest, module-graph check, API-contract check,
-                       security audit (static), security scanner (live),
-                       auth-logic tests (offline), ingest/token-bypass fuzzer (live)
-docs/                  ux-rules.md (uxgoodpatterns UI reference)
-install.sh  run.sh  culprit.service          # host artifacts
-```
-
-The report-only agent is a **separate repo** —
-[culprit-agent](https://github.com/olayzen/culprit-agent) — carrying its own
-copy of the runnable package (collectors, sampler, db, state, config, linux,
-util, agent). It is a duplicate of the shared modules above minus the host-only
-`main.py` / `auth.py` / `nodes.py`; that repo's `sync-package.sh` refreshes it
-from a host checkout after shared-code changes.
-
----
-
 ## Verifying it still works
 
 ```
