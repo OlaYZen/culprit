@@ -42,9 +42,8 @@ CULPRIT_HOST=0.0.0.0 ./run.sh                    # or set "host" in config.json
 .venv/bin/python -m culprit users add <name>     # add or replace users from the CLI
 ```
 
-**Try it in Docker** — the host dashboard plus a reporting agent, one command
-and no token step: see [`demo/`](demo/). There's also a `Dockerfile` for the
-host and a published agent image (`ghcr.io/olayzen/culprit-agent`, from the
+**Docker** — there's a `Dockerfile` for the host, and a published agent image
+(`ghcr.io/olayzen/culprit-agent`, from the
 [culprit-agent](https://github.com/OlaYZen/culprit-agent) repo).
 
 ---
