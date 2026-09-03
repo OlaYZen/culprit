@@ -1,333 +1,334 @@
+<div align="center">
+
 # Culprit
 
-A dashboard that watches your Linux machines and **names what is making them
-slow** — not just how busy they are.
+### Stop watching graphs. Find out what's actually slowing your machines down.
 
-`top` gives you a number. Culprit tells you which process (or systemd unit) is
-responsible for it, and whether that number is a problem at all. One machine
-runs the **host** — the dashboard, API and SQLite database — and every machine
-you want to watch runs a report-only **agent** that pushes its data to the host.
-The host is a pure aggregator: it does not monitor itself, so to watch the
-host's own hardware you run an agent on it too. Agents live in a separate,
-self-contained repo — **[culprit-agent](https://github.com/olayzen/culprit-agent)**.
+**A self-hosted Linux health dashboard that names the process (or systemd unit) making a machine slow, tells you whether the number is even a problem, and lets you fix it from the browser.**
 
-Python + FastAPI backend, no-build vanilla frontend, one SQLite file for
-history and credentials. Runs unprivileged; nothing is installed outside the
-project folder.
+</div>
 
+---
+
+> Your monitoring turns a tile red: **CPU 92%**. It doesn't tell you *which*
+> process is responsible, whether 92% is actually hurting anything, or let you
+> do a single thing about it. So you SSH in and start the detective work:
+> `top`, `iotop`, `ss -tulpn`, `journalctl`, `systemctl status`…
+>
+> **Culprit does that work for you, in a browser, across every machine you run,
+> then hands you the kill switch.**
+
+---
+
+## Contents
+
+- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Watch more machines](#watch-more-machines)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [Security & privacy](#security--privacy)
+- [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
+
+---
+
+## Why Culprit
+
+Every monitoring tool answers *"how busy is this machine?"* Culprit answers the
+question you actually have at 2 a.m.: **"what is making it slow, and does it
+matter?"**
+
+Three things make that possible, and they're the whole product:
+
+### 1. It names the culprit, automatically
+
+Culprit doesn't hand you twelve graphs and wish you luck. Its **Lag Doctor**
+ranks the processes and services on each box by how much they're contributing to
+a *real* bottleneck, and states its evidence: *"`postgres` (pid 2411): 74% of
+disk pressure for the last 40 s."* No correlation, no guessing, no second tool.
+
+### 2. It knows "busy" from "hurting"
+
+A process pinning 6 GB on a machine with 40 GB free is not a problem, and
+ranking by raw usage puts it at the top every time. Culprit scores every
+resource by the kernel's own **Pressure Stall Information (PSI)**, the measured
+fraction of time work is actually *stalled* waiting on CPU, memory or IO, so a
+machine that's flat-out but keeping up stays calm, and one that's quietly
+thrashing lights up. That's the difference between a threshold and a diagnosis.
+
+### 3. It never lies to you
+
+Every source that isn't available says **why**, and names the exact group or
+capability that would unlock it. Per-process IO it can't read shows a dash, not
+a `0`, and the payload counts how many processes were gated: **missing is never
+rendered as zero.** In a field full of dashboards that quietly show `0` when
+they can't read something, this is the feature that earns trust.
+
+And when you've found the culprit, you **act on it**: End task, renice, or kill
+whatever holds a port, on the local box or any machine in the fleet, right from
+the same screen.
+
+---
+
+## How it compares
+
+Culprit isn't trying to replace your metrics database or your SIEM. It does the
+one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
+
+| | **Culprit** | Zabbix / Nagios | Prometheus + Grafana | Netdata | SIEM · Splunk / Wazuh / ELK |
+|---|:---:|:---:|:---:|:---:|:---:|
+| **The question it answers** | *What's slowing this box, and does it matter?* | *Is a metric past a threshold?* | *Store & query metrics* | *Live metric dashboards* | *What security events happened?* |
+| Names the responsible **process / unit** | ● built in | ○ you correlate + SSH | ○ | ○ | ○ |
+| Tells **problem** from merely **busy** (kernel PSI) | ● | ○ static thresholds | ○ | ◑ | ○ |
+| **Act** from the UI (kill port, End task, renice) | ● | ○ | ○ | ○ | ○ |
+| Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
+| **Setup** | one script, minutes | server + DB + agents + templates | services + exporters + dashboards | quick | heavy ingest pipeline |
+| **Footprint** on a watched box | psutil only, **no open ports**, ~a few KB/s | agent + checks | node_exporter | agent | forwarder + indexers |
+| **Purpose** | performance **triage & repair** | infra **alerting** | metrics **TSDB** | live **telemetry** | security **log analytics** |
+
+● yes · ◑ partial · ○ no / not its job
+
+### Why it stands out against a SIEM
+
+A **SIEM** (Splunk, Wazuh, the ELK/Elastic stack, Graylog) exists to *ingest and
+correlate logs* for threat detection, audit and compliance. It's powerful and
+heavy, an indexing pipeline you feed, tune and pay for, and it answers *security*
+questions about the past. It will happily store the logs of a machine grinding
+to a halt without ever telling you a runaway `rsync` is the reason, or giving you
+a button to stop it. **Different job.** Culprit is the performance doctor, not the
+security historian; the two sit side by side.
+
+### Why it stands out against Zabbix, Prometheus & friends
+
+**Threshold monitors** (Zabbix, Nagios) and **metrics stacks** (Prometheus +
+Grafana, Netdata) are essential for fleet-wide alerting and long-term trends;
+keep them. But they're built around *utilisation*: a number crosses a line, a
+tile goes red, a page fires. Then the real work starts, and it's manual: open a
+terminal and run the same five commands every engineer runs, on the right box,
+under pressure. Culprit is that muscle memory, already executed and reasoned
+about:
+
+- **Diagnosis, not dashboards.** It ships the *conclusion* (the named process
+  and its evidence), not raw series for you to eyeball.
+- **PSI over thresholds.** "90% CPU" is not a problem if nothing is waiting.
+  Culprit gates every verdict on measured stall time, so it fires on real pain
+  and stays quiet on healthy load: far fewer false alarms than a static line.
+- **A verb, not just a view.** Find it *and* kill it, with guardrails (PID 1,
+  kernel threads, critical services and Culprit itself are always refused).
+- **Zero ceremony.** No query language, no exporters, no dashboards to build, no
+  time-series database to operate. One script, one SQLite file, done.
+
+Reach for Culprit when something is slow **right now** and you need the answer,
+on one machine or across a fleet, without building anything first.
+
+---
+
+## Quick start
+
+On the machine that will host the dashboard:
+
+```bash
+git clone https://github.com/OlaYZen/culprit.git
+cd culprit
+./culprit.sh
 ```
-./install.sh      # one time: creates .venv, installs deps, prints what is
-                  # available on this machine and what is gated (and by what)
-./run.sh          # every time after that
+
+That's it. `culprit.sh` creates its own virtualenv, installs dependencies,
+prints a matrix of what this machine exposes, and then **offers to install
+itself as a systemd service** (start on boot, auto-restart); press **Enter** to
+accept and it's enabled and running. Open **<http://localhost:8787>** and sign in
+with the `admin` / `admin` account it created for you.
+
+> **Change the default password immediately** in **Settings › Account**.
+> Authentication is always on, and the server refuses to bind a public address
+> while it has zero users, so an open dashboard with a kill button can never be
+> reachable by accident.
+
+Prefer to run it in your terminal instead of as a service? Use `./culprit.sh
+--run` (add `--port N` or `--no-browser` as needed). Manage the service as
+yourself, never with `sudo` (it's a *user* service):
+
+```bash
+systemctl --user status|restart|stop culprit
 ```
 
-Then <http://localhost:8787/>. To run it permanently:
+To reach it from other machines, bind all interfaces: `CULPRIT_HOST=0.0.0.0
+./culprit.sh`. On anything but a trusted LAN, put TLS in front of it (see
+[Security & privacy](#security--privacy)).
 
-```
-mkdir -p ~/.config/systemd/user
-cp culprit.service ~/.config/systemd/user/
-systemctl --user enable --now culprit
-loginctl enable-linger $USER    # keep it alive when you log out
-```
+### Watch more machines
 
-**Authentication is always on.** On first run with no users, Culprit creates a
-default **`admin` / `admin`** account and logs a warning — change it immediately
-in **Settings › Account** (rename the user and/or set a new password), or from
-the CLI. As a backstop the server still refuses to bind a non-loopback address
-if it somehow has zero users, so an open dashboard with a kill button can never
-be reachable by accident. To expose it:
+The host is a pure aggregator: it doesn't monitor its own hardware. Every
+machine you want to watch (including the host itself) runs a tiny, report-only
+**agent** that pushes snapshots to the host and **opens no ports of its own**.
 
-```
-CULPRIT_HOST=0.0.0.0 ./run.sh                    # or set "host" in config.json
-.venv/bin/python -m culprit users add <name>     # add or replace users from the CLI
+**1. Enroll it on the host** (the token is shown once; only its hash is stored):
+
+```bash
+.venv/bin/python -m culprit agents add web-01
 ```
 
-**Docker** — there's a `Dockerfile` for the host, and a published agent image
-(`ghcr.io/olayzen/culprit-agent`, from the
-[culprit-agent](https://github.com/OlaYZen/culprit-agent) repo).
+**2. Deploy the agent** from its own self-contained repo,
+**[culprit-agent](https://github.com/OlaYZen/culprit-agent)**, or, for a
+container host, the prebuilt image:
+
+```bash
+# native
+git clone https://github.com/OlaYZen/culprit-agent.git
+cd culprit-agent && ./agent.sh https://<host>:8787 web-01.<secret>
+
+# docker (monitors the host it runs on)
+docker run -d --name culprit-agent --restart unless-stopped --pull always \
+  --privileged --pid host --network host \
+  -e CULPRIT_HOST=http://<host>:8787 -e CULPRIT_TOKEN=web-01.<secret> \
+  ghcr.io/olayzen/culprit-agent:latest
+```
+
+The dashboard's **Nodes** view enrolls agents and shows a ready-to-paste command
+(native *and* Docker) with the token already filled in. A node picker appears in
+the title bar, and **every view (Overview, Lag Doctor, Processes, Services,
+Ports, Events, Trends) renders whichever node you select,** with full remote
+action parity: process detail, End task, renice and port-kill all work on
+agents, run by the identical collector code, with the same guards. If an agent
+goes quiet, the title bar tells you how stale the numbers are rather than letting
+them pass as live.
 
 ---
 
 ## What it watches
 
-| | |
+| Domain | What you get |
 |---|---|
 | **Processor** | Per-core utilisation from `/proc/stat` with **iowait and steal** broken out (steal matters on VMs), runnable-queue depth, load averages, D-state count, clock, governor, context switches |
-| **Pressure (PSI)** | The kernel's own stall accounting from `/proc/pressure/*`: the measured fraction of wall time tasks spent waiting on CPU, memory or IO — `some` vs `full`, and per systemd unit too |
-| **Memory** | MemAvailable (the honest field), commit charge vs limit (alerted only under strict overcommit), **major-fault rate** (real paging), swap in/out, OOM-kill counter, dirty/writeback |
-| **GPU** | A backend chain — DRM fdinfo (cross-vendor, per-PID), NVML (NVIDIA), amdgpu sysfs — each degrading to an explicit reason when absent |
-| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** from `/proc/diskstats` (layered dm/md devices never double-counted), mount capacity via `f_bavail` (what a *user* can write; ext4's root reserve shown separately), SSD/HDD identity |
-| **Network** | Per-interface throughput, errors and drops, IP/gateway/DNS (real upstreams from systemd-resolved, not the 127.0.0.53 stub), socket table with honest PID attribution, VPN detection, TCP reachability probes that report a silent gateway as *filtered*, never *down* |
-| **Ports** | The port map: every listening TCP/UDP port resolved to the process **and systemd unit** behind it, whether it is exposed off-box or bound to loopback, live inbound-connection counts — and a **one-click kill** that terminates whatever holds the port (the same guarded action as End task, so PID 1 and critical services are refused). Sockets owned by another user show without a PID and say so, never a lie |
-| **Processes** | Every process from a direct `/proc` scan: CPU, memory, disk I/O (block-level, kept separate from syscall-level), **scheduler run delay** (time runnable but starved of a CPU), per-process major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS in the detail panel |
-| **Services** | Every systemd unit (system *and* `--user` bus) with `Result` naming why a failure happened (oom-kill, timeout, exit-code), `NRestarts` for restart loops, timers — and **exact per-unit CPU / memory / IO / PSI from each unit's cgroup** |
-| **Events** | From journald: OOM kills, segfaults and core dumps, hung-task reports, disk/filesystem errors, MCE hardware errors, unit failures, unclean shutdowns, failed sign-ins, journald's own rate-limiting (so gaps are honest), apt package history, crash artefacts in `/var/crash`, pending-reboot state (flag file + kernel version + the `needrestart`-style deleted-library scan) |
-| **Sessions** | Sign-in history from logind's journal paired on session id, current sessions with **lock state readable unprivileged** (the inverse of Windows), boots and shutdowns |
-| **Sync** | A plugin chain: Syncthing (REST), rclone (rc), abraunegg onedrive (user unit + journal), Nextcloud, Dropbox — plus an **inotify watch-exhaustion** panel, the failure mode that silently breaks sync while every status light stays green |
-| **Trends** | Everything above rolled up on disk, so you can ask what was happening at 14:20 yesterday |
+| **Pressure (PSI)** | The kernel's own stall accounting from `/proc/pressure/*`: the measured fraction of wall time tasks spent waiting on CPU, memory or IO (`some` vs `full`), and per systemd unit |
+| **Memory** | MemAvailable (the honest field), commit charge vs limit, **major-fault rate** (real paging), swap in/out, OOM-kill counter, dirty/writeback |
+| **GPU** | A backend chain, DRM fdinfo (cross-vendor, per-PID), NVML (NVIDIA) and amdgpu sysfs, each degrading to an explicit reason when absent |
+| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, SSD/HDD identity |
+| **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
+| **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, and a **one-click kill** with the same guards as End task |
+| **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
+| **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup** |
+| **Events** | From journald: OOM kills, segfaults & core dumps, hung-task reports, disk/filesystem and MCE hardware errors, unit failures, unclean shutdowns, failed sign-ins, package history, crash artefacts, and pending-reboot state |
+| **Sessions** | Sign-in history from logind paired on session id, **current sessions with SSH logins named** (user + remote host), lock state, boots and shutdowns |
+| **Sync** | Syncthing, rclone, OneDrive, Nextcloud, Dropbox, plus an **inotify watch-exhaustion** panel: the failure that silently breaks sync while every status light stays green |
+| **Trends** | Everything above rolled up on disk, per node, so you can ask what was happening on `web-01` at 14:20 yesterday |
 
 ---
 
 ## The Lag Doctor
 
-Resource *usage* is not the same as a *problem*. A process holding 6 GB on a
-machine with 40 GB free is not hurting anyone, and ranking by raw memory puts
-it at the top every time. So scoring is two-stage:
+Resource *usage* is not the same as a *problem*, so scoring is two stages:
 
-1. A **0..1 pressure per resource**. Where the kernel has PSI (≥ 4.20 with
-   `CONFIG_PSI=y`), pressure *is* the kernel's measured stall time — the honest
-   version of what the Windows build had to approximate from utilisation,
-   queues and latency. The derived model remains as a labelled fallback and as
-   the explanatory sub-signals. One deliberate exception: low MemAvailable
-   still raises memory pressure even while PSI is quiet, because PSI only
-   fires once reclaim already hurts.
-2. Each process scored by its **share of each resource, gated by that
-   resource's pressure** (floor 0.3, so an idle machine still shows its top
-   consumers without pretending they are a problem). Scheduler run delay is
-   folded into the CPU term — direct evidence of starvation Windows could not
-   see — and sustained D-state scores ungated, because a process stuck in
-   uninterruptible sleep is being made to wait regardless of any counter.
+1. **A 0-to-1 pressure per resource.** Where the kernel has PSI, pressure *is*
+   the kernel's measured stall time; a derived model is the labelled fallback and
+   the explanatory sub-signals. (One deliberate exception: low MemAvailable
+   raises memory pressure even while PSI is quiet, because PSI only fires once
+   reclaim already hurts.)
+2. **Each process scored by its share of a resource, gated by that resource's
+   pressure** (with a floor, so an idle box still shows its top consumers without
+   pretending they're a problem). Scheduler run delay folds into the CPU term
+   (direct evidence of starvation), and a process stuck in uninterruptible sleep
+   scores regardless of any counter.
 
-Findings only fire after N consecutive samples (default 5), each names its
-evidence and how long it held, and culprits are ranked by *that* resource —
-with one refusal built in: when per-process IO is permission-gated, the disk
-finding shows **no** culprits rather than a made-up ranking.
-
-There is no "not responding" signal here: window responsiveness does not exist
-for a headless box or a Wayland session, and faking it would be worse than
-saying so. The kernel-level substitutes (D-state + wchan, run delay, hung-task
-journal reports, PSI `full`) are arguably more direct evidence anyway.
+Findings fire only after several consecutive samples, each **names its evidence
+and how long it held,** and culprits are ranked by *that* resource. When
+per-process IO is permission-gated, the disk finding shows **no** culprits rather
+than inventing a ranking, because a confident wrong answer is worse than an
+honest "I can't see this."
 
 ---
 
-## Multi-node: host + agents
+## Security & privacy
 
-The host is the machine you just installed. Every other server runs an
-**agent**: the same collectors and the same honesty rules, but no dashboard,
-no FastAPI, no open ports — its only dependency is psutil, and its only
-network behaviour is an outbound gzipped POST to the host every second
-(delta-compressed: unchanged sections are not resent, so the steady-state
-report is a few KB). The dashboard's Refresh control retunes a selected
-agent's cadence live — the host piggybacks the request on its response to
-the agent's next report, so agents stay strictly push-only.
+Self-hosted and private by design: your data lives in one SQLite file on your own
+machine, agents are **outbound-only and open no ports**, and there's no cloud, no
+account and no telemetry.
 
-**Enroll on the host** (prints the token exactly once — only its hash is
-stored):
+- **Dashboard:** username/password (scrypt-hashed), HMAC-signed session cookies
+  (HttpOnly, SameSite=Lax), per-source login rate limiting. Every API route and
+  the live stream sit behind the session gate; only login, health and agent
+  ingest are open.
+- **Agents:** per-node bearer tokens, SHA-256-hashed at rest, constant-time
+  verified, individually revocable. Reports are size-capped and strictly
+  sanitised before they touch host state.
+- **At rest:** the database is `chmod 600` and stores only hashes. A stolen copy
+  yields scrypt and token hashes, never passwords or tokens.
+- **In transit:** plain HTTP exposes cookies and tokens, so on anything but a
+  trusted LAN run TLS (`--ssl-certfile/--ssl-keyfile`, or a reverse proxy) and
+  point agents at `https://`.
+- **Reverse proxies are refused until declared.** A forwarding header from an
+  undeclared address gets a `400`, not silent trust, so a visitor can never spoof
+  the address the login limiter keys on. An optional Host allow-list shuts DNS
+  rebinding.
 
-```
-.venv/bin/python -m culprit agents add web-01
-```
-
-**Deploy on the target server** from the separate, self-contained
-[culprit-agent](https://github.com/olayzen/culprit-agent) repo — it carries its
-own copy of the runnable package, so nothing from this repo is needed:
-
-```
-git clone https://github.com/olayzen/culprit-agent.git
-cd culprit-agent
-./agent.sh https://<host>:8787 web-01.<secret>     # first run saves agent.json
-cp culprit-agent.service ~/.config/systemd/user/   # run it permanently
-systemctl --user enable --now culprit-agent
-loginctl enable-linger $USER
-```
-
-The token is shown in the host dashboard's **Nodes** view (or `agents add`),
-which also renders a ready-to-paste deploy command — its address and runner
-(e.g. `sudo ./agent.sh`) are configurable in **Settings › Agent deployment**.
-
-The dashboard grows a node picker in the title bar: every view — Overview,
-Lag Doctor, Processes, Services, Ports, Events, Trends — renders whichever node
-is selected. Remote data carries its age; if an agent goes silent, the title bar
-says how stale the numbers are instead of letting them pass as live. Per-node
-history rolls into the same SQLite pipeline, so Trends answers "what was
-happening on web-01 at 14:20" too.
-
-**Full parity, including actions.** Everything you can do to the host you can
-do to an agent — live process detail (command line, sockets, PSS, per-thread
-times, open files), End task, renice, and killing whatever holds a port from
-the Ports view. Agents still never open a port: a
-command is *queued* on the host, the agent picks it up in the response to its
-next report (the same channel that carries settings), runs it with the
-identical collector code the host runs on itself, and posts the result
-straight back. Round-trip is about one report interval — ~0.2s at the 1s
-default. The same guards apply remotely (PID 1, kernel threads, critical
-processes and the agent itself are refused), and an agent honours its own
-`allow_process_actions` config, so a read-only deployment is still one setting
-away. `agents revoke <name>` cuts a node off immediately; rotating its token
-does the same.
-
-### Security model
-
-* **Dashboard**: username/password (scrypt-hashed in SQLite), HMAC-signed
-  session cookies (HttpOnly, SameSite=Lax, 7 days), login rate-limited per
-  source address. Every API route and the SSE stream sit behind the session
-  gate; only the login page, health check and agent ingest are open.
-* **Agents**: per-node bearer tokens, SHA-256-hashed at rest, constant-time
-  verification, revocable individually. Reports are size-capped.
-* **Database**: `data/culprit.db` holds the credential hashes and is
-  chmod 600. No plaintext secret is ever stored — a stolen database yields
-  scrypt hashes and token hashes, not passwords or tokens.
-* **Transport**: plain HTTP means tokens and cookies cross the wire readable.
-  On anything but a trusted LAN, run TLS — either
-  `python -m culprit --ssl-certfile cert.pem --ssl-keyfile key.pem` or a
-  reverse proxy — and point agents at `https://`. For a self-signed
-  certificate, `./agent.sh --insecure …` skips verification (the agent logs a
-  warning every start, because it should).
-* **Network trust**: reverse proxies are **refused until declared**. A
-  request that carries a forwarding header (`X-Forwarded-For`, `Forwarded`,
-  `X-Real-IP`, …) from an address not listed under Settings › Network trust
-  gets a 400 that says so — not silently ignored, because an undeclared proxy
-  means every visitor shares one login-limiter bucket and the host never
-  learns the real scheme. From a declared proxy the right-most untrusted hop
-  becomes the client. The same panel holds an optional Host allow-list
-  (DNS names, `*.wildcards`) that shuts DNS rebinding; the machine's own
-  addresses, host name and loopback always pass without being listed, so
-  agents on the LAN and a shell on the host keep working and a wrong list
-  can always be fixed, and a save that would refuse the connection making
-  it is rejected. `--trust-proxy IPS`
-  adds proxies for one run without saving them — the bootstrap for a host
-  only reachable through one.
+A suite of security tools ships with the host (`tools/audit_security.py`,
+`check_security.py`, `check_auth.py`, `check_ingest.py`); run them before you
+expose a host, and through any TLS proxy you add. A CRIT/HIGH finding fails their
+exit status, so they can gate a deploy.
 
 ---
 
-## Privilege — granular, and named
+## Privilege, named
 
-There is no "run as administrator" here. Every gated source names exactly what
-would unlock it, and `install.sh` prints the whole matrix up front:
+There is no "run as administrator." Every gated source names exactly what would
+unlock it, and `./culprit.sh` prints the whole matrix up front:
 
 | Wanted | Needs |
 |---|---|
 | System journal (events, sessions) | `systemd-journal` or `adm` group |
 | Other users' `/proc/<pid>/io`, FD counts, open files | `CAP_SYS_PTRACE` (also gated by `yama/ptrace_scope`) |
 | SMART / NVMe health | `CAP_SYS_RAWIO` or root, plus smartmontools |
-| DMI serial numbers, `/var/log/btmp`, pstore | root |
-| i915 PMU GPU counters | `CAP_PERFMON` or relaxed `perf_event_paranoid` |
+| DMI serials, `/var/log/btmp`, pstore | root |
+| i915 GPU counters | `CAP_PERFMON` or relaxed `perf_event_paranoid` |
 
-Unreadable is never rendered as zero: per-process IO you cannot read shows an
-em dash and the payload counts how many processes were gated.
+Run it with whatever privilege you're comfortable giving it; it degrades
+honestly and tells you what each level would add.
 
 ---
 
 ## Performance
 
-Measured on the dev machine — a 4-core KVM guest (Xeon Gold 6150, 4 GB RAM,
-rotational QEMU disk), ~230 processes, 209 systemd units, 1.3 GB journal:
+Measured on a modest 4-core KVM guest (Xeon Gold 6150, 4 GB RAM, rotational
+disk), ~230 processes, 209 systemd units, a 1.3 GB journal:
 
 | Tier | Interval | Steady-state cost |
 |---|---|---|
-| fast (cpu, mem, PSI, gpu, disk, net) | 1 s | ~2–4 ms |
-| proc (full table + lag scoring) | 2 s | ~25–40 ms |
-| slow (units + cgroups, mounts, sockets, probes, sync) | 20 s | ~0.5–1.2 s |
-| events (journal, crash files, pending reboot) | 120 s | ~0.6–1 s warm; the agent's **first** tick pays the cold journal cache (~10 s here) — the dashboard shows skeletons until it lands |
+| fast · cpu, mem, PSI, gpu, disk, net | 1 s | ~2-4 ms |
+| proc · full table + lag scoring | 2 s | ~25-40 ms |
+| slow · units + cgroups, mounts, sockets, probes, sync | 20 s | ~0.5-1.2 s |
+| events · journal, crash files, pending reboot | 120 s | ~0.6-1 s warm |
 
-Total: well under 5% of one core, ~65 MB resident.
+**Total: well under 5% of one core, ~65 MB resident.** A watched machine's agent
+depends only on psutil and the standard library, opens no ports, and sends a few
+KB/s (delta-compressed: unchanged sections aren't resent).
 
-### Measurements that shaped the design
-
-* **Direct `/proc` beats psutil for the table, 8 ms vs 45 ms** for a full scan
-  of 230 processes — and the raw files carry things psutil's iterator does not
-  surface (schedstat run delay, majflt, wchan). psutil keeps the jobs it is
-  genuinely good at: the single-process detail panel, network counters,
-  terminate/renice. (On Windows the same choice was 105 ms of PDH vs 13.5
-  *seconds* of psutil; on Linux the gap is small enough that it had to be
-  re-measured rather than assumed.)
-* **`systemctl -o json` beats a D-Bus binding on total cost.** ListUnits via
-  busctl and via subprocess both measure ~12 ms; three spawns per 20 s tick do
-  not justify a jeepney dependency and D-Bus marshalling code.
-* **journalctl has two performance cliffs**, both found by measurement and
-  documented in `linux.py`: a `+` match disjunction silently disables cursor
-  seeking (26 s instead of 16 ms), and `--after-cursor` combined with `-n`
-  hangs outright. The auth-failure query — a needle in 56k sshd lines on this
-  box — is incremental on a stored cursor for exactly this reason.
+The engineering leans on measurement, not habit: a direct `/proc` scan beats
+psutil for the process table (**8 ms vs 45 ms**) and carries signals its iterator
+doesn't (run delay, `majflt`, `wchan`); `systemctl -o json` is measured against a
+D-Bus binding and wins on total cost; and two `journalctl` performance cliffs are
+documented and designed around.
 
 ---
 
-## Verifying it still works
+## Notes & limits
 
-```
-.venv/bin/python tools/smoketest.py        # every collector against the real
-                                           # machine, with timings and a
-                                           # per-source availability matrix
-.venv/bin/python tools/check_frontend.py   # ES module graph (no bundler exists
-                                           # to catch a bad import)
-.venv/bin/python tools/check_contract.py   # every field the views read is in
-                                           # the live API. Since the host serves
-                                           # no metrics of its own, the metric
-                                           # views are validated against a
-                                           # reporting agent node (--node, or the
-                                           # first online one); add --user/--password
-                                           # when auth is on
-.venv/bin/python tools/audit_security.py   # static: HTML sinks fed unescaped
-                                           # values, gate allowlist drift, dynamic
-                                           # SQL, cookie flags, tracked secrets,
-                                           # database file modes
-.venv/bin/python tools/check_security.py   # live, black-box: every route bounces
-                                           # without a session, path/header
-                                           # bypasses, forged cookies, login
-                                           # enumeration and timing, agent-token
-                                           # rejection, headers, CORS, injection,
-                                           # write validation. Add --user/--password
-                                           # for the authenticated half; --active
-                                           # also proves the agent-token lifecycle
-                                           # and the login lockout (locks the
-                                           # scanning address out for 5 minutes);
-                                           # --throwaway-user makes a temporary
-                                           # login via the CLI and also proves a
-                                           # password change revokes sessions;
-                                           # --only/--skip pick groups, --json for CI
-.venv/bin/python tools/check_auth.py       # offline, ~7s: the credential logic
-                                           # against a throwaway database --
-                                           # hashing, session tamper/expiry/
-                                           # revocation, the limiter, agent tokens,
-                                           # command scoping, bounded gzip, the
-                                           # startup refusal, config patches, the
-                                           # proxy / Host trust rules
-.venv/bin/python tools/check_ingest.py --throwaway-user
-                                           # live: every forged/misplaced token
-                                           # shape must 401, then 45 hostile reports
-                                           # from a valid token must neither 5xx the
-                                           # ingest nor break the node list, fleet,
-                                           # node snapshot or SSE frame for anyone
-```
+Culprit tells you what it *can't* do as plainly as what it can:
 
-Run the security tools before exposing a host to a network, and again through
-any TLS proxy you put in front of it — the header checks prove what the proxy
-actually forwards. Declare the proxy first (Settings › Network trust, or
-`--trust-proxy 127.0.0.1` for one on the same machine): until then the host
-refuses every request that arrives through it, and the scan says so and
-stops. A CRIT or HIGH finding fails the exit status so it can gate a deploy.
-
-The smoketest asserts process coverage against `len(psutil.pids())` — ground
-truth, not assumption. Destructive actions are refused for PID 1, kernel
-threads, critical system processes and Culprit itself, and require an explicit
-confirm flag.
-
----
-
-## Notes and limits
-
-* **Window responsiveness is not measurable.** X11 could best-effort
-  `_NET_WM_PING`; on Wayland only the compositor knows, and on a headless box
-  the concept does not exist. The UI relies on the kernel-level signals above
-  and says so rather than quietly omitting a panel.
-* **Per-process GPU coverage varies by driver.** DRM fdinfo needs kernel
-  ≳ 5.19 and driver support; NVML needs `nvidia-ml-py` and a loaded driver;
-  amdgpu sysfs is adapter-level only. Whatever is missing, the GPU panel says
-  which backends were tried and why each declined.
-* **Containers make `/proc` lie.** `systemd-detect-virt --container` (plus
-  `/.dockerenv` and `/proc/1/cgroup`) is checked at startup; when containerised
-  the UI warns that /proc-derived numbers may be the host's unless lxcfs is
-  mounted.
-* **Pending reboot is distro-specific.** Debian/Ubuntu flag file, running
-  kernel vs newest installed, and the universal deleted-library scan are
-  implemented; `dnf needs-restarting` (RHEL) would slot into
-  `events.pending_reboot()`.
-* **`%util` and queue depth are weak signals on multi-queue NVMe** — hardware
-  queues overlap. Latency and PSI lead everywhere in the UI.
-* **Journal persistence matters.** With only `/run/log/journal` (volatile),
-  event history dies at reboot; the events view says which kind this machine
-  has.
-* Commit charge is shown always but **alerted on only under strict overcommit**
-  (`vm.overcommit_memory=2`) — under the default heuristic policy,
-  `Committed_AS` exceeding `CommitLimit` is normal on a healthy machine, and
+- **Window responsiveness isn't measurable** on a headless box or Wayland, so
+  Culprit relies on kernel-level signals (D-state + `wchan`, run delay, hung-task
+  reports, PSI `full`) instead of faking a "not responding" light.
+- **Per-process GPU coverage varies by driver:** the panel says which backends
+  it tried and why each declined.
+- **Containers make `/proc` lie**; Culprit detects containerisation and warns
+  that `/proc`-derived numbers may be the host's unless lxcfs is mounted.
+- **Journal persistence matters:** with a volatile-only journal, event history
+  dies at reboot, and the Events view says which kind this machine has.
+- **Commit charge is shown always but alerted on only under strict overcommit:**
+  under the default policy, `Committed_AS` over `CommitLimit` is normal, and
   alarming on it would be confident nonsense.
+
+---
+
+<div align="center">
+
+**Culprit.** The machine tells you who's to blame.
+
+Built for people who run their own Linux boxes and want an answer, not a graph.
+
+</div>
