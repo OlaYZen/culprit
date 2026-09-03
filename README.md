@@ -1,4 +1,4 @@
-# culprit
+# Culprit
 
 A dashboard that watches your Linux machines and **names what is making them
 slow** — not just how busy they are.
@@ -30,7 +30,7 @@ systemctl --user enable --now culprit
 loginctl enable-linger $USER    # keep it alive when you log out
 ```
 
-**Authentication is always on.** On first run with no users, culprit creates a
+**Authentication is always on.** On first run with no users, Culprit creates a
 default **`admin` / `admin`** account and logs a warning — change it immediately
 in **Settings › Account** (rename the user and/or set a new password), or from
 the CLI. As a backstop the server still refuses to bind a non-loopback address
@@ -205,7 +205,7 @@ rotational QEMU disk), ~230 processes, 209 systemd units, 1.3 GB journal:
 | fast (cpu, mem, PSI, gpu, disk, net) | 1 s | ~2–4 ms |
 | proc (full table + lag scoring) | 2 s | ~25–40 ms |
 | slow (units + cgroups, mounts, sockets, probes, sync) | 20 s | ~0.5–1.2 s |
-| events (journal, crash files, pending reboot) | 120 s | ~0.6–1 s warm; the **first** tick pays the cold journal cache (~10 s here) behind a warm-up message |
+| events (journal, crash files, pending reboot) | 120 s | ~0.6–1 s warm; the agent's **first** tick pays the cold journal cache (~10 s here) — the dashboard shows skeletons until it lands |
 
 Total: well under 5% of one core, ~65 MB resident.
 
@@ -254,7 +254,12 @@ culprit/
     sync.py            sync-client plugins + inotify         (slow tier)
     events.py          journald, boots, sessions, reboots    (events tier)
     sysinfo.py         identity, virt/container, privilege map
-web/                   no-build ES-module frontend (unchanged architecture)
+web/                   no-build ES-module frontend
+    index.html         shell + a static boot skeleton (painted before any JS)
+    css/               base (tokens) · shell (chrome, grids) · ui (components) · mobile
+    js/stream.js       SSE client + per-node store; js/app.js routing + chrome
+    js/ui.js           primitives: dialog, banner, combobox, skeleton slots …
+    js/views/          one module per view; shared.js = section/figure/pill/…
 tools/                 smoketest, module-graph check, API-contract check
 docs/                  ux-rules.md (uxgoodpatterns UI reference)
 install.sh  run.sh  culprit.service          # host artifacts
