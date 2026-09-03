@@ -1,0 +1,29 @@
+name: Documentation issue
+description: Something in the docs is wrong, unclear, or missing.
+title: "[Docs]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Clear docs matter. Tell us what tripped you up and we will fix it.
+  - type: input
+    id: where
+    attributes:
+      label: Where?
+      description: The file, section heading, or URL.
+      placeholder: e.g. README, "Watch more machines", or docs/ux-rules.md
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+      description: What the docs say (or fail to say) and why it is confusing or incorrect.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix
+      description: If you have wording in mind, share it here. A pull request is also very welcome.

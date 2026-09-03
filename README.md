@@ -13,7 +13,7 @@
 > Your monitoring turns a tile red: **CPU 92%**. It doesn't tell you *which*
 > process is responsible, whether 92% is actually hurting anything, or let you
 > do a single thing about it. So you SSH in and start the detective work:
-> `top`, `iotop`, `ss -tulpn`, `journalctl`, `systemctl status`…
+> `top`, `iotop`, `ss -tulpn`, `journalctl`, `systemctl status`, and the rest.
 >
 > **Culprit does that work for you, in a browser, across every machine you run,
 > then hands you the kill switch.**
