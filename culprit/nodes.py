@@ -37,9 +37,9 @@ _SEVERITY_RANK = {"ok": 0, "info": 1, "warn": 2, "critical": 3}
 # never lands in the snapshot every viewer receives). tools/check_ingest.py
 # sends the malformed variants and asserts every read endpoint survives.
 DICT_SECTIONS = frozenset({
-    "cpu", "memory", "pressures", "gpu", "disk", "network", "network_detail",
-    "ports", "sync", "process_table", "diagnosis", "services", "system",
-    "volumes", "events", "errors", "timings", "sampler",
+    "cpu", "memory", "psi", "pressures", "gpu", "disk", "network",
+    "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
+    "system", "volumes", "events", "errors", "timings", "sampler",
 })
 SCALAR_META = frozenset({"warm", "warmup_stage", "server_started_at", "now",
                          "ts", "elevated"})
@@ -126,6 +126,9 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         if not isinstance(key, str):
             continue
         if key in DICT_SECTIONS:
+            if value is None:
+                continue  # explicitly unavailable this tick (e.g. psi on a
+                          # kernel without PSI) -- skip it, do not log a drop
             if not isinstance(value, dict):
                 dropped.append(f"{key}: expected an object")
                 continue
