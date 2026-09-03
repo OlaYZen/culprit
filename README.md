@@ -180,9 +180,11 @@ does the same.
   means every visitor shares one login-limiter bucket and the host never
   learns the real scheme. From a declared proxy the right-most untrusted hop
   becomes the client. The same panel holds an optional Host allow-list
-  (names, `*.wildcards`, IPs) that shuts DNS rebinding; loopback names
-  always pass so a shell on the host can fix a wrong list, and a save that
-  would refuse the connection making it is rejected. `--trust-proxy IPS`
+  (DNS names, `*.wildcards`) that shuts DNS rebinding; the machine's own
+  addresses, host name and loopback always pass without being listed, so
+  agents on the LAN and a shell on the host keep working and a wrong list
+  can always be fixed, and a save that would refuse the connection making
+  it is rejected. `--trust-proxy IPS`
   adds proxies for one run without saving them — the bootstrap for a host
   only reachable through one.
 

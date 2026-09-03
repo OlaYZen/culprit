@@ -867,6 +867,7 @@ def _access_info(request: Request) -> dict[str, Any]:
     access = getattr(request.state, "access", None)
     info: dict[str, Any] = access.public() if access else {}
     info["runtime_proxies"] = trust.runtime_proxies()
+    info["always_hosts"] = sorted(trust.local_names())
     return info
 
 
