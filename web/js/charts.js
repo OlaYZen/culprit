@@ -176,7 +176,7 @@ class Chart {
     if (options.baseline !== null && options.baseline !== undefined
         && options.baseline <= yMax) {
       ctx.save();
-      ctx.strokeStyle = alpha(token("--crit", "#c06c6c"), 0.6);
+      ctx.strokeStyle = alpha(token("--crit", "#f87171"), 0.6);
       ctx.setLineDash([3, 3]);
       ctx.lineWidth = 1;
       const y = Math.round(yAt(options.baseline)) + 0.5;

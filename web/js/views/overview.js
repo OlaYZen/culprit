@@ -295,16 +295,25 @@ export function createOverview() {
     }
     const bits = [`↓ ${fmt.rate(node.net_down)}  ↑ ${fmt.rate(node.net_up)}`];
     if (fmt.isNum(node.disk_latency_ms) && node.disk_latency_ms >= 10) bits.push(`disk ${fmt.ms(node.disk_latency_ms)}`);
-    card.append(el("div.node__foot", { text: bits.join("  ·  ") }));
+    // The footer is always exactly one line: network on the left, the leading
+    // offender (when there is one) on the right. Appending the offender as its
+    // own row made every card grow and shrink as processes crossed the score
+    // threshold, which shifted the whole fleet grid around.
+    const foot = el("div.node__foot", {}, [el("span.node__net", { text: bits.join("  ·  ") })]);
     if (node.findings > 0 && node.offender) {
-      card.append(el("div.node__alert", {
-        text: `${node.findings} finding${node.findings === 1 ? "" : "s"} — ${fmt.imageName(node.offender.name)} leads`,
+      // Compact: the network numbers keep their width and this side truncates,
+      // so it is short by construction; the tooltip carries the full sentence.
+      foot.append(el("span.node__alert", {
+        text: `${node.findings} finding${node.findings === 1 ? "" : "s"} · ${fmt.imageName(node.offender.name)}`,
+        title: `${fmt.imageName(node.offender.name)} leads ${node.findings} finding${node.findings === 1 ? "" : "s"}`,
       }));
     } else if (node.offender && (node.offender.lag_score || 0) >= 10) {
-      card.append(el("div.node__alert.node__alert--info", {
-        text: `top: ${fmt.imageName(node.offender.name)} (${node.offender.lag_score})`,
+      foot.append(el("span.node__alert.node__alert--info", {
+        text: `top · ${fmt.imageName(node.offender.name)}`,
+        title: `Top offender: ${fmt.imageName(node.offender.name)}, lag score ${node.offender.lag_score}`,
       }));
     }
+    card.append(foot);
     card.addEventListener("click", () => selectNode(node.name));
     return card;
   }
