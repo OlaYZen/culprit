@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import logging
 import os
 import secrets
@@ -276,8 +277,12 @@ class History:
         rows = []
         seen = time.time()
         for event in events:
-            timestamp = event.get("timestamp")
-            if not timestamp:
+            # Agents relay these verbatim; a hostile or broken one can send
+            # anything. Non-objects and unparseable timestamps are skipped.
+            if not isinstance(event, dict):
+                continue
+            timestamp = _f(event.get("timestamp"))
+            if not timestamp or not math.isfinite(timestamp):
                 continue
             # Journal cursors are unique per journal instance, so prefixing
             # the node keeps two machines' cursors from ever colliding.
@@ -287,11 +292,11 @@ class History:
                 else f"{node}:{event.get('channel')}:{event.get('id')}:{timestamp}"
             )
             rows.append((
-                fingerprint, node, float(timestamp), str(event.get("kind")),
-                str(event.get("source_key")), _i(event.get("id")),
-                str(event.get("severity")),
-                str(event.get("title") or event.get("source_label") or ""),
-                json.dumps(_compact(event)), seen,
+                fingerprint, node, timestamp, _text(event.get("kind")),
+                _text(event.get("source_key")), _i(event.get("id")),
+                _text(event.get("severity")),
+                _text(event.get("title") or event.get("source_label") or ""),
+                _text(json.dumps(_compact(event))), seen,
             ))
         if not rows:
             return 0
@@ -308,7 +313,7 @@ class History:
                 )
                 conn.commit()
                 return cursor.rowcount or 0
-            except sqlite3.Error as exc:
+            except (sqlite3.Error, UnicodeEncodeError) as exc:
                 log.warning("event write failed: %s", exc)
                 return 0
 
@@ -722,8 +727,10 @@ def aggregate_window(samples: Sequence[dict[str, Any]],
                     node = None
                     break
                 node = node.get(key)
-            if isinstance(node, (int, float)):
-                values.append(float(node))
+            if isinstance(node, (int, float)) and not isinstance(node, bool):
+                number = _f(node)
+                if number is not None and math.isfinite(number):
+                    values.append(number)
         return values
 
     def avg(values: list[float]) -> float | None:
@@ -779,12 +786,23 @@ def _compact(event: dict[str, Any]) -> dict[str, Any]:
 def _f(value: Any) -> float | None:
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _i(value: Any) -> int | None:
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if abs(number) < 2 ** 63 else None
+
+
+def _text(value: Any, limit: int = 4096) -> str:
+    """str() that SQLite will accept: no lone surrogates, bounded length."""
+    text = str(value)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = text.encode("utf-8", "replace").decode("utf-8")
+    return text[:limit]

@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
@@ -110,6 +111,22 @@ app = FastAPI(
     swagger_ui_oauth2_redirect_url=None,
     openapi_url="/api/openapi.json",
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request,  # noqa: ANN201
+                           exc: RequestValidationError):
+    """A 422 that describes the problem without echoing the input.
+
+    FastAPI's default body repeats the submitted value in each error, which
+    (a) puts a mistyped password into a response that proxies and browsers
+    log, and (b) is not always serialisable: a JSON body carrying 1e400 or
+    NaN parses to a float that json.dumps refuses, so the *error response*
+    itself failed with a 500. tools/check_security.py sends both.
+    """
+    errors = [{"loc": list(e.get("loc", ())), "msg": str(e.get("msg", "")),
+               "type": str(e.get("type", ""))} for e in exc.errors()]
+    return JSONResponse({"detail": errors}, status_code=422)
 
 
 # --------------------------------------------------------------------- auth
@@ -299,17 +316,27 @@ async def api_agent_report(request: Request) -> dict[str, Any]:
     if request.headers.get("content-encoding") == "gzip":
         body = _inflate(body, MAX_REPORT_BYTES * 4)
     try:
-        payload = json_module.loads(body)
-    except ValueError:
-        raise HTTPException(400, "body is not JSON")
+        # NaN/Infinity are not JSON: Python would accept them, then emit them
+        # into SSE frames that every browser's JSON.parse rejects. A JSON bomb
+        # (100k nested brackets) raises RecursionError, not ValueError.
+        payload = json_module.loads(body, parse_constant=_reject_non_finite)
+    except (ValueError, RecursionError):
+        raise HTTPException(400, "body is not JSON (or carries NaN/Infinity, "
+                                 "or is nested absurdly deep)")
     if not isinstance(payload, dict):
         raise HTTPException(400, "expected a JSON object")
     # A report may carry results for commands the agent just ran; resolve the
     # dashboard requests waiting on them before folding the snapshot in.
     if commands is not None and isinstance(payload.get("command_results"), list):
-        commands.resolve(payload["command_results"])
-    reply = await asyncio.get_running_loop().run_in_executor(
-        None, registry.ingest, name, payload)
+        commands.resolve(name, payload["command_results"])
+    try:
+        reply = await asyncio.get_running_loop().run_in_executor(
+            None, registry.ingest, name, payload)
+    except ValueError as exc:
+        raise HTTPException(400, f"report rejected: {exc}")
+    except Exception:  # noqa: BLE001 -- a bad report must never 500 the host
+        log.exception("report from %s could not be ingested", name)
+        raise HTTPException(400, "report rejected: could not be ingested")
     # Keep every open dashboard's node picker current without polling.
     broker.publish("nodes", registry.status_list())
     # The response is the only downlink to a push-only agent: it carries
@@ -339,7 +366,10 @@ async def _agent_command(name: str, action: str, payload: dict[str, Any],
         raise HTTPException(409, f"agent '{name}' is revoked")
     meta = next((n for n in registry.status_list() if n["name"] == name), None)
     interval = (meta or {}).get("report_interval") or 5.0
-    timeout = max(8.0, float(interval) * 2 + 3.0)
+    # Sized from the node's cadence, but capped: the cadence is the agent's
+    # own claim (already clamped to 60s on ingest), and a request must never
+    # be parked for longer than a person will wait on a dialog.
+    timeout = min(45.0, max(8.0, float(interval) * 2 + 3.0))
 
     cmd_id, future = commands.submit(name, action, payload)
     try:
@@ -931,6 +961,10 @@ app.mount(
 
 
 # --------------------------------------------------------------------- helpers
+def _reject_non_finite(constant: str) -> Any:
+    raise ValueError(f"{constant} is not JSON")
+
+
 def _inflate(data: bytes, limit: int) -> bytes:
     """gzip-decompress a report with a hard ceiling on the *output* size.
 

@@ -19,7 +19,9 @@ Findings are HIGH/WARN/INFO; exit status 1 on HIGH (or WARN with --strict).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import inspect
+import json
 import re
 import stat
 import subprocess
@@ -96,9 +98,12 @@ class Finding:
 @dataclass
 class Report:
     findings: list[Finding] = field(default_factory=list)
+    quiet: bool = False
 
     def add(self, level: str, check: str, where: str, detail: str) -> None:
         self.findings.append(Finding(level, check, where, detail))
+        if self.quiet and level in ("PASS", "INFO"):
+            return
         colour = {"HIGH": RED, "WARN": YELLOW, "INFO": BLUE, "PASS": GREEN}[level]
         loc = f"{where}: " if where else ""
         print(f"  {colour}{level:<4}{RESET} {check}: {loc}{detail}")
@@ -253,6 +258,45 @@ def audit_frontend(rep: Report) -> None:
                 rep.add("HIGH", "third-party-script", rel(web / name),
                         f"loads {m.group(1)} -- a CDN outage or compromise "
                         "becomes a dashboard compromise")
+        for m in re.finditer(r"\son[a-z]+\s*=\s*[\"']", html):
+            lineno = html.count("\n", 0, m.start()) + 1
+            rep.add("WARN", "inline-handler", f"{rel(web / name)}:{lineno}",
+                    "inline event handler attribute (blocks a strict CSP later)")
+    # Every fetch() must be same-origin: an absolute URL is either a typo or
+    # an exfiltration path for the session cookie.
+    absolute_fetch = 0
+    for path in files:
+        src = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"""fetch\(\s*[`"'](https?:)?//""", src):
+            absolute_fetch += 1
+            lineno = src.count("\n", 0, m.start()) + 1
+            rep.add("HIGH", "fetch-origin", f"{rel(path)}:{lineno}",
+                    "fetch() to an absolute URL -- credentials could leave the origin")
+        for m in re.finditer(r"""target\s*=\s*[\"']_blank[\"']""", src):
+            window = src[m.start() - 200:m.end() + 200]
+            if "noopener" not in window:
+                lineno = src.count("\n", 0, m.start()) + 1
+                rep.add("WARN", "link-target", f"{rel(path)}:{lineno}",
+                        'target="_blank" without rel="noopener" (reverse tabnabbing)')
+        for m in re.finditer(r"""href\s*[=:]\s*[\"'`]\s*javascript:""", src):
+            lineno = src.count("\n", 0, m.start()) + 1
+            rep.add("HIGH", "javascript-href", f"{rel(path)}:{lineno}", "javascript: URL")
+    if not absolute_fetch:
+        rep.ok("fetch-origin", "every fetch() is same-origin; no javascript: URLs")
+    login = (web / "login.html").read_text(encoding="utf-8")
+    problems = []
+    if 'type="password"' not in login:
+        problems.append("no type=password input")
+    if "autocomplete" not in login:
+        problems.append("no autocomplete hint on the credential fields")
+    if not re.search(r"""fetch\(\s*["']/api/login["'][^)]*method:\s*["']POST""", login, re.S):
+        problems.append("login is not a POST to /api/login")
+    if re.search(r"""method\s*=\s*["']get["']""", login, re.I):
+        problems.append("a GET form (credentials would land in the URL and logs)")
+    if problems:
+        rep.add("HIGH", "login-form", "web/login.html", "; ".join(problems))
+    else:
+        rep.ok("login-form", "password field, autocomplete hints, POSTs to /api/login")
 
 
 # -------------------------------------------------------------- python
@@ -301,6 +345,25 @@ def audit_python(rep: Report) -> None:
         rep.ok("sql-injection", "no request value is interpolated into SQL; "
                "values travel as ? parameters")
 
+    # subprocess must always take an argv list: a string plus shell=False is
+    # a bug, a string plus shell=True is an injection.
+    argv_bad = 0
+    for path in sorted(pkg.rglob("*.py")):
+        src_py = path.read_text(encoding="utf-8")
+        for m in re.finditer(r"subprocess\.(run|Popen|check_output|check_call|call)\(\s*([^\s,)]+)",
+                             src_py):
+            first = m.group(2)
+            if not (first.startswith("[") or first[:1].isupper() or first.startswith("_")):
+                # A bare identifier holding a list (`cmd`) is fine; a string
+                # literal is not.
+                if first[:1] in "\"'f":
+                    argv_bad += 1
+                    lineno = src_py.count("\n", 0, m.start()) + 1
+                    rep.add("HIGH", "subprocess-argv", f"{rel(path)}:{lineno}",
+                            f"command passed as a string {first[:30]!r}")
+    if not argv_bad:
+        rep.ok("subprocess-argv", "every subprocess call passes an argv list")
+
     # Cookie hygiene at every set_cookie call site.
     main = pkg / "main.py"
     src = main.read_text(encoding="utf-8")
@@ -329,6 +392,143 @@ def audit_python(rep: Report) -> None:
         rep.add("WARN", "timing", "culprit/db.py",
                 "unknown-user path hashes a fresh dummy AND verifies it: two "
                 "scrypts vs one, a ~2x latency oracle for username enumeration")
+
+    # Response hardening must still be wired into the middleware.
+    if "_harden(" not in src or "X-Frame-Options" not in src:
+        rep.add("HIGH", "headers", "culprit/main.py",
+                "the response-hardening middleware (_harden) is gone")
+    else:
+        for header in ("X-Content-Type-Options", "X-Frame-Options",
+                       "Content-Security-Policy", "Referrer-Policy", "no-store"):
+            if header not in src:
+                rep.add("HIGH", "headers", "culprit/main.py", f"{header} no longer set")
+        rep.ok("headers", "_harden sets nosniff, frame denial, referrer policy, no-store")
+
+
+def audit_constants(rep: Report) -> None:
+    """Numbers the security design depends on. Each is a one-line edit away
+    from being wrong, so pin the ranges here."""
+    pkg = ROOT / "culprit"
+    auth_src = (pkg / "auth.py").read_text(encoding="utf-8")
+    db_src = (pkg / "db.py").read_text(encoding="utf-8")
+    main_src = (pkg / "main.py").read_text(encoding="utf-8")
+    cli_src = (pkg / "__main__.py").read_text(encoding="utf-8")
+    bad = 0
+
+    def num(pattern: str, text: str) -> float | None:
+        m = re.search(pattern, text)
+        return float(eval(m.group(1))) if m else None  # noqa: S307 -- our own source
+
+    hours = num(r"SESSION_HOURS\s*=\s*([\d\s*+]+)", auth_src)
+    if hours is None or hours > 24 * 30:
+        bad += 1
+        rep.add("WARN", "constants", "culprit/auth.py",
+                f"SESSION_HOURS={hours}: sessions longer than 30 days")
+    attempts = num(r"_MAX_ATTEMPTS\s*=\s*(\d+)", auth_src)
+    window = num(r"_WINDOW_S\s*=\s*([\d.]+)", auth_src)
+    if attempts is None or attempts > 20 or window is None or window < 60:
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/auth.py",
+                f"login limiter {attempts} attempts / {window}s is too loose")
+    n_log2 = num(r"hashlib\.scrypt\([\s\S]*?n=2\s*\*\*\s*(\d+)", db_src)
+    if n_log2 is None or n_log2 < 14:
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/db.py",
+                f"scrypt cost n=2**{n_log2}: below the 2**14 floor")
+    secret_bytes = num(r"token_urlsafe\((\d+)\)", db_src)
+    if secret_bytes is None or secret_bytes < 32:
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/db.py",
+                f"agent secrets are token_urlsafe({secret_bytes}): under 32 bytes")
+    salt_bytes = num(r"token_bytes\((\d+)\)", db_src)
+    if salt_bytes is None or salt_bytes < 16:
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/db.py", f"password salt {salt_bytes} bytes")
+    if "session_secret" in db_src and not re.search(r"token_bytes\(32\)", db_src):
+        rep.add("WARN", "constants", "culprit/db.py", "session secret is not 32 bytes")
+    for label, text in (("API", main_src), ("CLI", cli_src)):
+        if not re.search(r"len\((new_)?password\)\s*<\s*8", text):
+            bad += 1
+            rep.add("HIGH", "constants", label,
+                    "no minimum password length check (expected >= 8)")
+    if not re.search(r"hmac\.compare_digest", auth_src):
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/auth.py", "session compare is not constant-time")
+    try:
+        from culprit import config as config_module
+        cfg = config_module.Config()
+        if cfg.host not in ("127.0.0.1", "localhost", "::1"):
+            bad += 1
+            rep.add("HIGH", "constants", "culprit/config.py",
+                    f"default bind host is {cfg.host!r}, not loopback")
+        if "db_path" in config_module.EDITABLE or "host" in config_module.EDITABLE:
+            bad += 1
+            rep.add("HIGH", "constants", "culprit/config.py",
+                    "db_path/host became web-editable")
+    except Exception as exc:  # noqa: BLE001
+        rep.add("WARN", "constants", "culprit/config.py", f"cannot import config: {exc}")
+    if not bad:
+        rep.ok("constants", f"sessions {hours/24:.0f}d, limiter {attempts:.0f}/"
+               f"{window:.0f}s, scrypt 2**{n_log2:.0f}, {secret_bytes:.0f}-byte agent "
+               "secrets, 8-char passwords, loopback default, locked config fields")
+
+
+def audit_deployment(rep: Report) -> None:
+    """The unit file, the container, the dependency pins -- how it runs."""
+    unit = ROOT / "culprit.service"
+    if unit.exists():
+        text = unit.read_text(encoding="utf-8")
+        missing = [d for d in ("NoNewPrivileges=", "PrivateTmp=", "ProtectSystem=",
+                               "ProtectKernelTunables=", "RestrictSUIDSGID=")
+                   if d not in text]
+        if missing:
+            rep.add("WARN", "systemd", "culprit.service",
+                    f"no sandboxing directives: {', '.join(d.rstrip('=') for d in missing)}"
+                    " (the host needs no privilege; these cost nothing)")
+        else:
+            rep.ok("systemd", "unit carries sandboxing directives")
+        if re.search(r"CULPRIT_HOST\s*=\s*0\.0\.0\.0", text):
+            rep.add("HIGH", "systemd", "culprit.service", "unit binds 0.0.0.0")
+    req = ROOT / "requirements.txt"
+    if req.exists():
+        loose = []
+        for line in req.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if "==" not in line and "<" not in line:
+                loose.append(line.split(">=")[0].split("[")[0])
+        if loose:
+            rep.add("INFO", "dependencies", "requirements.txt",
+                    f"no upper bound on {loose}: a fresh install can pull a major "
+                    "version this was never run against")
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8") if \
+        (ROOT / ".gitignore").exists() else ""
+    for pattern in ("*.pem", "*.key"):
+        if pattern not in gitignore:
+            rep.add("WARN", "gitignore", ".gitignore",
+                    f"{pattern} not ignored -- a TLS key next to the checkout gets committed")
+    # The two security tools must agree on what is public.
+    sibling = ROOT / "tools" / "check_security.py"
+    if sibling.exists():
+        spec = importlib.util.spec_from_file_location("check_security", sibling)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod  # dataclasses need the module registered
+            try:
+                spec.loader.exec_module(mod)
+                same = (set(mod.EXPECTED_PUBLIC_PATHS) == EXPECTED_PUBLIC_PATHS
+                        and set(mod.EXPECTED_AGENT_PATHS) == EXPECTED_AGENT_PATHS
+                        and tuple(mod.EXPECTED_PUBLIC_PREFIXES) == EXPECTED_PUBLIC_PREFIXES)
+                if same:
+                    rep.ok("tools-agree", "check_security.py and this audit expect the "
+                           "same public paths")
+                else:
+                    rep.add("HIGH", "tools-agree", "tools/",
+                            "check_security.py and audit_security.py disagree on the "
+                            "public path allowlist")
+            except Exception as exc:  # noqa: BLE001
+                rep.add("WARN", "tools-agree", "tools/check_security.py", f"cannot load: {exc}")
 
 
 # ---------------------------------------------------------------- routes
@@ -444,9 +644,14 @@ def audit_repo(rep: Report) -> None:
                     "privilege (it only aggregates), so add a non-root user")
     # Dependency advisories, if pip-audit happens to be installed.
     try:
-        out = subprocess.run([sys.executable, "-m", "pip_audit", "-r",
-                              str(ROOT / "requirements.txt"), "--progress-spinner",
-                              "off"], capture_output=True, text=True, timeout=120)
+        # In a scratch cwd: pip-audit builds a throwaway environment to
+        # resolve the requirements and must not leave it in the checkout.
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="culprit-audit-") as scratch:
+            out = subprocess.run([sys.executable, "-m", "pip_audit", "-r",
+                                  str(ROOT / "requirements.txt"), "--progress-spinner",
+                                  "off"], capture_output=True, text=True, timeout=300,
+                                 cwd=scratch)
         if out.returncode == 0:
             rep.ok("dependencies", "pip-audit: no known vulnerabilities")
         elif "No module named" in out.stderr:
@@ -460,25 +665,49 @@ def audit_repo(rep: Report) -> None:
                 "-r requirements.txt` to check advisories")
 
 
+SECTIONS = {
+    "frontend": ("Frontend (HTML sinks, links, fetches, login form)", audit_frontend),
+    "python": ("Python", audit_python),
+    "constants": ("Security constants", audit_constants),
+    "routes": ("Routes and gate", audit_routes),
+    "repo": ("Repository and files", audit_repo),
+    "deployment": ("Deployment (unit, container, pins, tool agreement)", audit_deployment),
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--strict", action="store_true", help="exit 1 on WARN too")
+    parser.add_argument("--only", default="",
+                        help="comma-separated sections: " + ", ".join(SECTIONS))
+    parser.add_argument("--skip", default="", help="comma-separated sections to skip")
+    parser.add_argument("--quiet", action="store_true", help="print only WARN/HIGH")
+    parser.add_argument("--json", metavar="PATH", help="write findings to a JSON file")
     args = parser.parse_args()
-    rep = Report()
+    only = {x for x in args.only.split(",") if x}
+    skip = {x for x in args.skip.split(",") if x}
+    unknown = (only | skip) - set(SECTIONS)
+    if unknown:
+        print(f"{RED}unknown section(s) {sorted(unknown)}; choose from "
+              f"{', '.join(SECTIONS)}{RESET}")
+        return 2
+    rep = Report(quiet=args.quiet)
     print(f"{BOLD}culprit static security audit{RESET} -> {ROOT}")
-    section("Frontend (HTML sinks)")
-    audit_frontend(rep)
-    section("Python")
-    audit_python(rep)
-    section("Routes and gate")
-    audit_routes(rep)
-    section("Repository and files")
-    audit_repo(rep)
+    for key, (title, fn) in SECTIONS.items():
+        if (only and key not in only) or key in skip:
+            continue
+        section(title)
+        fn(rep)
     counts = {lvl: sum(1 for f in rep.findings if f.level == lvl)
               for lvl in ("HIGH", "WARN", "INFO", "PASS")}
     print(f"\n{BOLD}summary{RESET}  " + "  ".join(f"{k} {v}" for k, v in counts.items()))
     failing = counts["HIGH"] > 0 or (args.strict and counts["WARN"] > 0)
-    print(f"{RED if failing else GREEN}{'FAIL' if failing else 'OK'}{RESET}")
+    result = "FAIL" if failing else "OK"
+    print(f"{RED if failing else GREEN}{result}{RESET}")
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump({"root": str(ROOT), "result": result, "counts": counts,
+                       "findings": [f.__dict__ for f in rep.findings]}, fh, indent=2)
     return 1 if failing else 0
 
 
