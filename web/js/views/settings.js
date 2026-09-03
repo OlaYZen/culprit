@@ -92,6 +92,7 @@ export function createSettings() {
   const inputs = new Map();
   let config = null;
   let limits = {};
+  let access = {};
 
   const head = viewHead({
     title: "Settings",
@@ -102,6 +103,7 @@ export function createSettings() {
   const figSlot = el("div");
   const togglesSlot = el("div");
   const accountSlot = el("div");
+  const trustSlot = el("div");
   const deploySlot = el("div");
   const form = el("form", { novalidate: true });
   const groupsSlot = el("div.cells.cells--2");
@@ -115,13 +117,14 @@ export function createSettings() {
   }, [saveButton, revertButton, summary]));
   const infoRow = el("div.cols.cols--2");
   const nodesSlot = el("div");
-  root.append(el("div.stack", {}, [figSlot, togglesSlot, accountSlot, deploySlot, form, infoRow, nodesSlot]));
+  root.append(el("div.stack", {}, [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, form, infoRow, nodesSlot]));
 
   async function load() {
     head.setPending(true);
     pendingSlot(figSlot, skeletonFigures(6));
     pendingSlot(togglesSlot, skeletonSection("Immediate settings", 2));
     pendingSlot(accountSlot, skeletonSection("Account", 4));
+    pendingSlot(trustSlot, skeletonSection("Network trust", 5));
     pendingSlot(deploySlot, skeletonSection("Agent deployment", 4));
     if (!groupsSlot.childElementCount) {
       pendingSlot(groupsSlot, el("div", { style: { display: "contents" } },
@@ -135,9 +138,11 @@ export function createSettings() {
       const payload = await api("/api/settings");
       config = payload.config;
       limits = payload.limits || {};
+      access = payload.access || {};
       renderForm();
       renderToggles();
       renderAccount();
+      renderTrust();
       renderDeploy();
       renderInfo();
       renderNodes();
@@ -145,7 +150,7 @@ export function createSettings() {
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, deploySlot, infoRow, nodesSlot]) readySlot(slot, []);
+      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, infoRow, nodesSlot]) readySlot(slot, []);
       readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
@@ -263,6 +268,100 @@ export function createSettings() {
     }));
   }
 
+  /** Which network paths the host believes. Reverse proxies are refused
+   *  until declared here; the Host allow-list is opt-in because a wrong one
+   *  locks the operator out. The panel shows how *this* request arrived, so
+   *  what you type has something concrete to match — and the server refuses
+   *  a save that would cut off the connection making it. */
+  function renderTrust() {
+    const area = (key, placeholder, label) => el("textarea", {
+      id: `set-${key}`, rows: 3, placeholder, spellcheck: "false", autocomplete: "off",
+      "aria-label": label, "aria-describedby": `help-set-${key}`,
+    });
+    const proxies = area("trusted_proxies", "127.0.0.1\n10.0.0.0/8", "Trusted proxies");
+    const hosts = area("trusted_hosts", "dash.example.com\n*.lan\n192.168.1.5", "Trusted hosts");
+    const seed = () => {
+      proxies.value = (config.trusted_proxies || []).join("\n");
+      hosts.value = (config.trusted_hosts || []).join("\n");
+    };
+    seed();
+    const entries = {
+      trusted_proxies: { input: proxies, error: el("div.field__err", { id: "err-trusted_proxies", hidden: true }) },
+      trusted_hosts: { input: hosts, error: el("div.field__err", { id: "err-trusted_hosts", hidden: true }) },
+    };
+    for (const entry of Object.values(entries)) entry.input.addEventListener("input", () => clearFieldError(entry));
+    const result = el("div.result");
+    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save network trust"]);
+    save.addEventListener("click", async () => {
+      setBusy(save, true, "Saving…");
+      result.replaceChildren();
+      for (const entry of Object.values(entries)) clearFieldError(entry);
+      try {
+        const payload = await api("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify({ trusted_proxies: splitLines(proxies.value), trusted_hosts: splitLines(hosts.value) }),
+        });
+        config = payload.config;
+        seed();
+        inlineResult(result, "Saved — applies from the next request.", "ok");
+        section_.metaNode.textContent = trustMeta();
+      } catch (error) {
+        const fieldErrors = error.payload?.field_errors || {};
+        let focused = false;
+        for (const [key, message] of Object.entries(fieldErrors)) {
+          if (!entries[key]) continue;
+          markFieldError(entries[key], message);
+          if (!focused) { entries[key].input.focus(); focused = true; }
+        }
+        inlineResult(result, Object.keys(fieldErrors).length ? "Not saved — see the fields." : error.message, "error");
+      }
+      setBusy(save, false, "Save network trust");
+    });
+
+    const trustMeta = () => {
+      const n = (config.trusted_proxies || []).length;
+      return n ? `${n} trusted ${n === 1 ? "proxy" : "proxies"}` : "no reverse proxy declared";
+    };
+    const hostCount = (config.trusted_hosts || []).length;
+    const rows = [
+      kv("Your address", access.client || fmt.dash, { mono: true }),
+      kv("Socket peer", access.via_proxy ? `${access.peer} — a trusted proxy` : access.peer || fmt.dash,
+        { mono: true, tone: access.via_proxy ? "ok" : null }),
+      kv("Reached as", access.host || fmt.dash, { mono: true }),
+      kv("Scheme", access.scheme || fmt.dash, { mono: true, tone: access.scheme === "https" ? "ok" : null }),
+      kv("Host check", hostCount ? `on — ${hostCount} ${hostCount === 1 ? "name" : "names"}` : "off — any Host accepted",
+        { tone: hostCount ? "ok" : null }),
+    ];
+    if (access.runtime_proxies?.length) {
+      rows.push(kv("Added for this run", access.runtime_proxies.join(", "), { mono: true, tone: "info" }));
+    }
+    const section_ = section({
+      title: "Network trust", meta: trustMeta(),
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [
+          fieldRow({ id: proxies.id, label: "Trusted proxies", unit: "one IP or CIDR per line", input: proxies, area: true, error: entries.trusted_proxies.error,
+            help: "Reverse proxies whose X-Forwarded-For / Forwarded headers are honoured, so the login limiter keys on the real client "
+                + "and the session cookie learns it crossed TLS. Empty (the default) refuses any request that arrives with a forwarding "
+                + "header from an undeclared address — with a 400 that says why, rather than quietly ignoring the header." }),
+          fieldRow({ id: hosts.id, label: "Trusted hosts", unit: "one name or IP per line", input: hosts, area: true, error: entries.trusted_hosts.error,
+            help: "Names this dashboard is reached at — dash.example.com, *.lan, 192.168.1.5 — without a port. Any other Host header is "
+                + "refused, which shuts DNS rebinding. Empty accepts any Host. localhost, 127.0.0.1 and ::1 always pass." }),
+        ]),
+        el("div", {}, [
+          subhead("This connection"),
+          kvs(rows),
+          el("div.row", { style: { marginTop: "10px" } }, [save, result]),
+        ]),
+      ]),
+      foot: el("span", {}, [
+        "A save that would refuse the very connection making it is rejected, so you cannot lock yourself out from here. ",
+        el("code", { text: "--trust-proxy" }),
+        " on the command line adds proxies for one run without saving them — the way in for a host only reachable through one.",
+      ]),
+    });
+    readySlot(trustSlot, section_);
+  }
+
   function renderDeploy() {
     const hostInput = el("input", { type: "text", id: "set-deploy_host", value: config.deploy_host || "", placeholder: window.location.host,
       autocomplete: "off", spellcheck: "false", "aria-label": "Host address agents report to" });
@@ -315,10 +414,10 @@ export function createSettings() {
     }));
   }
 
-  function fieldRow({ id, label, unit, input, help, error }) {
+  function fieldRow({ id, label, unit, input, help, error, area = false }) {
     return el("div.field", {}, [
       el("label.field__label", { for: id }, [el("span", { text: label }), unit ? el("span.field__unit", { text: unit }) : null]),
-      el("div.input", {}, [input]),
+      el(area ? "div.input.input--area" : "div.input", {}, [input]),
       help ? el("div.field__help", { id: `help-${id}`, text: help }) : null,
       error || null,
     ]);
@@ -498,6 +597,11 @@ function clearFieldError(entry) {
   entry.error.hidden = true;
   entry.input.removeAttribute("aria-invalid");
   entry.input.closest(".input")?.classList.remove("is-invalid");
+}
+
+/** Textarea list -> entries: one per line, commas and blank lines tolerated. */
+function splitLines(text) {
+  return String(text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
 }
 
 function formatLimit(limit) {

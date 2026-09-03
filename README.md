@@ -173,6 +173,18 @@ does the same.
   reverse proxy — and point agents at `https://`. For a self-signed
   certificate, `./agent.sh --insecure …` skips verification (the agent logs a
   warning every start, because it should).
+* **Network trust**: reverse proxies are **refused until declared**. A
+  request that carries a forwarding header (`X-Forwarded-For`, `Forwarded`,
+  `X-Real-IP`, …) from an address not listed under Settings › Network trust
+  gets a 400 that says so — not silently ignored, because an undeclared proxy
+  means every visitor shares one login-limiter bucket and the host never
+  learns the real scheme. From a declared proxy the right-most untrusted hop
+  becomes the client. The same panel holds an optional Host allow-list
+  (names, `*.wildcards`, IPs) that shuts DNS rebinding; loopback names
+  always pass so a shell on the host can fix a wrong list, and a save that
+  would refuse the connection making it is rejected. `--trust-proxy IPS`
+  adds proxies for one run without saving them — the bootstrap for a host
+  only reachable through one.
 
 ---
 
@@ -266,7 +278,8 @@ Total: well under 5% of one core, ~65 MB resident.
                                            # hashing, session tamper/expiry/
                                            # revocation, the limiter, agent tokens,
                                            # command scoping, bounded gzip, the
-                                           # startup refusal, config patches
+                                           # startup refusal, config patches, the
+                                           # proxy / Host trust rules
 .venv/bin/python tools/check_ingest.py --throwaway-user
                                            # live: every forged/misplaced token
                                            # shape must 401, then 45 hostile reports
@@ -277,10 +290,10 @@ Total: well under 5% of one core, ~65 MB resident.
 
 Run the security tools before exposing a host to a network, and again through
 any TLS proxy you put in front of it — the header checks prove what the proxy
-actually forwards, and if the proxy sits on the same machine start the host
-with `--trust-proxy 127.0.0.1` so the login limiter sees real client
-addresses. A CRIT or HIGH finding fails the exit status so it can gate a
-deploy.
+actually forwards. Declare the proxy first (Settings › Network trust, or
+`--trust-proxy 127.0.0.1` for one on the same machine): until then the host
+refuses every request that arrives through it, and the scan says so and
+stops. A CRIT or HIGH finding fails the exit status so it can gate a deploy.
 
 The smoketest asserts process coverage against `len(psutil.pids())` — ground
 truth, not assumption. Destructive actions are refused for PID 1, kernel

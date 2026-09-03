@@ -15,6 +15,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from . import trust
+
 ROOT = Path(__file__).resolve().parent.parent
 log = logging.getLogger("culprit.config")
 
@@ -111,6 +113,20 @@ class Config:
     deploy_host: str = ""            # e.g. "192.168.1.5:8787" or "https://hub:8787"
     agent_command: str = "./agent.sh"
 
+    # --- network trust ----------------------------------------------------
+    # Reverse proxies are refused until declared: a request that carries a
+    # forwarding header (X-Forwarded-For, Forwarded, X-Real-IP, ...) from a
+    # peer not listed here gets a 400, because honouring the header would let
+    # any client pick the address the login limiter keys on, and ignoring it
+    # would hide an undeclared proxy (everyone behind it sharing one limiter
+    # bucket). IPs or CIDR ranges; `--trust-proxy` adds to this for one run.
+    trusted_proxies: list[str] = field(default_factory=list)
+    # Host header allow-list. Empty = any Host accepted (a wrong list locks
+    # the operator out from the network, so this is opt-in); loopback names
+    # always pass so a shell on the machine can fix it. Names, `*.domain`
+    # wildcards, or IP literals -- no ports, the port is never compared.
+    trusted_hosts: list[str] = field(default_factory=list)
+
     # --- ui ---
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -164,6 +180,13 @@ EDITABLE = {
     "event_lookback_days", "event_max_per_source",
     "allow_process_actions", "open_browser", "ui",
     "deploy_host", "agent_command",
+    "trusted_proxies", "trusted_hosts",
+}
+
+# Lists of text entries, validated by culprit.trust rather than by range.
+LIST_FIELDS: dict[str, Any] = {
+    "trusted_proxies": trust.clean_proxies,
+    "trusted_hosts": trust.parse_hosts,
 }
 
 # Accepted ranges for editable numeric fields, used by the API to reject
@@ -224,6 +247,8 @@ def load() -> Config:
                     value = bool(value)
                 elif spec.type in ("str", str):
                     value = str(value)
+                elif key in LIST_FIELDS:
+                    value = _load_list(key, value)
             except (TypeError, ValueError):
                 continue
             setattr(cfg, key, value)
@@ -233,6 +258,22 @@ def load() -> Config:
     with _lock:
         _current = cfg
     return cfg
+
+
+def _load_list(key: str, value: Any) -> list[str]:
+    """A hand-edited config.json may hold anything. Keep the entries that
+    parse and log the rest: a dropped proxy entry fails closed (its requests
+    are refused, which is visible), a dropped host entry only tightens."""
+    entries = trust.split_entries(value)
+    kept: list[str] = []
+    for entry in entries:
+        try:
+            LIST_FIELDS[key]([entry])
+        except ValueError as exc:
+            log.warning("config.json %s: dropping %s", key, exc)
+            continue
+        kept.append(entry)
+    return kept
 
 
 def update(patch: dict[str, Any], persist: bool = True) -> tuple[Config, list[str]]:
@@ -260,6 +301,14 @@ def update(patch: dict[str, Any], persist: bool = True) -> tuple[Config, list[st
                 errors.append(f"{key}: not editable at runtime")
                 continue
             spec = known[key]
+            if key in LIST_FIELDS:
+                try:
+                    value = LIST_FIELDS[key](trust.split_entries(value))
+                except ValueError as exc:
+                    errors.append(f"{key}: {exc}")
+                    continue
+                setattr(cfg, key, value)
+                continue
             try:
                 if spec.type in ("bool", bool):
                     value = bool(value)

@@ -484,6 +484,96 @@ def check_path_bypass(ctx: Ctx) -> None:
                       f"{tried} alternative spellings/headers all bounced")
 
 
+# What a reverse proxy sets and a client can forge. Mirrors culprit.trust.
+FORWARDING_PROBES = (
+    ("X-Forwarded-For", "10.9.9.9"), ("Forwarded", "for=10.9.9.9;proto=https"),
+    ("X-Real-IP", "10.9.9.9"), ("X-Forwarded-Host", "evil.example"),
+    ("X-Forwarded-Proto", "https"), ("X-Forwarded-Port", "443"),
+    ("X-Forwarded-Prefix", "/x"), ("X-Forwarded-Server", "evil.example"),
+    ("X-Client-IP", "10.9.9.9"), ("True-Client-IP", "10.9.9.9"),
+    ("CF-Connecting-IP", "10.9.9.9"),
+)
+
+
+def scan_access(ctx: Ctx) -> dict[str, Any] | None:
+    """How the host sees this scanner (peer, via_proxy, Host) -- needs a
+    session; None without one."""
+    if not ctx.cookie:
+        return None
+    r = safe_req(ctx, "GET", "/api/settings", cookie=ctx.cookie)
+    if r is None or r.status != 200:
+        return None
+    return (r.json() or {}).get("access") or None
+
+
+def check_proxy_trust(ctx: Ctx) -> None:
+    """A forwarding header from an undeclared peer must be refused outright
+    (400, reason `untrusted_proxy`) -- never honoured (the client would pick
+    the address the login limiter keys on) and never quietly ignored (that
+    hides an undeclared proxy, behind which every visitor shares one limiter
+    bucket). Against the open health route, so no session is needed."""
+    access = scan_access(ctx)
+    if access and access.get("via_proxy"):
+        ctx.report.add("INFO", "proxy-trust",
+                       f"this scan reaches the host through declared proxy "
+                       f"{access.get('peer')}; a forged header from here is "
+                       "rewritten by the proxy, so refusal is not provable from "
+                       "this side -- scan the host directly to prove it")
+        return
+    tried = bad = 0
+    for name, value in FORWARDING_PROBES:
+        r = safe_req(ctx, "GET", "/api/healthz", headers={name: value})
+        if r is None:
+            continue
+        tried += 1
+        if r.status == 400 and (r.json() or {}).get("reason") == "untrusted_proxy":
+            continue
+        bad += 1
+        if 200 <= r.status < 300:
+            ctx.report.add("HIGH", "proxy-trust",
+                           f"GET /api/healthz with {name}: {value} -> {r.status}: a "
+                           "forwarding header from an undeclared peer was accepted "
+                           "(reverse proxies must be refused until declared in "
+                           "Settings > Network trust)")
+        else:
+            ctx.report.add("WARN", "proxy-trust",
+                           f"{name} -> {r.status} (expected 400 untrusted_proxy)")
+    if tried and not bad:
+        ctx.report.ok("proxy-trust",
+                      f"{tried} forwarding headers refused with 400 from this "
+                      "undeclared address")
+
+
+def check_host_trust(ctx: Ctx) -> None:
+    """The Host allow-list. When set, a foreign Host is refused (400
+    `untrusted_host`) and a loopback name still passes; when empty the host
+    accepts any Host, which is the default -- INFO on loopback, WARN on a
+    network address, where DNS rebinding is the thing it would stop."""
+    r = safe_req(ctx, "GET", "/api/healthz", headers={"Host": "rebind.evil.example"})
+    if r is None:
+        return
+    reason = (r.json() or {}).get("reason") if r.status == 400 else None
+    if reason == "untrusted_host":
+        back = safe_req(ctx, "GET", "/api/healthz", headers={"Host": "localhost"})
+        if back is not None and back.status != 200:
+            ctx.report.add("HIGH", "host-trust",
+                           f"Host: localhost -> {back.status}: loopback names must "
+                           "always pass or the list cannot be corrected from the host")
+        else:
+            ctx.report.ok("host-trust", "foreign Host refused; loopback Host still accepted")
+        return
+    if 200 <= r.status < 300:
+        loopback = ctx.http.host in ("127.0.0.1", "localhost", "::1")
+        ctx.report.add("INFO" if loopback else "WARN", "host-trust",
+                       "any Host header is accepted (Settings > Network trust > "
+                       "Trusted hosts is empty)"
+                       + ("" if loopback else "; on a network-reachable host list the "
+                          "names it is reached at to shut DNS rebinding"))
+        return
+    ctx.report.add("WARN", "host-trust", f"Host: rebind.evil.example -> {r.status} "
+                   f"{r.text[:80]!r} (expected 200 or 400 untrusted_host)")
+
+
 def check_static(ctx: Ctx) -> None:
     """The static mount is public; it must serve web/ and nothing above it."""
     probes = [
@@ -1414,8 +1504,9 @@ def check_password_revocation(ctx: Ctx) -> None:
 
 def check_limiter_bypass(ctx: Ctx) -> None:
     """--active, after the lockout: forwarding headers must not give an
-    attacker a fresh address. (If a trusted proxy sets these, run the scan
-    through the proxy -- the app itself must never honour them.)"""
+    attacker a fresh address. From an undeclared peer they are refused
+    outright (check_proxy_trust); this proves the refusal also covers the
+    login route while a lockout is in force."""
     if not (ctx.args.active and ctx.args.password and ctx.auth_enabled):
         return
     user = ctx.args.user or "admin"
@@ -1434,10 +1525,9 @@ def check_limiter_bypass(ctx: Ctx) -> None:
         if r.status == 200:
             bad += 1
             ctx.report.add("HIGH", "rate-limit",
-                           f"lockout bypassed with {headers} -- the server trusts "
-                           "forwarding headers from this address (uvicorn "
-                           "proxy_headers); only a real proxy should be trusted "
-                           "(see --trust-proxy)")
+                           f"lockout bypassed with {headers} -- the server honours "
+                           "forwarding headers from this address; only a declared "
+                           "proxy may be trusted (Settings > Network trust)")
     if not bad:
         ctx.report.ok("rate-limit", "lockout holds against 7 forwarding-header spoofs")
 
@@ -1646,9 +1736,16 @@ def main() -> int:
     print(f"{BOLD}culprit security check{RESET} -> {url}"
           f"{'  [active]' if args.active else '  [safe: read-only probes]'}")
     try:
-        ctx.http.req("GET", "/api/healthz", timeout=4.0)
+        probe = ctx.http.req("GET", "/api/healthz", timeout=4.0)
     except OSError as exc:
         print(f"{RED}cannot reach {url}: {exc}{RESET}")
+        return 2
+    if probe.status == 400 and (probe.json() or {}).get("reason"):
+        # The host refuses this scanner's network path (Host not in the
+        # trusted list, or the scanner sits behind an undeclared proxy).
+        # Nothing below could tell a refusal from a gate, so stop here.
+        print(f"{RED}{url} refuses this scanner: "
+              f"{(probe.json() or {}).get('detail')}{RESET}")
         return 2
 
     section("Surface")
@@ -1670,6 +1767,8 @@ def main() -> int:
             check_route_gate(ctx)
             check_public_routes(ctx)
             check_path_bypass(ctx)
+            check_proxy_trust(ctx)
+            check_host_trust(ctx)
             check_static(ctx)
 
         if want("browser"):

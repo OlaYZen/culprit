@@ -465,12 +465,27 @@ def audit_constants(rep: Report) -> None:
             bad += 1
             rep.add("HIGH", "constants", "culprit/config.py",
                     "db_path/host became web-editable")
+        if cfg.trusted_proxies:
+            bad += 1
+            rep.add("HIGH", "constants", "culprit/config.py",
+                    f"trusted_proxies defaults to {cfg.trusted_proxies}: reverse "
+                    "proxies must be refused until declared")
     except Exception as exc:  # noqa: BLE001
         rep.add("WARN", "constants", "culprit/config.py", f"cannot import config: {exc}")
+    if not re.search(r"proxy_headers\s*=\s*False", cli_src):
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/__main__.py",
+                "uvicorn proxy_headers is not pinned off: X-Forwarded-For from "
+                "loopback would be honoured behind the app's own trust check")
+    if "trust.resolve(" not in main_src or "access.refusal" not in main_src:
+        bad += 1
+        rep.add("HIGH", "constants", "culprit/main.py",
+                "the middleware no longer resolves network trust before the gate")
     if not bad:
         rep.ok("constants", f"sessions {hours/24:.0f}d, limiter {attempts:.0f}/"
                f"{window:.0f}s, scrypt 2**{n_log2:.0f}, {secret_bytes:.0f}-byte agent "
-               "secrets, 8-char passwords, loopback default, locked config fields")
+               "secrets, 8-char passwords, loopback default, locked config fields, "
+               "no proxy trusted by default")
 
 
 def audit_deployment(rep: Report) -> None:
