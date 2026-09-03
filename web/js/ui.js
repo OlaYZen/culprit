@@ -120,7 +120,10 @@ export function copyButton(text, label = "Copy") {
       ${icons.copy.replace("<svg", '<svg class="copyico__copy"')}
       ${icons.check.replace("<svg", '<svg class="copyico__done"')}
     </span>
-    <span class="copybtn__text" data-idle="${label}"></span>`;
+    <span class="copybtn__text"></span>`;
+  // Set as a property, not interpolated into markup: callers pass names that
+  // came from a monitored machine (service names, command lines).
+  button.querySelector(".copybtn__text").dataset.idle = label;
   return button;
 }
 
@@ -318,8 +321,8 @@ export function minDelay(promise, min = 300) {
 /* ══ Empty / gated / note ══════════════════════════════════════════════ */
 export function emptyState(title, hint, icon = icons.empty) {
   const node = el("div.empty");
-  node.innerHTML = `${icon}<div class="empty__title"></div>`;
-  node.querySelector(".empty__title").textContent = title;
+  if (icon) node.append(frag(icon));
+  node.append(el("div.empty__title", { text: title }));
   if (hint) node.append(el("div.empty__hint", { text: hint }));
   return node;
 }
@@ -348,8 +351,8 @@ export function note(kind, content, { margin = false } = {}) {
   const node = el(`div.note${kind && kind !== "info" ? `.note--${kind}` : ""}`,
     margin ? { style: { marginTop: "10px" } } : {});
   const icon = { warn: icons.warn, ok: icons.ok, crit: icons.crit }[kind] || icons.info;
-  node.innerHTML = `${icon}<div></div>`;
-  const slot = node.querySelector("div");
+  const slot = el("div");
+  node.append(frag(icon), slot);
   if (content instanceof Node) slot.append(content);
   else slot.innerHTML = content;
   return node;

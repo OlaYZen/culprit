@@ -259,7 +259,8 @@ web/                   no-build ES-module frontend
     js/stream.js       SSE client + per-node store; js/app.js routing + chrome
     js/ui.js           primitives: dialog, banner, combobox, skeleton slots …
     js/views/          one module per view; shared.js = section/figure/pill/…
-tools/                 smoketest, module-graph check, API-contract check
+tools/                 smoketest, module-graph check, API-contract check,
+                       security audit (static) + security scanner (live)
 docs/                  ux-rules.md (uxgoodpatterns UI reference)
 install.sh  run.sh  culprit.service          # host artifacts
 ```
@@ -288,7 +289,26 @@ from a host checkout after shared-code changes.
                                            # reporting agent node (--node, or the
                                            # first online one); add --user/--password
                                            # when auth is on
+.venv/bin/python tools/audit_security.py   # static: HTML sinks fed unescaped
+                                           # values, gate allowlist drift, dynamic
+                                           # SQL, cookie flags, tracked secrets,
+                                           # database file modes
+.venv/bin/python tools/check_security.py   # live, black-box: every route bounces
+                                           # without a session, path/header
+                                           # bypasses, forged cookies, login
+                                           # enumeration and timing, agent-token
+                                           # rejection, headers, CORS, injection,
+                                           # write validation. Add --user/--password
+                                           # for the authenticated half; --active
+                                           # also proves the agent-token lifecycle
+                                           # and the login lockout (locks the
+                                           # scanning address out for 5 minutes)
 ```
+
+Run the security pair before exposing a host to a network, and again through
+any TLS proxy you put in front of it — the header checks prove what the proxy
+actually forwards. A CRIT or HIGH finding fails the exit status so it can gate
+a deploy.
 
 The smoketest asserts process coverage against `len(psutil.pids())` — ground
 truth, not assumption. Destructive actions are refused for PID 1, kernel

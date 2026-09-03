@@ -6,6 +6,9 @@ Two independent mechanisms, because the two callers are different animals:
   db.py) and get an HMAC-signed session cookie: `user:expiry:signature`,
   signed with a per-installation secret stored in the database. Stateless, so
   sessions survive restarts and there is no session table to leak or prune.
+  The signing key also mixes in the user's current password hash, so changing
+  (or removing) the password invalidates every session for that account --
+  the one revocation a stateless design still needs, at no storage cost.
 * **Agents** authenticate every report with a bearer token `<name>.<secret>`;
   only the SHA-256 of the secret is stored. A token identifies exactly one
   node and can be revoked without touching any other.
@@ -55,6 +58,7 @@ class Auth:
         self.history = history
         self._secret: bytes | None = None
         self._attempts: dict[str, list[float]] = {}
+        self._keys: dict[str, tuple[float, bytes]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ state
@@ -78,10 +82,34 @@ class Auth:
         return self._secret
 
     # --------------------------------------------------------------- sessions
+    _KEY_TTL = 5.0
+
+    def _key(self, username: str) -> bytes:
+        """Per-user signing key: the install secret mixed with the user's
+        stored password hash. Cached briefly (this runs per request) and only
+        for users that exist, so a flood of forged cookies for made-up names
+        cannot grow the cache -- their lookup is one indexed SELECT."""
+        now = time.monotonic()
+        cached = self._keys.get(username)
+        if cached and now - cached[0] < self._KEY_TTL:
+            return cached[1]
+        stored = self.history.password_hash(username)
+        key = hmac.new(self.secret(), (stored or "").encode(), "sha256").digest()
+        if stored:
+            with self._lock:
+                self._keys[username] = (now, key)
+        return key
+
+    def invalidate(self, username: str) -> None:
+        """Forget the cached key after a password change or rename, so the
+        very next request sees the new hash rather than waiting out the TTL."""
+        with self._lock:
+            self._keys.pop(username, None)
+
     def issue_session(self, username: str) -> str:
         expiry = int(time.time() + SESSION_HOURS * 3600)
         body = f"{username}:{expiry}"
-        sig = hmac.new(self.secret(), body.encode(), "sha256").hexdigest()
+        sig = hmac.new(self._key(username), body.encode(), "sha256").hexdigest()
         return f"{body}:{sig}"
 
     def verify_session(self, cookie: str | None) -> str | None:
@@ -94,7 +122,7 @@ class Auth:
         except ValueError:
             return None
         body = f"{username}:{expiry}"
-        expected = hmac.new(self.secret(), body.encode(), "sha256").hexdigest()
+        expected = hmac.new(self._key(username), body.encode(), "sha256").hexdigest()
         if not hmac.compare_digest(sig, expected):
             return None
         if expiry < time.time():
