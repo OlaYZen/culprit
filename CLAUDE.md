@@ -25,7 +25,7 @@ cd culprit-agent && ./agent.sh <host-url> <token>   # bootstrap venv (psutil onl
 ./culprit-agent/sync-package.sh   # maintainer: refresh culprit-agent/culprit/ from the host package
 ```
 
-### The three verification tools — run after any change, they catch real bugs
+### The verification tools — run after any change, they catch real bugs
 
 ```bash
 .venv/bin/python tools/smoketest.py        # exercises every collector against THIS machine; prints
@@ -36,8 +36,20 @@ cd culprit-agent && ./agent.sh <host-url> <token>   # bootstrap venv (psutil onl
 .venv/bin/python tools/check_contract.py --user <name> --password <pw>   # every field the JS views
                                            # read is present in the live API (needs a running server;
                                            # --user/--password only when auth is on)
+.venv/bin/python tools/audit_security.py   # static: unescaped HTML sinks, public-allowlist drift,
+                                           # dynamic SQL, cookie flags, unbounded decompression,
+                                           # tracked credentials, file modes
+.venv/bin/python tools/check_security.py --user <name> --password <pw>   # live black-box scan: every
+                                           # route (enumerated from app.routes) bounces without a
+                                           # session, path/header bypasses, forged cookies, login
+                                           # enumeration + timing, agent-token rejection, headers,
+                                           # CORS, injection, write validation. Safe by default;
+                                           # --active adds a throwaway-agent lifecycle and exhausts
+                                           # the login limiter (locks that address out for 5 min)
 .venv/bin/python -m pyflakes culprit tools # lint
 ```
+
+Security invariants the two security tools pin down (a change to any of them must update the tool in the same commit): the public path allowlist in `auth.py` is mirrored as `EXPECTED_PUBLIC_*` in both tools; every response carries nosniff / `X-Frame-Options: DENY` / `frame-ancestors 'none'` / `Referrer-Policy`, and `/api/*` is `Cache-Control: no-store` (`_harden` in `main.py`); gzip reports are inflated through a bounded `decompressobj` (`_inflate`), never `gzip.decompress`; session signatures mix in the user's password hash (`Auth._key`) so a password change revokes every session; the unknown-user login path costs exactly one scrypt (`_dummy_hash`) so latency cannot enumerate usernames. Values interpolated into `innerHTML`/`html:` templates in `web/js` must go through `esc()` or be a static `icons.*` string — the audit fails otherwise.
 
 There is **no unit-test suite** by design: what breaks here is environmental (a sysfs path a distro moved, a kernel without PSI, a gated journal), which only the real machine reveals — hence `smoketest.py`. When you add or rename a payload field, update `tools/check_contract.py`'s `CONTRACT` map in the same change or the frontend silently degrades.
 

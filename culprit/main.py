@@ -10,13 +10,13 @@ endpoints.
 from __future__ import annotations
 
 import asyncio
-import gzip
 import json as json_module
 import logging
 import os
 import threading
 import time
 import webbrowser
+import zlib
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -105,6 +105,9 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
+    # No OAuth2 flows here, so the Swagger helper page it would add is one
+    # more route for nothing.
+    swagger_ui_oauth2_redirect_url=None,
     openapi_url="/api/openapi.json",
 )
 
@@ -123,15 +126,39 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
     if auth is None:  # startup race: nothing is served before lifespan runs
         return await call_next(request)
     gate = auth.gate(request.url.path)
+    response = None
     if gate == "session":
         user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
         if user is None:
             if request.url.path.startswith("/api/"):
-                return JSONResponse({"detail": "authentication required"},
-                                    status_code=401)
-            return RedirectResponse("/login", status_code=303)
-        request.state.user = user
-    return await call_next(request)
+                response = JSONResponse({"detail": "authentication required"},
+                                        status_code=401)
+            else:
+                response = RedirectResponse("/login", status_code=303)
+        else:
+            request.state.user = user
+    if response is None:
+        response = await call_next(request)
+    return _harden(request, response)
+
+
+def _harden(request: Request, response):  # noqa: ANN001, ANN201
+    """Defensive headers on every response, including the gate's own 401/303.
+
+    The dashboard is a page with an End-task button that acts on real
+    machines, so it must not be frameable (clickjacking) and its JSON must not
+    survive in a shared browser's cache. `setdefault` so a handler that set
+    its own value (the SSE stream's no-cache) keeps it. tools/check_security.py
+    asserts these are present on the wire.
+    """
+    headers = response.headers
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    headers.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path.startswith("/api/"):
+        headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @app.get("/login", include_in_schema=False)
@@ -204,7 +231,19 @@ async def api_account_password(
     if not history.set_password(user, new_password):
         raise HTTPException(500, "could not update the password")
     log.info("password changed for %s", user)
-    return JSONResponse({"ok": True})
+    # Sessions are signed with the password hash, so this change just
+    # revoked every session for the account -- including the one making the
+    # request. Re-issue it: the person who changed the password stays in,
+    # anyone else holding a copied cookie is out.
+    auth.invalidate(user)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        SESSION_COOKIE, auth.issue_session(user),
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+        max_age=7 * 24 * 3600, path="/",
+    )
+    return response
 
 
 @app.post("/api/account/username", summary="Rename the signed-in user")
@@ -258,12 +297,7 @@ async def api_agent_report(request: Request) -> dict[str, Any]:
     if len(body) > MAX_REPORT_BYTES:
         raise HTTPException(413, "report too large")
     if request.headers.get("content-encoding") == "gzip":
-        try:
-            body = gzip.decompress(body)
-        except OSError:
-            raise HTTPException(400, "bad gzip body")
-        if len(body) > MAX_REPORT_BYTES * 4:
-            raise HTTPException(413, "report too large after decompression")
+        body = _inflate(body, MAX_REPORT_BYTES * 4)
     try:
         payload = json_module.loads(body)
     except ValueError:
@@ -595,31 +629,12 @@ async def api_processes() -> dict[str, Any]:
 
 
 @app.get("/api/processes/{pid}", summary="Full detail for one process")
-async def api_process_detail(
-    pid: int,
-    extras: str | None = Query(
-        None,
-        description="Comma-separated optional sections: 'files', 'threads'. "
-                    "Both are slow (open_files alone costs 265ms and scales "
-                    "with handle count), so they load only when requested.",
-    ),
-) -> dict[str, Any]:
-    if sampler is None or sampler.proc is None:
-        raise HTTPException(503, "sampler is still starting")
-    requested = frozenset(
-        part.strip() for part in (extras or "").split(",") if part.strip()
-    )
-    unknown = requested - {"files", "threads"}
-    if unknown:
-        raise HTTPException(400, f"unknown extras: {', '.join(sorted(unknown))}")
-    # Collected on demand: per-thread times, open handles and sockets are far
-    # too expensive to gather for every process on every tick.
-    detail = await asyncio.get_running_loop().run_in_executor(
-        None, sampler.proc.detail, pid, requested
-    )
-    if detail is None:
-        raise HTTPException(404, f"no process with PID {pid} (it may have exited)")
-    return detail
+async def api_process_detail(pid: int) -> dict[str, Any]:
+    # The host is not a monitored node (see the actions section below): the
+    # per-process detail it used to collect on demand lives on the agents now,
+    # at /api/nodes/{name}/processes/{pid}. Kept as a clear 410 for old clients.
+    raise HTTPException(410, "this host is not a monitored node; read a "
+                             "process's detail from an agent instead")
 
 
 @app.get("/api/diagnosis", summary="Lag Doctor findings")
@@ -916,6 +931,28 @@ app.mount(
 
 
 # --------------------------------------------------------------------- helpers
+def _inflate(data: bytes, limit: int) -> bytes:
+    """gzip-decompress a report with a hard ceiling on the *output* size.
+
+    `gzip.decompress` inflates the whole thing before any length check runs,
+    and gzip's ratio is about 1000:1 -- so an 8 MB body (within the raw
+    limit) could expand to 8 GB in the host's memory before being rejected.
+    A decompressobj with max_length stops producing bytes at the ceiling, so
+    a bomb costs at most `limit` bytes and is then refused like any oversized
+    report.
+    """
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)  # gzip framing
+    try:
+        out = inflater.decompress(data, limit + 1)
+    except zlib.error:
+        raise HTTPException(400, "bad gzip body")
+    if len(out) > limit or inflater.unconsumed_tail:
+        raise HTTPException(413, "report too large after decompression")
+    if not inflater.eof:
+        raise HTTPException(400, "bad gzip body")
+    return out
+
+
 def _frame(event: str, data: Any) -> str:
     import json
 

@@ -515,10 +515,20 @@ class History:
                            (username,))
         if not rows:
             # Burn comparable time so a missing user is not distinguishable
-            # from a wrong password by response latency.
-            verify_password(password, hash_password("timing-equalizer"))
+            # from a wrong password by response latency: exactly one scrypt,
+            # against a hash computed once. (Hashing a fresh dummy here as
+            # well would cost two scrypts -- a 2x latency tell that
+            # tools/check_security.py measures.)
+            verify_password(password, _dummy_hash())
             return False
         return verify_password(password, rows[0]["password_hash"])
+
+    def password_hash(self, username: str) -> str | None:
+        """The stored hash, which auth.py folds into the session signing key
+        so a password change revokes the account's sessions."""
+        rows = self._query("SELECT password_hash FROM users WHERE username = ?",
+                           (username,))
+        return rows[0]["password_hash"] if rows else None
 
     def user_count(self) -> int:
         rows = self._query("SELECT COUNT(*) AS n FROM users")
@@ -671,6 +681,18 @@ def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1)
     return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+_DUMMY_HASH: str | None = None
+
+
+def _dummy_hash() -> str:
+    """A real scrypt hash of a throwaway password, made once per process, for
+    the unknown-user branch of verify_user to spend its time against."""
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password("timing-equalizer")
+    return _DUMMY_HASH
 
 
 def verify_password(password: str, stored: str) -> bool:

@@ -178,6 +178,8 @@ def _serve(args: argparse.Namespace) -> int:
         # Access logs would print a line per SSE keepalive; the app logs what
         # matters itself.
         access_log=False,
+        # No need to advertise the server software on every response.
+        server_header=False,
     )
     return 0
 
