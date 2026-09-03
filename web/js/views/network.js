@@ -1,38 +1,30 @@
 /**
  * Network: adapters, throughput, sockets, and reachability.
  *
- * The connectivity panel is careful about one thing: a gateway that does not
- * answer is reported as *filtered*, not *down*. Managed corporate gateways drop
- * everything they are not obliged to answer — this machine's drops port 53
- * entirely — and a red "gateway unreachable" on a working network is worse than
- * no check at all, because it teaches people to distrust the tool.
+ * The reachability section is careful about one thing: a gateway that does
+ * not answer is reported as *filtered*, not *down*. Managed gateways drop
+ * everything they are not obliged to answer, and a red "gateway unreachable"
+ * on a working network teaches people to distrust the tool.
  */
 
 import { el, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { createChart } from "../charts.js";
 import { store, api } from "../stream.js";
-import { combobox, emptyState, icons, skeletonRows } from "../ui.js";
-import { kv, openProcessModal, panel, statTile, subhead, swatch, tag } from "./shared.js";
+import { combobox, emptyState, note, pendingSlot, readySlot, skeletonFigures, skeletonSection } from "../ui.js";
+import { figures, kv, kvs, legend, openProcessModal, pill, section, viewHead } from "./shared.js";
 
-const KIND_TAG = {
-  ethernet: "info", wifi: "accent", vpn: "warn",
-  virtual: null, loopback: null, cellular: "accent", other: null,
+const KIND_TONE = {
+  ethernet: "info", wifi: "accent", vpn: "warn", virtual: null, loopback: null, cellular: "accent", other: null,
 };
 
 /** One-line VPN summary: local interface(s), and/or an upstream exit-IP VPN. */
 function vpnDescription(vpn) {
   const parts = (vpn.interfaces || []).map((v) => `${v.type} (${v.name})`);
-  if (vpn.via_exit_ip && !parts.length) {
-    // Detected only from the exit IP — the VPN runs upstream (on the router).
-    parts.push(`${vpn.exit_provider || "VPN/proxy"} (upstream, no local interface)`);
-  } else if (vpn.via_exit_ip && vpn.exit_provider) {
-    parts.push(`exit ${vpn.exit_provider}`);
-  }
+  if (vpn.via_exit_ip && !parts.length) parts.push(`${vpn.exit_provider || "VPN/proxy"} (upstream, no local interface)`);
+  else if (vpn.via_exit_ip && vpn.exit_provider) parts.push(`exit ${vpn.exit_provider}`);
   const label = parts.join(", ") || (vpn.adapters || []).join(", ") || "detected";
-  return `${label} — ${vpn.full_tunnel
-    ? "full tunnel, all traffic exits through the VPN"
-    : "split tunnel, only specific routes use the VPN"}`;
+  return `${label} — ${vpn.full_tunnel ? "full tunnel, all traffic exits through the VPN" : "split tunnel, only specific routes use the VPN"}`;
 }
 
 export function createNetwork() {
@@ -42,215 +34,155 @@ export function createNetwork() {
   const view = { socketState: null };
   let built = false;
 
-  root.append(el("div.viewhead", {}, [
-    el("div.viewhead__titles", {}, [
-      el("div.viewhead__title", { text: "Network" }),
-      el("div.viewhead__sub", { dataset: { bind: "sub" } }),
-    ]),
-  ]));
-  nodes.sub = root.querySelector("[data-bind=sub]");
+  const head = viewHead({ title: "Network" });
+  root.append(head);
+  nodes.lead = head.leadNode;
 
-  const statsRow = el("div.grid.grid--stats", { style: { marginBottom: "12px" } });
-  root.append(statsRow);
-
-  const topRow = el("div.grid.grid--halves");
-  root.append(topRow);
-
-  const adapterSlot = el("div", { style: { marginTop: "12px" } });
-  root.append(adapterSlot);
-
-  const socketSlot = el("div", { style: { marginTop: "12px" } });
-  root.append(socketSlot);
+  const figSlot = el("div");
+  const topRow = el("div.cols.cols--2");
+  const adapterSlot = el("div");
+  const socketSlot = el("div");
+  root.append(el("div.stack", {}, [figSlot, topRow, adapterSlot, socketSlot]));
 
   function build() {
     built = true;
     const canvas = el("canvas");
-    nodes.interfaces = el("div");
+    nodes.interfaces = el("div.list", { style: { marginTop: "10px" } });
     nodes.connectivity = el("div");
-
-    topRow.replaceChildren(
-      panel({
-        title: "Throughput",
-        meta: el("span", { dataset: { bind: "tp-meta" } }),
+    nodes.tpMeta = el("span");
+    nodes.connMeta = el("span");
+    pendingSlot(figSlot, skeletonFigures(7));
+    pendingSlot(topRow, el("div", { style: { display: "contents" } }, [
+      skeletonSection("Throughput", 6), skeletonSection("Reachability", 5),
+    ]));
+    pendingSlot(adapterSlot, skeletonSection("Adapter configuration", 6));
+    pendingSlot(socketSlot, skeletonSection("Open sockets", 8));
+    nodes.top = [
+      section({
+        title: "Throughput", meta: nodes.tpMeta,
         body: el("div", {}, [
-          el("div.chartbox", { style: { height: "150px" } }, [canvas]),
-          el("div.legend", {}, [
-            swatch("--m-net-down", "Download"),
-            swatch("--m-net-up", "Upload"),
-          ]),
+          el("div.chart", {}, [canvas]),
+          legend([["--m-down", "Download"], ["--m-up", "Upload"]]),
           nodes.interfaces,
         ]),
       }),
-      panel({
-        title: "Reachability",
-        meta: el("span", { dataset: { bind: "conn-meta" } }),
-        body: nodes.connectivity,
-        foot: el("span", {
-          text: "Probes use TCP rather than ICMP: raw sockets need elevation, "
-              + "and plenty of networks drop ping while working perfectly.",
-        }),
+      section({
+        title: "Reachability", meta: nodes.connMeta, body: nodes.connectivity,
+        foot: "Probes use TCP rather than ICMP: raw sockets need elevation, and plenty of networks drop ping while working perfectly.",
       }),
-    );
-    nodes.tpMeta = topRow.querySelector("[data-bind=tp-meta]");
-    nodes.connMeta = topRow.querySelector("[data-bind=conn-meta]");
-
+    ];
     charts.net = createChart(canvas, {
-      series: [
-        { key: "down", token: "--m-net-down" },
-        { key: "up", token: "--m-net-up" },
-      ],
+      series: [{ key: "down", token: "--m-down" }, { key: "up", token: "--m-up" }],
       yMax: "auto", gridLines: 3,
     });
     seed();
   }
 
   async function seed() {
-    if (!store.isLocal()) return; // the ring buffer is the host's own
+    if (!store.isLocal()) return;
     try {
       const live = await api("/api/live");
       if (!live.ts?.length) return;
       charts.net.setData(live.ts.slice(), {
-        down: live.series["network.total.recv_bytes_sec"] || [],
-        up: live.series["network.total.sent_bytes_sec"] || [],
+        down: live.series["network.total.recv_bytes_sec"] || [], up: live.series["network.total.sent_bytes_sec"] || [],
       });
     } catch { /* cold server */ }
   }
 
   function updateFast(state) {
     if (!built) return;
+    if (!state.network) {
+      head.setPending(true);
+      pendingSlot(figSlot, skeletonFigures(7));
+      return;
+    }
+    head.setPending(false);
     const net = state.network || {};
     const total = net.total || {};
     const interfaces = net.interfaces || [];
     const now = state.ts || Date.now() / 1000;
 
-    charts.net.push(now, {
-      down: total.recv_bytes_sec, up: total.sent_bytes_sec,
-    }, 900);
-    patchText(nodes.tpMeta,
-      `${fmt.rate(total.recv_bytes_sec)} down · ${fmt.rate(total.sent_bytes_sec)} up`);
+    charts.net.push(now, { down: total.recv_bytes_sec, up: total.sent_bytes_sec }, 900);
+    patchText(nodes.tpMeta, `${fmt.rate(total.recv_bytes_sec)} down · ${fmt.rate(total.sent_bytes_sec)} up`);
 
     const errors = interfaces.reduce((sum, i) => sum + (i.errors || 0), 0);
     const drops = interfaces.reduce((sum, i) => sum + (i.drops || 0), 0);
+    readySlot(figSlot, figures([
+      { label: "Download", value: fmt.rate(total.recv_bytes_sec) },
+      { label: "Upload", value: fmt.rate(total.sent_bytes_sec) },
+      { label: "Active adapters", value: String(interfaces.filter((i) => i.up).length), hint: `${interfaces.length} present` },
+      { label: "Errors since boot", value: fmt.count(errors), tone: errors > 0 ? "warn" : "ok" },
+      { label: "Drops since boot", value: fmt.count(drops), tone: drops > 0 ? "warn" : "ok" },
+      { label: "Received since boot", value: fmt.bytes(interfaces.reduce((s, i) => s + (i.recv_total || 0), 0)) },
+      { label: "Sent since boot", value: fmt.bytes(interfaces.reduce((s, i) => s + (i.sent_total || 0), 0)) },
+    ]));
 
-    render(statsRow, [
-      statTile({ label: "Download", value: fmt.rate(total.recv_bytes_sec) }),
-      statTile({ label: "Upload", value: fmt.rate(total.sent_bytes_sec) }),
-      statTile({
-        label: "Active adapters",
-        value: String(interfaces.filter((i) => i.up).length),
-        hint: `${interfaces.length} present`,
-      }),
-      statTile({
-        label: "Errors since boot", value: fmt.count(errors),
-        state: errors > 0 ? "warn" : "ok",
-      }),
-      statTile({
-        label: "Drops since boot", value: fmt.count(drops),
-        state: drops > 0 ? "warn" : "ok",
-      }),
-      statTile({
-        label: "Received since boot",
-        value: fmt.bytes(interfaces.reduce((s, i) => s + (i.recv_total || 0), 0)),
-      }),
-      statTile({
-        label: "Sent since boot",
-        value: fmt.bytes(interfaces.reduce((s, i) => s + (i.sent_total || 0), 0)),
-      }),
-    ]);
+    render(nodes.interfaces, interfaces.map((iface) => el("div.row", { style: { padding: "5px 0", fontSize: "var(--fs-s)" } }, [
+      el("span.trunc", { style: { fontWeight: "500" }, text: iface.name }),
+      pill(iface.kind, KIND_TONE[iface.kind]),
+      iface.up ? null : pill("down", "warn"),
+      el("span.num.dim", { style: { marginLeft: "auto" }, text: `↓ ${fmt.rate(iface.recv_bytes_sec)}  ↑ ${fmt.rate(iface.sent_bytes_sec)}` }),
+    ])));
 
-    render(nodes.interfaces, el("div", { style: { marginTop: "8px" } },
-      interfaces.map((iface) => el("div", { style: { padding: "5px 0" } }, [
-        el("div", {
-          style: {
-            display: "flex", alignItems: "center", gap: "7px", fontSize: "12px",
-          },
-        }, [
-          el("span.truncate", { style: { fontWeight: "550" }, text: iface.name }),
-          tag(iface.kind, KIND_TAG[iface.kind]),
-          iface.up ? null : tag("down", "warn"),
-          el("span", {
-            style: { marginLeft: "auto" }, class: "num faint",
-            text: `↓ ${fmt.rate(iface.recv_bytes_sec)}  ↑ ${fmt.rate(iface.sent_bytes_sec)}`,
-          }),
-        ]),
-      ]))));
-
-    patchText(nodes.sub,
-      `${interfaces.filter((i) => i.up).length} active adapter(s) · `
+    patchText(nodes.lead, `${interfaces.filter((i) => i.up).length} active adapter(s) · `
       + `${fmt.rate(total.recv_bytes_sec)} down, ${fmt.rate(total.sent_bytes_sec)} up`);
   }
 
   function updateSlow(state) {
     if (!built) return;
+    if (!state.network_detail) {
+      pendingSlot(topRow, el("div", { style: { display: "contents" } }, [
+        skeletonSection("Throughput", 6), skeletonSection("Reachability", 5),
+      ]));
+      pendingSlot(adapterSlot, skeletonSection("Adapter configuration", 6));
+      pendingSlot(socketSlot, skeletonSection("Open sockets", 8));
+      return;
+    }
+    readySlot(topRow, nodes.top);
     const detail = state.network_detail || {};
     const connectivity = detail.connectivity || {};
     const adapters = detail.adapters || [];
     const sockets = detail.sockets || {};
 
-    // Reachability
-    const probes = [
-      ["gateway", "Default gateway"],
-      ["dns_server", "DNS resolver"],
-      ["dns_resolution", "DNS resolution"],
-      ["internet", "Public internet"],
-    ];
-    const list = el("div.kvlist");
-    // The machine's public (WAN) IP leads the reachability list. On a full
-    // tunnel VPN this is the VPN's exit address.
+    const probes = [["gateway", "Default gateway"], ["dns_server", "DNS resolver"], ["dns_resolution", "DNS resolution"], ["internet", "Public internet"]];
+    const rows = [];
     const wan = detail.wan_ip;
     if (wan) {
-      list.append(wan.available
-        ? kv("Public IP (WAN)", wan.org ? `${wan.ip} · ${wan.org}` : wan.ip,
-            { mono: true, state: "ok" })
-        : kv("Public IP (WAN)", "unavailable", { state: "info" }));
+      rows.push(wan.available
+        ? kv("Public IP (WAN)", wan.org ? `${wan.ip} · ${wan.org}` : wan.ip, { mono: true, tone: "ok" })
+        : kv("Public IP (WAN)", "unavailable", { tone: "info" }));
     }
     for (const [key, label] of probes) {
       const probe = connectivity[key];
       if (!probe) continue;
       let text;
-      let severity;
+      let tone;
       if (probe.ok) {
-        text = probe.state === "refused"
-          ? `reachable (port closed) · ${fmt.ms(probe.latency_ms)}`
-          : `reachable · ${fmt.ms(probe.latency_ms)}`;
-        severity = "ok";
+        text = probe.state === "refused" ? `reachable (port closed) · ${fmt.ms(probe.latency_ms)}` : `reachable · ${fmt.ms(probe.latency_ms)}`;
+        tone = "ok";
       } else if (probe.state === "filtered") {
         text = "no answer (filtered)";
-        severity = "info";
+        tone = "info";
       } else {
         text = probe.error || "failed";
-        severity = key === "gateway" ? "warn" : "crit";
+        tone = key === "gateway" ? "warn" : "crit";
       }
-      list.append(kv(`${label}${probe.host ? ` (${probe.host})` : ""}`, text,
-        { state: severity }));
+      rows.push(kv(`${label}${probe.host ? ` (${probe.host})` : ""}`, text, { tone }));
     }
     render(nodes.connectivity, el("div", {}, [
-      list,
-      connectivity.gateway && !connectivity.gateway.ok
-        ? el("div.hint", {
-            style: { marginTop: "10px" },
-            html: `${icons.info}<div>${fmt.esc(connectivity.gateway.note || "")}</div>`,
-          })
-        : null,
-      detail.vpn?.active
-        ? el("div.hint", {
-            style: { marginTop: "8px" },
-            html: `${icons.info}<div><strong>VPN active:</strong> ${
-              fmt.esc(vpnDescription(detail.vpn))}</div>`,
-          })
-        : null,
+      kvs(rows),
+      connectivity.gateway && !connectivity.gateway.ok ? note("info", fmt.esc(connectivity.gateway.note || ""), { margin: true }) : null,
+      detail.vpn?.active ? note("info", `<strong>VPN active:</strong> ${fmt.esc(vpnDescription(detail.vpn))}`, { margin: true }) : null,
     ].filter(Boolean)));
-    patchText(nodes.connMeta, connectivity.checked_at
-      ? `checked ${fmt.ago(connectivity.checked_at)}` : "");
+    patchText(nodes.connMeta, connectivity.checked_at ? `checked ${fmt.ago(connectivity.checked_at)}` : "");
 
-    // Adapters
     if (adapters.length) {
-      const grid = el("div.grid.grid--halves");
+      const grid = el("div.cells.cells--2");
       for (const adapter of adapters) {
-        grid.append(panel({
+        grid.append(section({
           title: adapter.description,
-          meta: tag(adapter.kind, KIND_TAG[adapter.kind]),
-          body: el("div.kvlist", {}, [
+          meta: pill(adapter.kind, KIND_TONE[adapter.kind]),
+          body: kvs([
             kv("IP addresses", (adapter.ip_addresses || []).join(", ") || fmt.dash, { mono: true }),
             kv("Subnet", (adapter.subnets || []).join(", ") || fmt.dash, { mono: true }),
             kv("Gateway", (adapter.gateways || []).join(", ") || fmt.dash, { mono: true }),
@@ -261,95 +193,67 @@ export function createNetwork() {
           ]),
         }));
       }
-      render(adapterSlot, el("div", {}, [subhead("Adapter configuration"), grid]));
+      readySlot(adapterSlot, section({ title: "Adapter configuration", meta: `${adapters.length} adapters`, body: grid }));
+    } else {
+      readySlot(adapterSlot, []);
     }
 
-    // Sockets
     if (sockets.available === false) {
-      render(socketSlot, panel({
-        title: "Sockets",
-        body: emptyState("Socket table not readable", sockets.reason),
-      }));
+      readySlot(socketSlot, section({ title: "Sockets", body: emptyState("Socket table not readable", sockets.reason) }));
       return;
     }
-
     const byState = sockets.by_state || {};
-    const stateOptions = Object.entries(byState)
-      .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ value: name, label: name, count }));
-
+    const stateOptions = Object.entries(byState).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ value: name, label: name, count }));
     if (!nodes.socketCombo) {
       nodes.socketCombo = combobox({
-        label: "State", options: stateOptions, value: null, allLabel: "All states",
+        label: "State", options: stateOptions, value: null, allLabel: "All",
         onChange: (value) => { view.socketState = value; updateSlow(store.state); },
       });
     } else {
       nodes.socketCombo.setOptions(stateOptions);
     }
 
-    const established = sockets.established || [];
-    const listeners = sockets.listeners || [];
-    let rows = [
-      ...established.map((c) => ({ ...c, status: "ESTABLISHED" })),
-      ...listeners.map((c) => ({ ...c, status: "LISTEN", remote: null })),
+    let rows2 = [
+      ...(sockets.established || []).map((c) => ({ ...c, status: "ESTABLISHED" })),
+      ...(sockets.listeners || []).map((c) => ({ ...c, status: "LISTEN", remote: null })),
     ];
-    if (view.socketState) rows = rows.filter((r) => r.status === view.socketState);
+    if (view.socketState) rows2 = rows2.filter((r) => r.status === view.socketState);
 
-    const table = el("table.table");
-    table.innerHTML = `<thead><tr>
-      <th>State</th><th>Local</th><th>Remote</th><th class="r">PID</th><th>Process</th>
-    </tr></thead>`;
+    const table = el("table.tbl.tbl--tight");
+    table.innerHTML = "<thead><tr><th>State</th><th>Local</th><th>Remote</th><th class=\"r\">PID</th><th>Process</th></tr></thead>";
     const tbody = el("tbody");
-    const processes = store.state.process_table?.processes || [];
-    const nameByPid = new Map(processes.map((p) => [p.pid, p.name]));
-    for (const row of rows.slice(0, 300)) {
+    const nameByPid = new Map((store.state.process_table?.processes || []).map((p) => [p.pid, p.name]));
+    for (const row of rows2.slice(0, 300)) {
       const name = nameByPid.get(row.pid);
-      tbody.append(el("tr", { class: row.pid ? "is-clickable" : "" }, [
-        el("td", {}, [tag(row.status, row.status === "ESTABLISHED" ? "ok" : "info")]),
+      const tr = el("tr", { class: row.pid ? "is-link" : "" }, [
+        el("td", {}, [pill(row.status, row.status === "ESTABLISHED" ? "ok" : "info")]),
         el("td.mono", { text: row.local || fmt.dash }),
         el("td.mono", { text: row.remote || fmt.dash }),
         el("td.n.mono", { text: row.pid ? String(row.pid) : fmt.dash }),
         el("td", { text: name ? fmt.imageName(name) : fmt.dash }),
-      ]));
-      if (row.pid) {
-        tbody.lastElementChild.addEventListener("click", () => openProcessModal(row.pid));
-      }
+      ]);
+      if (row.pid) tr.addEventListener("click", () => openProcessModal(row.pid));
+      tbody.append(tr);
     }
     table.append(tbody);
-
-    render(socketSlot, el("div", {}, [
-      subhead("Open sockets"),
-      panel({
-        title: `${sockets.total ?? rows.length} sockets`,
-        meta: nodes.socketCombo,
-        body: el("div.tablewrap", {}, [table]),
-        flush: true,
-        foot: el("span", {
-          text: Object.entries(byState).map(([k, v]) => `${k} ${v}`).join(" · "),
-        }),
-      }),
-    ]));
+    readySlot(socketSlot, section({
+      title: `Open sockets`,
+      meta: el("span.row", {}, [el("span", { text: `${sockets.total ?? rows2.length} total` }), nodes.socketCombo]),
+      body: el("div.tblwrap", {}, [table]),
+      foot: Object.entries(byState).map(([k, v]) => `${k} ${v}`).join(" · "),
+    }));
   }
 
-  root.mount = () => {
-    if (!built) build();
-    updateFast(store.state);
-    updateSlow(store.state);
-  };
-  root.showSkeleton = () => {
-    render(adapterSlot, panel({ title: "Adapters", body: skeletonRows(5) }));
-  };
+  root.mount = () => { if (!built) build(); updateFast(store.state); updateSlow(store.state); };
   root.subscriptions = [
     store.on("network", () => { if (root.isActive) updateFast(store.state); }),
-    store.on(["network_detail", "process_table"], () => {
-      if (root.isActive) updateSlow(store.state);
-    }),
+    store.on(["network_detail", "process_table"], () => { if (root.isActive) updateSlow(store.state); }),
     store.on("node", () => {
       if (!built) return;
       charts.net.setData([], {});
       seed();
+      if (root.isActive) { updateFast(store.state); updateSlow(store.state); }
     }),
   ];
   return root;
 }
-

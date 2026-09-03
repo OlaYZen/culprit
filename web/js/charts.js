@@ -176,7 +176,7 @@ class Chart {
     if (options.baseline !== null && options.baseline !== undefined
         && options.baseline <= yMax) {
       ctx.save();
-      ctx.strokeStyle = alpha(token("--crit", "#f87171"), 0.55);
+      ctx.strokeStyle = alpha(token("--crit", "#c06c6c"), 0.6);
       ctx.setLineDash([3, 3]);
       ctx.lineWidth = 1;
       const y = Math.round(yAt(options.baseline)) + 0.5;
@@ -237,7 +237,7 @@ class Chart {
         }
 
         ctx.strokeStyle = color;
-        ctx.lineWidth = spec.width || 1.6;
+        ctx.lineWidth = spec.width || 1.4;
         ctx.lineJoin = "round";
         ctx.setLineDash(spec.dashed ? [3, 3] : []);
         ctx.beginPath();
@@ -254,7 +254,7 @@ class Chart {
           if (Math.abs(last.x - (pad.left + plotW)) < 2) {
             ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.arc(last.x, last.y, 1.9, 0, Math.PI * 2);
+            ctx.arc(last.x, last.y, 1.7, 0, Math.PI * 2);
             ctx.fill();
           }
         }
@@ -320,7 +320,7 @@ export function drawGauge(canvas, value, opts = {}) {
   ctx.lineWidth = thickness;
   ctx.lineCap = "round";
 
-  ctx.strokeStyle = token("--bg-sunken", "#141414");
+  ctx.strokeStyle = token("--line-2", "#33343a");
   ctx.beginPath();
   ctx.arc(centre, centre, radius, 0, Math.PI * 2);
   ctx.stroke();
@@ -328,7 +328,7 @@ export function drawGauge(canvas, value, opts = {}) {
   if (fraction > 0.001) {
     const colorToken = opts.token
       || (fraction >= 0.9 ? "--crit" : fraction >= 0.7 ? "--warn" : "--ok");
-    ctx.strokeStyle = token(colorToken, "#4ade80");
+    ctx.strokeStyle = token(colorToken, "#7ea98a");
     ctx.beginPath();
     ctx.arc(centre, centre, radius, start, start + fraction * Math.PI * 2);
     ctx.stroke();
@@ -364,7 +364,7 @@ export function drawHistogram(canvas, buckets, opts = {}) {
   const gap = buckets.length > 40 ? 1 : 2;
   const barW = Math.max(1, (rect.width - gap * (buckets.length - 1)) / buckets.length);
 
-  ctx.font = `9px ${token("--font-ui", "sans-serif")}`;
+  ctx.font = `9px ${token("--font", "sans-serif")}`;
   ctx.textAlign = "center";
 
   buckets.forEach((bucket, i) => {
@@ -375,14 +375,14 @@ export function drawHistogram(canvas, buckets, opts = {}) {
       : bucket.severity === "warn" ? "--warn"
       : "--accent";
     ctx.fillStyle = bucket.value > 0
-      ? token(colorToken, "#8a5cf5")
-      : token("--bg-sunken", "#141414");
+      ? token(colorToken, "#8a9db8")
+      : token("--line-2", "#33343a");
     const radius = Math.min(2, barW / 2);
     roundRect(ctx, x, plotH - h + 2, barW, Math.max(h, 2), radius);
     ctx.fill();
 
     if (labelH && bucket.tick) {
-      ctx.fillStyle = token("--text-faint", "#6b6b6b");
+      ctx.fillStyle = token("--fg-3", "#5f6167");
       ctx.fillText(bucket.tick, x + barW / 2, rect.height - 2);
     }
   });
