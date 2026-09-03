@@ -1,0 +1,225 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   Culprit — base: design tokens, reset, typography
+
+   The look is an instrument panel, not a card wall: flat surfaces separated by
+   hairline rules, one restrained accent, and status colours that are muted
+   enough to live on screen all day. Dark is the default and is deliberately
+   low-saturation — greys are neutral (no blue cast) and every status hue sits
+   well below full chroma so the one thing that is actually red still reads.
+
+   Every colour, size and duration is a token; nothing downstream hard-codes a
+   value, which is also what lets the canvas charts follow the theme toggle.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root,
+:root[data-theme="dark"] {
+  /* Surfaces: ground → chrome → surface → raised → pressed. Steps are small
+     on purpose; hierarchy comes from rules and type, not from stacking boxes. */
+  --bg:       #141517;
+  --bg-1:     #18191c;
+  --bg-2:     #1c1d21;
+  --bg-3:     #222327;
+  --bg-4:     #2a2b30;
+
+  --line:     #26272c;
+  --line-2:   #33343a;
+
+  --fg:       #cfd0d4;
+  --fg-1:     #eeeef0;
+  --fg-2:     #8b8d94;
+  --fg-3:     #5f6167;
+
+  /* One accent, a desaturated steel blue. It marks the active nav item, the
+     focus ring and primary buttons — and nothing else. */
+  --accent:    #8a9db8;
+  --accent-1:  #a6b5cb;
+  --accent-bg: rgba(138, 157, 184, 0.13);
+  --on-accent: #101114;
+
+  /* Status, ordered by severity. Each has a soft tint for backgrounds. */
+  --ok:        #7ea98a;  --ok-bg:   rgba(126, 169, 138, 0.13);
+  --info:      #7f98b8;  --info-bg: rgba(127, 152, 184, 0.13);
+  --warn:      #c1a15f;  --warn-bg: rgba(193, 161,  95, 0.13);
+  --high:      #c08a5f;  --high-bg: rgba(192, 138,  95, 0.13);
+  --crit:      #c06c6c;  --crit-bg: rgba(192, 108, 108, 0.14);
+
+  /* Metric hues for charts and meters — distinct at small sizes, all muted. */
+  --m-cpu:   #7f98b8;
+  --m-mem:   #9d8fbb;
+  --m-gpu:   #7dab9d;
+  --m-disk:  #b9a27a;
+  --m-down:  #7eadb3;
+  --m-up:    #b98ea5;
+  --m-queue: #c08a5f;
+
+  --grid-line:         rgba(255, 255, 255, 0.05);
+  --chart-fill-top:    0.20;
+  --chart-fill-bottom: 0.01;
+
+  --shadow:  0 10px 34px rgba(0, 0, 0, 0.5);
+  --scrim:   rgba(0, 0, 0, 0.55);
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg:       #f2f2f0;
+  --bg-1:     #e9e9e6;
+  --bg-2:     #fafaf9;
+  --bg-3:     #f1f1ef;
+  --bg-4:     #e5e5e2;
+
+  --line:     #dadad6;
+  --line-2:   #c5c5c0;
+
+  --fg:       #2a2b2f;
+  --fg-1:     #121317;
+  --fg-2:     #63656c;
+  --fg-3:     #8e9097;
+
+  --accent:    #4d6485;
+  --accent-1:  #3f5573;
+  --accent-bg: rgba(77, 100, 133, 0.10);
+  --on-accent: #ffffff;
+
+  --ok:        #35784b;  --ok-bg:   rgba( 53, 120,  75, 0.10);
+  --info:      #35618f;  --info-bg: rgba( 53,  97, 143, 0.10);
+  --warn:      #8a6b22;  --warn-bg: rgba(138, 107,  34, 0.11);
+  --high:      #995a26;  --high-bg: rgba(153,  90,  38, 0.10);
+  --crit:      #a64444;  --crit-bg: rgba(166,  68,  68, 0.10);
+
+  --m-cpu:   #3d63a0;
+  --m-mem:   #6a54a6;
+  --m-gpu:   #2f8a72;
+  --m-disk:  #977a2c;
+  --m-down:  #2b8a95;
+  --m-up:    #9d4c7a;
+  --m-queue: #ad5e2a;
+
+  --grid-line:         rgba(0, 0, 0, 0.06);
+  --chart-fill-top:    0.16;
+  --chart-fill-bottom: 0.01;
+
+  --shadow:  0 10px 34px rgba(20, 20, 30, 0.16);
+  --scrim:   rgba(20, 20, 30, 0.35);
+
+  color-scheme: light;
+}
+
+:root {
+  --font: "Inter", "IBM Plex Sans", "Segoe UI Variable Text", "Segoe UI",
+          system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", "JetBrains Mono", "Cascadia Mono", ui-monospace,
+          "SF Mono", Menlo, Consolas, monospace;
+
+  --fs:    13px;
+  --fs-s:  12px;
+  --fs-xs: 11px;
+  --fs-l:  15px;
+
+  --r:     4px;
+  --r-s:   3px;
+
+  --topbar-h:  44px;
+  --sidebar-w: 200px;
+
+  --gap:   18px;   /* between sections */
+  --gap-s: 10px;   /* inside sections */
+
+  --t:    120ms;
+  --ease: cubic-bezier(0.3, 0, 0.2, 1);
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--fs);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01", "tnum";
+  overflow: hidden;          /* the main pane scrolls, never the document */
+}
+
+h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--fg-1); }
+p { margin: 0; }
+dl, dd { margin: 0; }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+input, select, textarea { font: inherit; color: inherit; }
+a { color: var(--accent-1); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: var(--r-s); }
+:focus:not(:focus-visible) { outline: none; }
+
+/* ── Scrollbars ────────────────────────────────────────────────────────── */
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 9px; border: 2px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--fg-3); }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Type helpers ──────────────────────────────────────────────────────── */
+.mono   { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.num    { font-variant-numeric: tabular-nums; }
+.dim    { color: var(--fg-2); }
+.faint  { color: var(--fg-3); }
+.strong { color: var(--fg-1); font-weight: 600; }
+.small  { font-size: var(--fs-xs); }
+.nowrap { white-space: nowrap; }
+.trunc  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.break  { overflow-wrap: anywhere; }
+
+/* Small label style used for section titles, table heads and eyebrows. */
+.label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--fg-2);
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* Tone helpers — colour a number by its severity. */
+.tone-ok   { color: var(--ok); }
+.tone-info { color: var(--info); }
+.tone-warn { color: var(--warn); }
+.tone-high { color: var(--high); }
+.tone-crit { color: var(--crit); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

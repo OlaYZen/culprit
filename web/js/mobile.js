@@ -2,10 +2,9 @@
  * Mobile chrome: the bottom tab bar and the "More" sheet. Desktop is untouched
  * (all of this markup is display:none above the mobile breakpoint).
  *
- * The sheet holds the overflow views plus the session controls. Rather than
- * duplicate those controls and re-wire them, the titlebar's action cluster is
- * physically relocated into the sheet on small screens and moved back on wide
- * ones — the existing event handlers travel with the DOM nodes.
+ * Rather than duplicate the session controls and re-wire them, the top bar's
+ * tool cluster is physically relocated into the sheet on small screens and
+ * moved back on wide ones — the existing event handlers travel with the nodes.
  */
 
 import { $, $$, patchClass } from "./util/dom.js";
@@ -18,7 +17,7 @@ export function initMobile() {
   const sheet = $("#msheet");
   const moreBtn = $("#botnav-more");
   const slot = $("#msheet-controls");
-  const actions = $(".titlebar__actions");
+  const tools = $(".topbar__tools");
   if (!sheet || !moreBtn || !slot) return;
 
   const open = () => sheet.classList.add("is-open");
@@ -27,31 +26,22 @@ export function initMobile() {
   moreBtn.addEventListener("click", () => {
     if (sheet.classList.contains("is-open")) close(); else open();
   });
-  for (const el of $$("[data-msheet-close]", sheet)) el.addEventListener("click", close);
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") close();
-  });
+  for (const node of $$("[data-msheet-close]", sheet)) node.addEventListener("click", close);
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
 
-  // Every navigation (a bottom-nav tab or a sheet view) closes the sheet and
-  // lights the More tab when the destination is an overflow view.
   document.addEventListener("culprit:navigate", (event) => {
     close();
     patchClass(moreBtn, "is-active", !PRIMARY.has(event.detail));
   });
 
-  // Relocate the session controls between the titlebar and the sheet as the
-  // viewport crosses the breakpoint.
   const place = () => {
-    if (!actions) return;
-    (MOBILE.matches ? slot : $(".titlebar")).appendChild(actions);
+    if (!tools) return;
+    (MOBILE.matches ? slot : $(".topbar")).appendChild(tools);
   };
   place();
   MOBILE.addEventListener("change", () => { place(); if (!MOBILE.matches) close(); });
 
-  // Alert dots + sheet badges, mirroring the sidebar's badges for the views the
-  // bottom bar can't show a count on.
-  store.on(["diagnosis", "services", "events", "sync", "volumes", "nodes"],
-    (state) => updateBadges(state));
+  store.on(["diagnosis", "services", "events", "sync", "volumes", "nodes"], (state) => updateBadges(state));
   updateBadges(store.state);
 }
 
@@ -66,30 +56,26 @@ function updateBadges(state) {
   const eventsCrit = crashes.filter((e) => e.severity === "critical").length;
   const offline = (state.nodes || []).filter((n) => !n.online && n.enabled !== false).length;
   const sync = (state.sync || {}).problems || [];
-  const lowSpace = (((state.volumes || {}).volumes) || [])
-    .filter((v) => (100 - v.percent) <= 10).length;
+  const lowSpace = (((state.volumes || {}).volumes) || []).filter((v) => (100 - v.percent) <= 10).length;
 
   badge("badge-services-m", services.length);
   badge("badge-events-m", eventsCrit);
   badge("badge-nodes-m", offline);
-
-  // The More tab carries a dot if anything behind it wants attention.
-  dot("botnav-more-dot",
-    (services.length || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
+  dot("botnav-more-dot", (services.length || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
 }
 
 function dot(bind, severity) {
-  const el = document.querySelector(`[data-bind="${bind}"]`);
-  if (!el) return;
-  patchClass(el, "is-on", !!severity);
-  if (severity === "warn") el.setAttribute("data-severity", "warn");
-  else el.removeAttribute("data-severity");
+  const node = document.querySelector(`[data-bind="${bind}"]`);
+  if (!node) return;
+  patchClass(node, "is-on", !!severity);
+  if (severity === "warn") node.setAttribute("data-severity", "warn");
+  else node.removeAttribute("data-severity");
 }
 
 function badge(bind, value) {
-  const el = document.querySelector(`[data-bind="${bind}"]`);
-  if (!el) return;
-  if (!value) { el.hidden = true; return; }
-  el.hidden = false;
-  el.textContent = String(value);
+  const node = document.querySelector(`[data-bind="${bind}"]`);
+  if (!node) return;
+  if (!value) { node.hidden = true; return; }
+  node.hidden = false;
+  node.textContent = String(value);
 }

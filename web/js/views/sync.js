@@ -1,16 +1,11 @@
 /**
  * Sync: file-sync client health, generalised.
  *
- * There is no single sync client to special-case on Linux, so the backend
- * detects what is installed (Syncthing, rclone, onedrive, Nextcloud, Dropbox)
- * and this view renders whatever it found — or an explicit "nothing detected"
- * state naming what was looked for, which is a real answer, not a blank panel.
+ * The backend detects what is installed (Syncthing, rclone, onedrive,
+ * Nextcloud, Dropbox) and this view renders whatever it found — or an explicit
+ * "nothing detected" state naming what was looked for.
  *
- * The honesty rules carried over from the original OneDrive view:
- * an opaque status value is corroboration, never the verdict; a client whose
- * adapter cannot read real counters says "unknown" instead of guessing.
- *
- * Plus one Linux-only panel: inotify watch exhaustion. Sync clients and
+ * Plus one Linux-only section: inotify watch exhaustion. Sync clients and
  * editors silently stop seeing file changes when the watch limit runs out —
  * it looks exactly like broken sync while every status light stays green.
  */
@@ -18,16 +13,16 @@
 import { el, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { store } from "../stream.js";
-import { emptyState, icons, skeletonRows } from "../ui.js";
-import { kv, panel, tag } from "./shared.js";
+import { emptyState, note, pendingSlot, readySlot, skeletonSection, skeletonStatus } from "../ui.js";
+import { kv, kvs, pill, section, viewHead } from "./shared.js";
 
 const STATUS_META = {
-  up_to_date: { label: "Up to date", tag: "ok", icon: "ok", sev: "ok" },
-  syncing: { label: "Syncing", tag: "info", icon: "info", sev: "info" },
-  warning: { label: "Needs attention", tag: "warn", icon: "warn", sev: "warn" },
-  error: { label: "Sync problem", tag: "crit", icon: "crit", sev: "critical" },
-  unknown: { label: "Unknown", tag: null, icon: "info", sev: "info" },
-  not_configured: { label: "Not running", tag: null, icon: "info", sev: "info" },
+  up_to_date: { label: "Up to date", tone: "ok", sev: "ok" },
+  syncing: { label: "Syncing", tone: "info", sev: "info" },
+  warning: { label: "Needs attention", tone: "warn", sev: "warn" },
+  error: { label: "Sync problem", tone: "crit", sev: "critical" },
+  unknown: { label: "Unknown", tone: null, sev: "info" },
+  not_configured: { label: "Not running", tone: null, sev: "info" },
 };
 
 export function createSync() {
@@ -35,59 +30,51 @@ export function createSync() {
   const nodes = {};
   let built = false;
 
-  root.append(el("div.viewhead", {}, [
-    el("div.viewhead__titles", {}, [
-      el("div.viewhead__title", { text: "Sync" }),
-      el("div.viewhead__sub", { dataset: { bind: "sub" } }),
-    ]),
-  ]));
-  nodes.sub = root.querySelector("[data-bind=sub]");
+  const head = viewHead({ title: "Sync" });
+  root.append(head);
+  nodes.lead = head.leadNode;
 
-  const verdictSlot = el("div", { style: { marginBottom: "12px" } });
-  root.append(verdictSlot);
-
-  const problemSlot = el("div", { style: { marginBottom: "12px" } });
-  root.append(problemSlot);
-
+  const statusSlot = el("div");
+  const problemSlot = el("div");
   const clientSlot = el("div");
-  root.append(clientSlot);
+  const inotifySlot = el("div");
+  root.append(el("div.stack", {}, [statusSlot, problemSlot, clientSlot, inotifySlot]));
 
-  const inotifySlot = el("div", { style: { marginTop: "12px" } });
-  root.append(inotifySlot);
+  const skeleton = () => {
+    head.setPending(true);
+    pendingSlot(statusSlot, skeletonStatus());
+    pendingSlot(clientSlot, skeletonSection("Clients", 5));
+    pendingSlot(inotifySlot, skeletonSection("inotify file watches", 5));
+  };
 
-  function build() { built = true; }
+  function build() { built = true; skeleton(); }
 
   function repaint() {
     if (!built) return;
     const payload = store.state.sync;
     if (!payload) {
-      render(clientSlot, panel({ title: "Sync clients", body: skeletonRows(5) }));
+      skeleton();
       return;
     }
-
+    head.setPending(false);
     const clients = payload.clients || [];
     const problems = payload.problems || [];
 
     if (payload.available === false) {
-      render(verdictSlot, panel({
-        title: "Sync clients",
-        body: emptyState("No sync client detected", payload.reason),
-      }));
-      render(problemSlot, el("div"));
-      render(clientSlot, el("div"));
-      patchText(nodes.sub, "No known sync client is installed on this machine.");
+      readySlot(statusSlot, section({ title: "Sync clients", body: emptyState("No sync client detected", payload.reason) }));
+      render(problemSlot, []);
+      readySlot(clientSlot, []);
+      patchText(nodes.lead, "No known sync client is installed on this machine.");
     } else {
       const meta = STATUS_META[payload.status] || STATUS_META.unknown;
-
-      const verdict = el("div.verdict", { dataset: { severity: meta.sev } });
-      verdict.innerHTML = `<div class="verdict__icon">${icons[meta.icon]}</div>`;
-      verdict.append(el("div.verdict__text", {}, [
-        el("div.verdict__status", { text: meta.label }),
-        el("div.verdict__head", {
-          text: clients.map((c) => `${c.name}: ${(STATUS_META[c.status] || STATUS_META.unknown).label.toLowerCase()}`).join(" · "),
-        }),
+      readySlot(statusSlot, el("div.status", { dataset: { severity: meta.sev } }, [
+        el("div.status__text", {}, [
+          el("div.status__word", { text: meta.label }),
+          el("div.status__line", {
+            text: clients.map((c) => `${c.name}: ${(STATUS_META[c.status] || STATUS_META.unknown).label.toLowerCase()}`).join(" · "),
+          }),
+        ]),
       ]));
-      render(verdictSlot, verdict);
 
       if (problems.length) {
         const list = el("div");
@@ -97,95 +84,65 @@ export function createSync() {
           }, [
             el("div.finding__head", {}, [
               el("div.finding__title", { text: problem.title }),
-              el("div.finding__meta", {}, [
-                problem.client ? tag(problem.client, null) : null,
-              ].filter(Boolean)),
+              el("div.finding__meta", {}, [problem.client ? pill(problem.client) : null].filter(Boolean)),
             ]),
-            el("div.finding__detail", { text: problem.detail }),
+            el("div.finding__text", { text: problem.detail }),
           ]));
         }
-        render(problemSlot, panel({
+        render(problemSlot, section({
           title: `${problems.length} sync problem${problems.length === 1 ? "" : "s"}`,
-          icon: icons.warn,
+          tone: problems.some((p) => p.severity === "critical") ? "crit" : "warn",
           body: list,
-          cls: problems.some((p) => p.severity === "critical") ? "panel--crit" : "panel--warn",
         }));
       } else {
-        render(problemSlot, el("div"));
+        render(problemSlot, []);
       }
 
-      const grid = el("div.grid.grid--halves");
+      const grid = el("div.cells.cells--2");
       for (const client of clients) {
         const clientMeta = STATUS_META[client.status] || STATUS_META.unknown;
-        const rows = [
-          kv("Status", client.detail || clientMeta.label),
-          kv("Read from", client.source || fmt.dash),
-        ];
+        const rows = [kv("Status", client.detail || clientMeta.label), kv("Read from", client.source || fmt.dash)];
         const unit = client.unit;
         if (unit) {
-          rows.push(kv("systemd unit", `${unit.active || "?"} (${unit.sub || "?"})`, {
-            state: unit.active === "active" ? "ok" : unit.active === "failed" ? "crit" : null,
-          }));
-          if (Number(unit.restarts) > 0) {
-            rows.push(kv("Unit restarts", String(unit.restarts), { state: "warn", mono: true }));
-          }
+          rows.push(kv("systemd unit", `${unit.active || "?"} (${unit.sub || "?"})`,
+            { tone: unit.active === "active" ? "ok" : unit.active === "failed" ? "crit" : null }));
+          if (Number(unit.restarts) > 0) rows.push(kv("Unit restarts", String(unit.restarts), { tone: "warn", mono: true }));
         }
         for (const [key, value] of Object.entries(client.metrics || {})) {
           if (value === null || value === undefined) continue;
           rows.push(kv(key.replace(/_/g, " "), String(value), { mono: true }));
         }
-        grid.append(panel({
-          title: client.name,
-          meta: tag(clientMeta.label, clientMeta.tag),
-          body: el("div.kvlist", {}, rows),
-          cls: client.status === "error" ? "panel--crit" : "",
+        grid.append(section({
+          title: client.name, meta: pill(clientMeta.label, clientMeta.tone), body: kvs(rows),
+          tone: client.status === "error" ? "crit" : undefined,
         }));
       }
-      render(clientSlot, grid);
-      patchText(nodes.sub,
-        `${clients.length} client(s) detected · ${meta.label.toLowerCase()}`);
+      readySlot(clientSlot, section({ title: "Clients", meta: `${clients.length} detected`, body: grid }));
+      patchText(nodes.lead, `${clients.length} client(s) detected · ${meta.label.toLowerCase()}`);
     }
 
-    // inotify watches — rendered regardless of whether a client was found,
-    // because editors and file managers hit the same wall.
     const inotify = payload.inotify || {};
     const pct = inotify.percent;
-    const body = el("div", {}, [
-      el("div.kvlist", {}, [
-        kv("Watches in use", fmt.count(inotify.used_watches), { mono: true }),
-        kv("Watch limit", fmt.count(inotify.max_watches), { mono: true }),
-        kv("Usage", pct === null || pct === undefined ? fmt.dash : fmt.pct(pct), {
-          mono: true, state: pct >= 80 ? "crit" : pct >= 50 ? "warn" : "ok",
-        }),
-        kv("inotify instances", fmt.count(inotify.instances), { mono: true }),
-        kv("Instance limit", fmt.count(inotify.max_instances), { mono: true }),
-      ]),
-      inotify.note
-        ? el("div.hint", { style: { marginTop: "8px" },
-            html: `${icons.info}<div>${fmt.esc(inotify.note)}</div>` })
-        : null,
-      inotify.warning
-        ? el("div.hint.hint--warn", { style: { marginTop: "8px" },
-            html: `${icons.warn}<div>${fmt.esc(inotify.warning)}</div>` })
-        : null,
-    ].filter(Boolean));
-    render(inotifySlot, panel({
+    readySlot(inotifySlot, section({
       title: "inotify file watches",
-      body,
-      foot: el("span", {
-        text: "When fs.inotify.max_user_watches runs out, sync clients and "
-            + "editors silently stop noticing file changes — it looks exactly "
-            + "like broken sync while every status light stays green.",
-      }),
+      body: el("div", {}, [
+        kvs([
+          kv("Watches in use", fmt.count(inotify.used_watches), { mono: true }),
+          kv("Watch limit", fmt.count(inotify.max_watches), { mono: true }),
+          kv("Usage", pct === null || pct === undefined ? fmt.dash : fmt.pct(pct),
+            { mono: true, tone: pct >= 80 ? "crit" : pct >= 50 ? "warn" : "ok" }),
+          kv("inotify instances", fmt.count(inotify.instances), { mono: true }),
+          kv("Instance limit", fmt.count(inotify.max_instances), { mono: true }),
+        ]),
+        inotify.note ? note("info", fmt.esc(inotify.note), { margin: true }) : null,
+        inotify.warning ? note("warn", fmt.esc(inotify.warning), { margin: true }) : null,
+      ].filter(Boolean)),
+      foot: "When fs.inotify.max_user_watches runs out, sync clients and editors silently stop noticing file "
+          + "changes — it looks exactly like broken sync while every status light stays green.",
     }));
   }
 
   root.mount = () => { if (!built) build(); repaint(); };
-  root.showSkeleton = () => {
-    render(clientSlot, panel({ title: "Sync clients", body: skeletonRows(6) }));
-  };
-  root.subscriptions = [
-    store.on("sync", () => { if (root.isActive) repaint(); }),
-  ];
+  root.subscriptions = [store.on(["sync", "node"], () => { if (root.isActive) repaint(); })];
   return root;
 }

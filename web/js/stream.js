@@ -39,6 +39,10 @@ class Store {
       errors: {},
       timings: {},
       nodes: [],
+      // False until the server has actually sent the node list once. An empty
+      // list before then means "not known yet", not "no agents" -- the
+      // difference between a skeleton and a misleading empty state.
+      nodesKnown: false,
       auth: {},
       node_meta: null,
     };
@@ -66,6 +70,10 @@ class Store {
     clearInterval(this._nodePoll);
     this._nodePoll = null;
     this.state.node_meta = null;
+    // Drop the previous machine's sections so every view falls back to its
+    // skeleton until the new node's first snapshot lands, instead of showing
+    // the old machine's numbers under the new machine's name.
+    for (const key of SECTIONS) if (key !== "config") delete this.state[key];
     // Every view's charts hold the previous node's history; they listen for
     // this and clear, so two machines' lines never blend into one trace.
     this.emit("node");
@@ -146,7 +154,7 @@ class Store {
         handler(this.state, section);
       } catch (error) {
         // One broken view must not stop the others from updating.
-        console.error(`[culprit] listener for "${section}" failed:`, error);
+        console.error(`[Culprit] listener for "${section}" failed:`, error);
       }
     }
   }
@@ -181,6 +189,7 @@ class Store {
     }
     if (payload.nodes !== undefined) {
       this.state.nodes = payload.nodes;
+      this.state.nodesKnown = true;
       changed.push("nodes");
     }
     if (payload.errors !== undefined) this.state.errors = payload.errors;
@@ -272,7 +281,7 @@ function safeParse(text) {
   try {
     return JSON.parse(text);
   } catch (error) {
-    console.error("[culprit] malformed SSE frame:", error);
+    console.error("[Culprit] malformed SSE frame:", error);
     return null;
   }
 }
