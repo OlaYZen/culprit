@@ -453,23 +453,36 @@ def test_trust(r: Runner) -> None:
     r.check("only address headers count, not Via",
             trust.resolve("1.2.3.4", {"host": "h", "via": "1.1 x"}, none).refusal is None)
 
+    # `local` pinned: the machine running this check has its own addresses,
+    # which must not decide whether 192.168.1.6 passes.
+    mine = frozenset(trust.LOOPBACK_HOSTS | {"10.7.7.7", "boxname"})
     hosts = trust.policy([], ["dash.example.com", "*.lan", "192.168.1.5", "::1"])
     for header, ok in (("dash.example.com", True), ("DASH.example.com:8787", True),
                        ("dash.example.com.", True), ("a.lan", True), ("x.y.lan", True),
                        ("lan", False), ("evil.example", False), ("192.168.1.5:8787", True),
                        ("192.168.1.6", False), ("[::1]:8787", True), ("localhost", True),
-                       ("127.0.0.1:8787", True), ("", False), ("dash.example.com.evil", False)):
-        a = trust.resolve("192.168.1.9", {"host": header}, hosts)
+                       ("127.0.0.1:8787", True), ("", False), ("dash.example.com.evil", False),
+                       ("10.7.7.7:8787", True), ("BoxName", True)):
+        a = trust.resolve("192.168.1.9", {"host": header}, hosts, local=mine)
         r.check(f"Host {header!r} -> {'allowed' if ok else 'refused'}",
                 (a.refusal is None) == ok, str(a.refusal))
-    a = trust.resolve("192.168.1.9", {"host": "evil.example"}, hosts)
+    a = trust.resolve("192.168.1.9", {"host": "evil.example"}, hosts, local=mine)
     r.check("refusal names the reason", a.reason == "untrusted_host")
     both = trust.policy(["10.0.0.0/8"], ["dash.example.com"])
-    a = trust.resolve("10.0.0.2", {"host": "10.0.0.1", "x-forwarded-host": "dash.example.com"}, both)
+    a = trust.resolve("10.0.0.2", {"host": "10.0.0.1", "x-forwarded-host": "dash.example.com"}, both, local=mine)
     r.check("forwarded Host from a declared proxy is the one checked", a.refusal is None, str(a))
-    a = trust.resolve("10.0.0.2", {"host": "dash.example.com", "x-forwarded-host": "evil.example"}, both)
+    a = trust.resolve("10.0.0.2", {"host": "dash.example.com", "x-forwarded-host": "evil.example"}, both, local=mine)
     r.check("...and a foreign forwarded Host is refused", a.reason == "untrusted_host")
-    r.check("empty host list accepts anything", trust.host_allowed("whatever", []))
+    r.check("empty host list accepts anything", trust.host_allowed("whatever", [], local=mine))
+    live = trust.local_names(refresh=True)
+    import socket as _socket
+    r.check("local_names: loopback, the host name and an interface address",
+            trust.LOOPBACK_HOSTS <= live and _socket.gethostname().lower() in live
+            and any("." in n and n[0].isdigit() for n in live), str(sorted(live))[:200])
+    own = next(n for n in live if n[0].isdigit() and n not in ("127.0.0.1",))
+    r.check("this machine's own address passes an unrelated list",
+            trust.resolve("192.168.1.9", {"host": f"{own}:8787"},
+                          trust.policy([], ["only.example"])).refusal is None, own)
 
     os.environ[trust.ENV_PROXIES] = "172.16.0.1"
     a = trust.resolve("172.16.0.1", {"host": "h", "x-forwarded-for": "203.0.113.5"}, trust.policy([], []))
@@ -484,7 +497,7 @@ def test_trust(r: Runner) -> None:
     r.check("parse_proxies rejects names", _raises(trust.parse_proxies, ["gateway"]))
     r.check("host_of strips port, brackets, case, dot",
             trust.host_of("[::1]:8787") == "::1" and trust.host_of("Dash.LAN.:80") == "dash.lan")
-    r.summary("network trust", "undeclared proxies refused, declared ones honoured right-to-left, Host list with wildcards + loopback")
+    r.summary("network trust", "undeclared proxies refused, declared ones honoured right-to-left, Host list with wildcards + own names")
 
 
 def _raises(fn, *args):  # type: ignore[no-untyped-def]

@@ -21,8 +21,12 @@ about *trust in the network path*, not in the user:
    rebinding (a hostile page resolving its own name to this machine) and
    mis-routed requests from a shared proxy. Empty list = not enforced, which
    is the default because a wrong list locks the operator out from the
-   network; loopback names are always accepted so a shell on the host itself
-   can always reach Settings and fix it.
+   network. The machine's own names always pass without being listed:
+   loopback, every interface address, the host name and FQDN
+   (`local_names`). A rebinding page can only ever carry the attacker's own
+   domain, so accepting our own addresses costs nothing -- and it means the
+   list only has to hold the *extra* DNS names, and a shell on the host or
+   an agent on the LAN can always get through.
 
 Everything here is pure: no framework objects, so tools/check_auth.py can
 assert each rule against literal headers.
@@ -33,6 +37,8 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Mapping
@@ -50,6 +56,8 @@ FORWARDING_HEADERS: tuple[str, ...] = (
 # Always an acceptable Host, whatever the allow-list says: the recovery path
 # when the list is wrong is a shell on the machine itself.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_LOCAL_TTL = 60.0
+_local_cache: tuple[float, frozenset[str]] = (0.0, frozenset())
 
 # One-run additions from the command line (`--trust-proxy`), comma-separated.
 ENV_PROXIES = "CULPRIT_TRUST_PROXY"
@@ -143,6 +151,36 @@ def _valid_hostname(text: str) -> bool:
     return all(_HOST_LABEL.match(label) for label in text.split("."))
 
 
+def local_names(refresh: bool = False) -> frozenset[str]:
+    """Names that are this machine by definition: loopback, every interface
+    address (IPv6 scope id stripped), the host name and the FQDN. A Host of
+    one of these is never DNS rebinding -- a hostile page can only carry its
+    own domain -- so they pass without being listed. Cached a minute so a
+    DHCP renewal or a new Docker bridge needs no restart."""
+    global _local_cache
+    now = time.monotonic()
+    if not refresh and now - _local_cache[0] < _LOCAL_TTL:
+        return _local_cache[1]
+    names = set(LOOPBACK_HOSTS)
+    try:
+        import psutil
+        for addrs in psutil.net_if_addrs().values():
+            for addr in addrs:
+                if addr.family in (socket.AF_INET, socket.AF_INET6):
+                    names.add(addr.address.split("%", 1)[0].lower())
+    except Exception:  # noqa: BLE001 -- psutil missing or sysfs gated: loopback still works
+        pass
+    for lookup in (socket.gethostname, socket.getfqdn):
+        try:
+            name = lookup().strip().lower().rstrip(".")
+        except OSError:
+            continue
+        if name:
+            names.add(name)
+    _local_cache = (now, frozenset(names))
+    return _local_cache[1]
+
+
 def runtime_proxies() -> list[str]:
     """Proxies added for this run only via the environment / CLI."""
     return split_entries(os.environ.get(ENV_PROXIES, ""))
@@ -213,11 +251,13 @@ def host_of(header: str | None) -> str:
     return text.rstrip(".")
 
 
-def host_allowed(host: str, allowed: Iterable[str]) -> bool:
+def host_allowed(host: str, allowed: Iterable[str],
+                 local: frozenset[str] | None = None) -> bool:
+    """`local` overrides the machine's own names (tests pass a fixed set)."""
     names = tuple(allowed)
     if not names:
         return True
-    if host in LOOPBACK_HOSTS:
+    if host in (local_names() if local is None else local):
         return True
     for name in names:
         if name.startswith("*."):
@@ -274,11 +314,11 @@ class Access:
 
 
 def resolve(peer: str | None, headers: Mapping[str, str], pol: Policy,
-            scheme: str = "http") -> Access:
+            scheme: str = "http", local: frozenset[str] | None = None) -> Access:
     """Apply the policy to one request. Never raises; a refusal is a field.
 
     `headers` must look up case-insensitively (Starlette's does) or be
-    lower-cased by the caller.
+    lower-cased by the caller. `local` pins the machine's own names (tests).
     """
     peer_text = peer or "?"
     present = [name for name in FORWARDING_HEADERS if name in headers]
@@ -330,9 +370,10 @@ def resolve(peer: str | None, headers: Mapping[str, str], pol: Policy,
             proto = proto.split(",")[0].strip().lower()
             if proto in ("http", "https"):
                 access.scheme = proto
-    if not host_allowed(access.host, pol.hosts):
+    if not host_allowed(access.host, pol.hosts, local):
         access.refusal = (
-            f"Host {access.host!r} is not in the trusted hosts list (Settings > "
-            "Network trust); loopback names are always accepted")
+            f"the request asked for Host {access.host!r}, which is not one of this "
+            "dashboard's names (Settings > Network trust > Trusted host names); "
+            "this machine's own addresses, host name and loopback always pass")
         access.reason = "untrusted_host"
     return access

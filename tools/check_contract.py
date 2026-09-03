@@ -239,7 +239,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.deploy_host", "config.agent_command",
             "config.trusted_proxies", "config.trusted_hosts",
             "access.client", "access.peer", "access.host", "access.scheme",
-            "access.via_proxy", "access.runtime_proxies",
+            "access.via_proxy", "access.runtime_proxies", "access.always_hosts",
             "config.cpu_high", "config.cpu_queue_per_core",
             "config.mem_available_low_mb", "config.mem_commit_high",
             "config.hard_faults_high", "config.disk_latency_high_ms",

@@ -279,7 +279,7 @@ export function createSettings() {
       "aria-label": label, "aria-describedby": `help-set-${key}`,
     });
     const proxies = area("trusted_proxies", "127.0.0.1\n10.0.0.0/8", "Trusted proxies");
-    const hosts = area("trusted_hosts", "dash.example.com\n*.lan\n192.168.1.5", "Trusted hosts");
+    const hosts = area("trusted_hosts", "dash.example.com\n*.lan", "Trusted host names");
     const seed = () => {
       proxies.value = (config.trusted_proxies || []).join("\n");
       hosts.value = (config.trusted_hosts || []).join("\n");
@@ -335,6 +335,9 @@ export function createSettings() {
     if (access.runtime_proxies?.length) {
       rows.push(kv("Added for this run", access.runtime_proxies.join(", "), { mono: true, tone: "info" }));
     }
+    if (access.always_hosts?.length) {
+      rows.push(kv("Always accepted", access.always_hosts.join(", "), { mono: true }));
+    }
     const section_ = section({
       title: "Network trust", meta: trustMeta(),
       body: el("div.cols.cols--2", {}, [
@@ -343,9 +346,10 @@ export function createSettings() {
             help: "Reverse proxies whose X-Forwarded-For / Forwarded headers are honoured, so the login limiter keys on the real client "
                 + "and the session cookie learns it crossed TLS. Empty (the default) refuses any request that arrives with a forwarding "
                 + "header from an undeclared address — with a 400 that says why, rather than quietly ignoring the header." }),
-          fieldRow({ id: hosts.id, label: "Trusted hosts", unit: "one name or IP per line", input: hosts, area: true, error: entries.trusted_hosts.error,
-            help: "Names this dashboard is reached at — dash.example.com, *.lan, 192.168.1.5 — without a port. Any other Host header is "
-                + "refused, which shuts DNS rebinding. Empty accepts any Host. localhost, 127.0.0.1 and ::1 always pass." }),
+          fieldRow({ id: hosts.id, label: "Trusted host names", unit: "extra names, one per line", input: hosts, area: true, error: entries.trusted_hosts.error,
+            help: "The address people type to reach this dashboard (the HTTP Host header): DNS names like dash.example.com or *.lan, "
+                + "without a port. This machine's own IP addresses, host name and loopback always pass and need not be listed. "
+                + "With at least one entry, any other Host is refused, which shuts DNS rebinding. Empty accepts any Host." }),
         ]),
         el("div", {}, [
           subhead("This connection"),
