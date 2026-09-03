@@ -69,6 +69,10 @@ Security invariants the two security tools pin down (a change to any of them mus
 
 There is **no unit-test suite** by design: what breaks here is environmental (a sysfs path a distro moved, a kernel without PSI, a gated journal), which only the real machine reveals — hence `smoketest.py`. When you add or rename a payload field, update `tools/check_contract.py`'s `CONTRACT` map in the same change or the frontend silently degrades.
 
+## Commits
+
+Commit messages carry **no attribution trailers, ever**: no `Co-Authored-By: Claude ...`, no `Claude-Session:` line, nothing that names the tool. The history reads as the maintainer's own work; the two pushed commits that once carried these lines were rewritten and force-pushed to strip them, so adding one back is a regression, not a default. Other sessions may be editing this checkout at the same time — stage by explicit path, never `git add -A`, and leave files you did not touch out of your commit.
+
 ## Architecture
 
 ### Sampling: four tiers, one snapshot store, SSE fan-out
