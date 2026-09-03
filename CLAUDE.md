@@ -11,9 +11,10 @@ One machine runs the **host** (dashboard + FastAPI + SQLite). Other servers run 
 ## Commands
 
 ```bash
-./install.sh                    # host: create .venv, install deps, print the source-availability matrix
-./run.sh [--port N] [--no-browser]   # host: idempotent launch (installs if needed, picks a free port)
-CULPRIT_HOST=0.0.0.0 ./run.sh   # bind to a network address (requires a user to exist first)
+./culprit.sh                    # host: install (venv+deps+matrix), then OFFER a systemd user service (prompt defaults yes)
+./culprit.sh --run              # host: install if needed, then run in the foreground (no service); takes --port N / --no-browser
+./culprit.sh --install-only     # host: install + matrix only, no service, no run (CI)
+CULPRIT_HOST=0.0.0.0 ./culprit.sh [--run]   # bind all interfaces so remote agents can reach it (requires a user)
 
 .venv/bin/python -m culprit                     # run the host directly
 .venv/bin/python -m culprit --host 0.0.0.0 --no-browser
@@ -127,7 +128,7 @@ Every optional source degrades to an explicit `available: False` + `reason`, nev
 
 ## Deployment artifacts
 
-- Host: `install.sh`, `run.sh`, `culprit.service` (systemd **user** unit), `requirements.txt`, the `culprit/` package (with `main.py`/`auth.py`/`nodes.py`), `web/`.
+- Host: `culprit.sh` (installs, then by default interactively sets up the systemd **user** service, or runs foreground with `--run`; the merged installer/runner — `install.sh` + `run.sh` are gone), `culprit.service` (systemd **user** unit template, loopback-bound; `culprit.sh` generates its own unit with the chosen `--host`), `requirements.txt`, the `culprit/` package (with `main.py`/`auth.py`/`nodes.py`), `web/`.
 - Agent: the entire **`culprit-agent/`** folder — `agent.sh`, `requirements-agent.txt` (psutil only), `culprit-agent.service`, `sync-package.sh`, and its own `culprit-agent/culprit/` copy of the runnable package. `cp -r culprit-agent <target>` deploys it as one self-contained unit.
 - **The bundle's `culprit-agent/culprit/` is a duplicate** of the host `culprit/` package minus the host-only `main.py`/`auth.py`/`nodes.py`, plus the agent-only `agent.py`. After editing any shared code (collectors, sampler, db, state, config, linux, util), run `./culprit-agent/sync-package.sh` to refresh the copy (it preserves `agent.py` and skips host-only files). Verify the bundle with an import test (`PYTHONPATH=culprit-agent python -c "import culprit.agent"`).
 - The dashboard binds `127.0.0.1` and has no TLS by default; agents crossing an untrusted network need `--ssl-certfile/--ssl-keyfile` on the host (or a proxy) and `https://` (or `--insecure` for self-signed).

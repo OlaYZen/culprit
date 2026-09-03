@@ -219,7 +219,7 @@ def main() -> int:
         http.req("GET", "/api/auth")
     except OSError as exc:
         print(f"  {RED}no server answering at {url}:{RESET} {exc}")
-        print(f"  {DIM}start one with ./run.sh, then re-run this.{RESET}")
+        print(f"  {DIM}start one with ./culprit.sh, then re-run this.{RESET}")
         return 2
     armed = auth_enabled(http)
 
