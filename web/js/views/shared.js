@@ -167,10 +167,19 @@ const BREAKDOWN_LABELS = {
 /** "in <container>" chip for a process that runs in one. Name when the
  *  agent could read it, else runtime + short id (the payload says what
  *  unlocks the name). Never invents a name. */
+export function containerLabelMode() {
+  return store.state.config?.ui?.container_label === "id" ? "id" : "name";
+}
+
 export function containerPill(container) {
   if (!container) return null;
-  const label = container.name || `${container.runtime} ${container.id}`;
-  const title = [container.image ? `image ${container.image}` : null,
+  // "docker: portainer" by preference, "docker: f566c851aa3c" when the
+  // person prefers ids (Settings) or when the name is not readable.
+  const byName = containerLabelMode() === "name" && !!container.name;
+  const label = `${container.runtime}: ${byName ? container.name : container.id}`;
+  const title = [container.name && !byName ? `name ${container.name}` : null,
+    byName ? `id ${container.id}` : null,
+    container.image ? `image ${container.image}` : null,
     container.project ? `compose project ${container.project}` : null,
     !container.name ? "name not readable: the agent needs the runtime's API socket" : null]
     .filter(Boolean).join(" · ");

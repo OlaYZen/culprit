@@ -19,7 +19,7 @@ import {
   combobox, emptyState, pendingSlot, readySlot, searchField, segmented, skeletonFigures, skeletonSection,
   switchControl,
 } from "../ui.js";
-import { containerPill, figures, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { containerLabelMode, containerPill, figures, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const COLUMNS = [
   { key: "tree", label: "", sortable: false, width: "10px" },
@@ -289,7 +289,7 @@ export function createProcesses() {
     patchText(entry.treeIndent, depth ? "│ ".repeat(depth - 1) + "└ " : "");
     patchText(entry.mark, fmt.monogram(proc.name));
     // Container chip, rebuilt only when the container (or its name) changes.
-    const whereKey = proc.container ? `${proc.container.id}:${proc.container.name || ""}` : "";
+    const whereKey = proc.container ? `${containerLabelMode()}:${proc.container.id}:${proc.container.name || ""}` : "";
     if (entry.flags.where !== whereKey) {
       entry.flags.where = whereKey;
       entry.where.replaceChildren(containerPill(proc.container) || "");
@@ -334,7 +334,7 @@ export function createProcesses() {
   }
 
   root.mount = () => { if (!built) build(); repaint(); };
-  root.subscriptions = [store.on(["process_table", "node"], () => { if (root.isActive) repaint(); })];
+  root.subscriptions = [store.on(["process_table", "node", "config"], () => { if (root.isActive) repaint(); })];
   return root;
 }
 
