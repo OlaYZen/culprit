@@ -187,6 +187,9 @@ export function createSettings() {
           onChange: (v) => applyImmediate({ tree_grouping: v }) }),
         switchControl({ label: "Open a browser on start", checked: config.open_browser,
           onChange: (v) => applyImmediate({ open_browser: v }) }),
+        switchControl({ label: "Label containers by name", checked: (config.ui || {}).container_label !== "id",
+          title: "On: \"docker: portainer\". Off: \"docker: f566c851aa3c\" (the id). Names need the agent to read the runtime's socket; otherwise the id shows either way",
+          onChange: (v) => applyImmediate({ ui: { ...(config.ui || {}), container_label: v ? "name" : "id" } }) }),
       ]),
       foot: "Switches rather than checkboxes because they take effect the moment you flip them — there is nothing to submit.",
     }));
@@ -693,6 +696,8 @@ export function createSettings() {
     try {
       const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
       config = payload.config;
+      // Views that read preferences (container labels) listen for this.
+      store.ingest({ config: payload.config }, ["config"]);
       inlineResult(summary, "Applied.", "ok");
       setTimeout(() => summary.replaceChildren(), 2200);
       renderInfo();
