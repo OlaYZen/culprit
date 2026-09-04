@@ -116,6 +116,41 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE INDEX IF NOT EXISTS idx_findings_ts ON findings(ts);
 
+-- Expected-busy annotations: "this finding, on this node (or all), led by
+-- this culprit (or any), is normal -- here is why, and during this window".
+-- The host matches live findings against these at ingest and reports them
+-- as expected rather than as problems. Human-written, never inferred.
+CREATE TABLE IF NOT EXISTS expectations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node        TEXT NOT NULL DEFAULT '*',   -- '*' = every node
+    key         TEXT NOT NULL,               -- finding key, e.g. psi_io
+    culprit     TEXT,                        -- image name, or NULL for any
+    reason      TEXT NOT NULL,
+    days        TEXT NOT NULL DEFAULT '[]',  -- JSON list of weekdays, Mon=0; [] = every day
+    start       TEXT,                        -- 'HH:MM' local (host) time, or NULL = always
+    "end"       TEXT,
+    created_at  REAL NOT NULL,
+    created_by  TEXT
+);
+
+-- Actions taken from the dashboard (End task, renice, throttle) and what
+-- happened next: the verdict the host reached by watching the node's own
+-- findings after the action. The audit trail an incident timeline needs.
+CREATE TABLE IF NOT EXISTS actions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node        TEXT NOT NULL,
+    ts          REAL NOT NULL,
+    action      TEXT NOT NULL,
+    pid         INTEGER,
+    name        TEXT,
+    unit        TEXT,
+    detail      TEXT,                        -- JSON: the agent's own result
+    verdict     TEXT,                        -- JSON, NULL while still watching
+    username    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_ts ON actions(ts);
+
 -- Dashboard users. Passwords are scrypt-hashed with a per-user salt; the
 -- plaintext never touches the database.
 CREATE TABLE IF NOT EXISTS users (
@@ -334,6 +369,8 @@ class History:
                 conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
                 conn.execute("DELETE FROM proc_samples WHERE ts < ?", (cutoff,))
                 conn.execute("DELETE FROM findings WHERE ts < ?", (cutoff,))
+                conn.execute("DELETE FROM actions WHERE ts < ?",
+                             (now - max(retention_days, 90) * 86_400,))
                 # Events are kept longer -- a bluescreen from six weeks ago is
                 # still the most interesting thing in the database.
                 conn.execute("DELETE FROM events WHERE ts < ?",
@@ -447,11 +484,166 @@ class History:
             out.append(entry)
         return out
 
+    def incidents(self, since: float, limit: int = 100, node: str = LOCAL_NODE,
+                  bucket_seconds: int = 60) -> list[dict[str, Any]]:
+        """Findings folded into incidents: consecutive stored rows of one key
+        become one span with a start, an end, the peak severity, the culprits
+        ranked by how many buckets they led, and the actions taken meanwhile.
+
+        Rows are written once per rollup bucket, so "consecutive" means within
+        a couple of bucket widths -- one missed bucket (a restart mid-minute)
+        does not split an incident in two.
+        """
+        if not self.ready:
+            return []
+        gap = bucket_seconds * 2.5
+        rows = self._query(
+            "SELECT ts, key, severity, resource, title, detail, culprits "
+            "FROM findings WHERE node = ? AND ts >= ? ORDER BY key, ts",
+            (node, since - gap),
+        )
+        incidents: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+        now = time.time()
+        for row in rows:
+            ts = float(row["ts"])
+            try:
+                culprits = json.loads(row["culprits"] or "[]")
+            except ValueError:
+                culprits = []
+            if current is None or row["key"] != current["key"] \
+                    or ts - current["_last"] > gap:
+                if current is not None:
+                    incidents.append(_close_incident(current, bucket_seconds, now))
+                current = {
+                    "key": row["key"], "resource": row["resource"],
+                    "start": ts, "_last": ts, "buckets": 0,
+                    "severity": "info", "peak_ts": ts,
+                    "title": row["title"], "detail": row["detail"],
+                    "_names": {}, "_first_by_severity": {},
+                }
+            current["_last"] = ts
+            current["buckets"] += 1
+            current["title"] = row["title"]
+            current["detail"] = row["detail"]
+            sev = str(row["severity"] or "info")
+            current["_first_by_severity"].setdefault(sev, ts)
+            if _SEVERITY_RANK.get(sev, 0) > _SEVERITY_RANK.get(current["severity"], 0):
+                current["severity"] = sev
+                current["peak_ts"] = ts
+            for rank, culprit in enumerate(culprits[:5]):
+                if not isinstance(culprit, dict):
+                    continue
+                name = str(culprit.get("name") or "?")
+                entry = current["_names"].setdefault(name, {
+                    "name": name, "buckets": 0, "led": 0, "pid": None,
+                    "share": None, "container": None,
+                })
+                entry["buckets"] += 1
+                if rank == 0:
+                    entry["led"] += 1
+                entry["pid"] = culprit.get("pid")
+                entry["share"] = culprit.get("share")
+                entry["container"] = culprit.get("container")
+        if current is not None:
+            incidents.append(_close_incident(current, bucket_seconds, now))
+        incidents = [i for i in incidents if i["end"] >= since]
+        incidents.sort(key=lambda i: -i["start"])
+        incidents = incidents[:limit]
+        if incidents:
+            earliest = min(i["start"] for i in incidents)
+            actions = self.actions(earliest - bucket_seconds, node=node, limit=500)
+            for incident in incidents:
+                incident["actions"] = [
+                    a for a in actions
+                    if incident["start"] - bucket_seconds <= float(a["ts"]) <= incident["end"]
+                ]
+        return incidents
+
+    # ------------------------------------------------------------ expectations
+    def list_expectations(self) -> list[dict[str, Any]]:
+        if not self.ready:
+            return []
+        out = []
+        for row in self._query("SELECT * FROM expectations ORDER BY id"):
+            entry = dict(row)
+            try:
+                entry["days"] = json.loads(entry.get("days") or "[]")
+            except ValueError:
+                entry["days"] = []
+            out.append(entry)
+        return out
+
+    def add_expectation(self, node: str, key: str, culprit: str | None,
+                        reason: str, days: Sequence[int], start: str | None,
+                        end: str | None, created_by: str | None) -> int:
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                raise sqlite3.OperationalError("history database not open")
+            cur = conn.execute(
+                "INSERT INTO expectations (node, key, culprit, reason, days, start, "
+                "\"end\", created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (node, key, culprit, reason, json.dumps(list(days)), start, end,
+                 time.time(), created_by),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def remove_expectation(self, expectation_id: int) -> bool:
+        return self._execute("DELETE FROM expectations WHERE id = ?",
+                             (expectation_id,)) > 0
+
+    # ------------------------------------------------------------------ actions
+    def record_action(self, node: str, action: str, pid: int | None,
+                      name: str | None, unit: str | None, detail: dict[str, Any],
+                      username: str | None) -> int:
+        with self._lock:
+            conn = self._conn
+            if conn is None:
+                return 0
+            cur = conn.execute(
+                "INSERT INTO actions (node, ts, action, pid, name, unit, detail, "
+                "username) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (node, time.time(), action, pid, name, unit,
+                 json.dumps(detail, default=str)[:8192], username),
+            )
+            conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def set_verdict(self, action_id: int, verdict: dict[str, Any]) -> None:
+        self._execute("UPDATE actions SET verdict = ? WHERE id = ?",
+                      (json.dumps(verdict, default=str)[:8192], action_id))
+
+    def actions(self, since: float, node: str | None = None,
+                limit: int = 200) -> list[dict[str, Any]]:
+        if not self.ready:
+            return []
+        clauses, params = ["ts >= ?"], [since]
+        if node:
+            clauses.append("node = ?")
+            params.append(node)
+        params.append(limit)
+        rows = self._query(
+            f"SELECT id, node, ts, action, pid, name, unit, detail, verdict, "
+            f"username FROM actions WHERE {' AND '.join(clauses)} "
+            "ORDER BY ts DESC LIMIT ?", tuple(params))
+        out = []
+        for row in rows:
+            entry = dict(row)
+            for field in ("detail", "verdict"):
+                try:
+                    entry[field] = json.loads(entry[field]) if entry[field] else None
+                except ValueError:
+                    entry[field] = None
+            out.append(entry)
+        return out
+
     def stats(self) -> dict[str, Any]:
         if not self.ready:
             return {"available": False, "reason": self.error or "history disabled"}
         counts: dict[str, Any] = {}
-        for table in ("samples", "proc_samples", "events", "findings"):
+        for table in ("samples", "proc_samples", "events", "findings", "actions"):
             rows = self._query(f"SELECT COUNT(*) AS n FROM {table}")
             counts[table] = rows[0]["n"] if rows else 0
         span = self._query("SELECT MIN(ts) AS oldest, MAX(ts) AS newest FROM samples")
@@ -772,6 +964,26 @@ def aggregate_window(samples: Sequence[dict[str, Any]],
         "net_recv_avg": avg(recv), "net_sent_avg": avg(sent),
         "lag_severity": lag_severity,
     }
+
+
+_SEVERITY_RANK = {"ok": 0, "info": 1, "warn": 2, "critical": 3}
+
+
+def _close_incident(current: dict[str, Any], bucket_seconds: int,
+                    now: float) -> dict[str, Any]:
+    names = sorted(current.pop("_names").values(),
+                   key=lambda c: (-c["led"], -c["buckets"], c["name"]))
+    last = current.pop("_last")
+    current.pop("_first_by_severity", None)
+    end = last + bucket_seconds
+    current["end"] = end
+    current["duration_seconds"] = round(end - current["start"])
+    # Still being written to: the latest bucket is the current one.
+    current["ongoing"] = now - last < bucket_seconds * 2.5
+    current["culprits"] = names[:5]
+    current["lead"] = names[0] if names else None
+    current["id"] = f"{current['key']}@{int(current['start'])}"
+    return current
 
 
 def _compact(event: dict[str, Any]) -> dict[str, Any]:
