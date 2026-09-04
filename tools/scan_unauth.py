@@ -42,6 +42,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import _auth  # noqa: E402 -- tools/ is sys.path[0] when run as a script
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -202,7 +204,11 @@ def main() -> int:
                    help="send write methods even when auth is disabled (mutates!)")
     p.add_argument("--json", metavar="PATH", help="write findings as JSON")
     p.add_argument("--strict", action="store_true", help="exit 1 on WARN too")
+    _auth.add_arguments(p)
     args = p.parse_args()
+    note = _auth.apply(args, uses=("url", "insecure"))
+    if note:
+        print(f"{DIM}{note}{RESET}")
 
     url = args.url or f"http://127.0.0.1:{args.port}"
     http = Http(url, args.insecure, args.timeout)

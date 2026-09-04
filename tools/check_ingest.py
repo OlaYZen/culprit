@@ -55,6 +55,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
+import _auth  # noqa: E402
+
 from check_security import (BOLD, DIM, GREEN, RED, RESET, Ctx, Http, Report,  # noqa: E402
                             Resp, check_agent_isolation, create_throwaway_user,
                             install_leak_observer, login, remove_throwaway_user,
@@ -416,7 +418,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--json", metavar="PATH")
+    _auth.add_arguments(parser)
     args = parser.parse_args()
+    note = _auth.apply(args, uses=("url", "user", "password", "token", "node", "insecure"))
+    if note:
+        print(f"{DIM}{note}{RESET}")
     args.active = True          # check_agent_isolation reads it
     args.concurrency = 0
     url = args.url or f"http://127.0.0.1:{args.port}"

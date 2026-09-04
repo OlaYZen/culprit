@@ -4,6 +4,7 @@
 # Runtime state — never commit (these hold live config and credentials)
 config.json
 agent.json
+tools_auth.json
 
 # SQLite database (holds scrypt password hashes + agent token hashes) + sidecars
 data/

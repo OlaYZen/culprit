@@ -22,6 +22,8 @@ import sys
 import urllib.error
 import urllib.request
 
+import _auth
+
 GREEN, RED, YELLOW, DIM, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[90m", "\033[0m",
 )
@@ -338,7 +340,11 @@ def main() -> int:
                         help="agent node to validate metric views against "
                              "(default: first online agent). The host no longer "
                              "monitors itself, so a reporting agent is required.")
+    _auth.add_arguments(parser)
     args = parser.parse_args()
+    note = _auth.apply(args, uses=("user", "password", "node"))
+    if note:
+        print(f"{DIM}{note}{RESET}")
     base = f"http://{args.host}:{args.port}"
 
     cache: dict[str, object] = {}
