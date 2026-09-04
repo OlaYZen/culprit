@@ -13,7 +13,7 @@ import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
   confirmAction, copyButton, emptyState, expandable, icons, inlineResult,
-  note, openModal, pendingSlot, readySlot, setBusy, skeletonLines, wireCopy,
+  note, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonLines, wireCopy,
 } from "../ui.js";
 
 /* ══ View header ═══════════════════════════════════════════════════════ */
@@ -164,6 +164,20 @@ const BREAKDOWN_LABELS = {
   gpu: "GPU", faults: "Page faults", stuck: "Stuck (D-state)",
 };
 
+/** "in <container>" chip for a process that runs in one. Name when the
+ *  agent could read it, else runtime + short id (the payload says what
+ *  unlocks the name). Never invents a name. */
+export function containerPill(container) {
+  if (!container) return null;
+  const label = container.name || `${container.runtime} ${container.id}`;
+  const title = [container.image ? `image ${container.image}` : null,
+    container.project ? `compose project ${container.project}` : null,
+    !container.name ? "name not readable: the agent needs the runtime's API socket" : null]
+    .filter(Boolean).join(" · ");
+  return el("span.pill.pill--where", { title, dataset: container.name ? { tone: "accent" } : {} },
+    [el("span.pill__glyph", { text: "⧉" }), document.createTextNode(label)]);
+}
+
 export function offenderRow(proc, { onOpen } = {}) {
   const score = Number(proc.lag_score || 0);
   const node = el("button.offender", { type: "button", title: "Open details" });
@@ -175,6 +189,8 @@ export function offenderRow(proc, { onOpen } = {}) {
     el("span.culprit__pid", { text: `#${proc.pid}` }),
   ]);
   if (proc.stuck) name.append(pill("stuck in D-state", "crit"));
+  const where = containerPill(proc.container);
+  if (where) name.append(where);
   main.append(name);
   const reasons = proc.lag_reasons || [];
   main.append(el("div.offender__reasons", {}, reasons.length
@@ -207,6 +223,8 @@ export function culpritRow(culprit, index) {
   node.append(el("span.culprit__name.trunc", { text: fmt.imageName(culprit.name) }));
   node.append(el("span.culprit__pid", { text: `#${culprit.pid}` }));
   if (culprit.stuck) node.append(pill("D-state", "crit"));
+  const where = containerPill(culprit.container);
+  if (where) node.append(where);
   node.append(el("span.culprit__share", { text: culprit.share || "" }));
   node.addEventListener("click", () => openProcessModal(culprit.pid));
   return node;
@@ -339,10 +357,24 @@ function processDetailBody(detail) {
     ]));
   }
 
-  if (detail.cgroup) {
+  if (detail.cgroup || detail.container || detail.unit) {
     wrap.append(subhead("Placement"));
+    const unit = detail.unit;
+    const c = detail.container;
     wrap.append(kvs([
-      kv("cgroup", detail.cgroup, { mono: true }),
+      c ? kv("Container", c.name
+        ? `${c.name}${c.image ? `  ·  ${c.image}` : ""}${c.project ? `  ·  compose ${c.project}` : ""}`
+        : `${c.runtime} ${c.id}  ·  name not readable (the agent needs the ${c.runtime} API socket)`,
+      { mono: true, tone: c.name ? "ok" : null }) : null,
+      unit ? kv("systemd unit", `${unit.name}  ·  ${unit.manager} manager`
+        + (fmt.isNum(unit.process_count) ? `  ·  ${unit.process_count} process${unit.process_count === 1 ? "" : "es"}` : ""),
+      { mono: true }) : null,
+      unit ? kv("Unit limits", unit.throttled
+        ? `CPU ${fmt.isNum(unit.cpu_quota_pct) ? `${unit.cpu_quota_pct}% of the machine` : "unlimited"}`
+          + `  ·  IO weight ${unit.io_weight ?? "default"}`
+        : "none (unlimited CPU, default IO weight)",
+      { mono: true, tone: unit.throttled ? "warn" : null }) : null,
+      detail.cgroup ? kv("cgroup", detail.cgroup, { mono: true }) : null,
       detail.oom_score !== null && detail.oom_score !== undefined
         ? kv("OOM score", String(detail.oom_score), { mono: true }) : null,
     ]));
@@ -438,14 +470,25 @@ function buildProcessFooter(footer, detail) {
         method: "POST", body: JSON.stringify({ level: "below_normal" }),
       });
       inlineResult(result, `Priority: ${outcome.previous} → ${outcome.priority}`, "ok");
+      watchVerdict(outcome.verify_id, result);
     } catch (error) {
       inlineResult(result, error.message, "error");
     }
     setBusy(lower, false, "Lower priority");
   });
 
+  // Throttle: cap the whole unit (cgroup) the process runs in -- reversible,
+  // survives forks, and the right verb for a backup that should be slowed
+  // rather than killed. Only offered when a unit owns the process.
+  const throttle = detail.unit
+    ? el("button.btn.btn--sm", { type: "button", title: `Cap the CPU and IO of ${detail.unit.name}` },
+      [detail.unit.throttled ? "Throttled…" : "Throttle…"])
+    : null;
+  throttle?.addEventListener("click", () => openThrottleDialog(detail));
+
   const end = el("button.btn.btn--danger.btn--sm", { type: "button" }, ["End task"]);
   end.addEventListener("click", () => {
+    let outcome = null;
     confirmAction({
       title: `End ${detail.name}?`,
       message: `This sends SIGTERM to ${detail.name} (PID ${detail.pid}).`,
@@ -453,12 +496,152 @@ function buildProcessFooter(footer, detail) {
         + "if it ignores the signal, a second attempt with force sends SIGKILL, which nothing can catch.",
       confirmLabel: "End task",
       onConfirm: async () => {
-        const outcome = await api(`${procBase()}/${detail.pid}/terminate`, {
+        outcome = await api(`${procBase()}/${detail.pid}/terminate`, {
           method: "POST", body: JSON.stringify({ confirm: true, force: false }),
         });
         return outcome.exited ? `${outcome.name} ended.` : outcome.note;
       },
+      onClosed: () => {
+        if (outcome?.verify_id) openVerdictModal(outcome.verify_id, `End task · ${detail.name}`);
+      },
     });
   });
-  footer.append(lower, end);
+  footer.append(lower, throttle, end);
+}
+
+/* ══ Throttle dialog ═══════════════════════════════════════════════════ */
+const THROTTLE_OPTIONS = [
+  { value: "half", label: "Half" }, { value: "quarter", label: "Quarter" }, { value: "release", label: "Release" },
+];
+const THROTTLE_TEXT = {
+  half: "Cap the unit at half the machine's CPU and half the default IO weight.",
+  quarter: "Cap the unit at a quarter of the machine's CPU and a near-idle IO weight — the background setting.",
+  release: "Remove the cap: unlimited CPU and the default IO weight again.",
+};
+
+function openThrottleDialog(detail) {
+  const unit = detail.unit;
+  let level = unit.throttled ? "release" : "quarter";
+  const result = el("div.result");
+  const explain = el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" }, text: THROTTLE_TEXT[level] });
+  const picker = segmented({ label: "Level", options: THROTTLE_OPTIONS, value: level,
+    onChange: (v) => { level = v; explain.textContent = THROTTLE_TEXT[v]; } });
+  const count = fmt.isNum(unit.process_count) ? unit.process_count : null;
+  const scope = el("p", {}, [
+    "This acts on the whole unit ",
+    el("code.code", { text: unit.name }),
+    count !== null ? ` — every one of its ${count} process${count === 1 ? "" : "es"}, not only ${fmt.imageName(detail.name)}.` : ".",
+  ]);
+  const body = el("div", {}, [
+    scope,
+    unit.name.startsWith("session-") ? note("warn", "This unit is a login session: throttling it slows everything that person is running.", { margin: true }) : null,
+    unit.manager === "system" ? note("info", "A system unit: the agent needs root (or a polkit rule for org.freedesktop.systemd1.manage-units) to change its limits. If it lacks that, the answer below says so.", { margin: true }) : null,
+    el("div", { style: { marginTop: "12px" } }, [picker]),
+    explain,
+    el("div.faint.small", { style: { marginTop: "8px" }, text: "Runtime only: a reboot or daemon-reload clears it. Nothing is written to the unit file." }),
+  ]);
+  const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
+  const apply = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" } }, ["Apply"]);
+  const footer = el("div", { style: { display: "contents" } }, [result, el("span.spacer"), cancel, apply]);
+  const handle = openModal({ title: `Throttle ${fmt.imageName(detail.name)}`, body, footer, narrow: true, initialFocus: "confirm" });
+  if (!handle) return;
+  cancel.addEventListener("click", () => handle.close());
+  apply.addEventListener("click", async () => {
+    setBusy(apply, true, "Applying…");
+    try {
+      const outcome = await api(`${procBase()}/${detail.pid}/throttle`, {
+        method: "POST", body: JSON.stringify({ level }),
+      });
+      const after = outcome.after || {};
+      const text = level === "release"
+        ? `${outcome.unit} released.`
+        : `${outcome.unit} capped: CPU ${fmt.isNum(after.cpu_quota_pct) ? `${after.cpu_quota_pct}%` : "unchanged"}, IO weight ${after.io_weight ?? "not applied"}.`;
+      inlineResult(result, text, "ok");
+      if (outcome.note) body.append(note("info", fmt.esc(outcome.note), { margin: true }));
+      setBusy(apply, false, "Apply");
+      watchVerdict(outcome.verify_id, result);
+    } catch (error) {
+      inlineResult(result, error.message, "error");
+      setBusy(apply, false, "Apply");
+    }
+  });
+}
+
+/* ══ Verdicts: did the action work? ═══════════════════════════════════ */
+const VERDICT_TONE = { helped: "ok", partial: "info", no_change: "warn", moot: null, unknown: null };
+const VERDICT_WORD = {
+  helped: "It worked", partial: "Partly", no_change: "No change", moot: "Nothing to verify", unknown: "Unknown",
+};
+
+/**
+ * Follow the host's verdict on an action and render it into `target`.
+ * The host watches the node's next diagnoses; this polls until it is done.
+ * Returns a stop function.
+ */
+export function watchVerdict(verifyId, target, { onDone } = {}) {
+  if (!verifyId || !target) return () => {};
+  const base = `/api/nodes/${encodeURIComponent(store.node)}/actions/${verifyId}`;
+  let stopped = false;
+  const stop = () => { stopped = true; };
+  const tick = async () => {
+    if (stopped || !target.isConnected) return;
+    try {
+      const watch = await api(base);
+      renderVerdict(target, watch);
+      if (watch.done) { onDone?.(watch); return; }
+    } catch (error) {
+      if (error.status === 404) { stop(); return; }
+    }
+    setTimeout(tick, 2500);
+  };
+  setTimeout(tick, 1500);
+  return stop;
+}
+
+function renderVerdict(target, watch) {
+  if (!watch.done) {
+    const p = watch.progress || {};
+    const moving = Object.entries(p.pressures || {}).map(([key, v]) =>
+      `${key} ${Math.round((v.before || 0) * 100)}% → ${fmt.isNum(v.now) ? `${Math.round(v.now * 100)}%` : "…"}`);
+    target.dataset.tone = "";
+    target.replaceChildren(el("span.btn__spin"), el("span", {
+      text: `Verifying · ${p.samples || 0}/${p.of || 20} samples${moving.length ? ` · ${moving.join(", ")}` : ""}`,
+    }));
+    return;
+  }
+  const verdict = watch.verdict || {};
+  const tone = VERDICT_TONE[verdict.outcome] || null;
+  target.dataset.tone = tone === "ok" ? "ok" : tone === "warn" ? "error" : "";
+  target.replaceChildren();
+  target.innerHTML = `${tone === "ok" ? icons.check : tone === "warn" ? icons.warn : icons.info}<span></span>`;
+  target.querySelector("span").textContent = `${VERDICT_WORD[verdict.outcome] || "Verdict"}: ${verdict.text || ""}`;
+  if (verdict.note) target.title = verdict.note;
+}
+
+/** After End task the confirmation dialog closes; the verdict deserves its
+ *  own small dialog because it arrives over the next ~40 seconds. */
+export function openVerdictModal(verifyId, label) {
+  const line = el("div.result", { dataset: { tone: "" } });
+  line.replaceChildren(el("span.btn__spin"), el("span", { text: "Watching the node's next samples…" }));
+  const body = el("div", {}, [
+    el("p", { text: `${label} — was it the culprit? The doctor keeps sampling and says what changed.` }),
+    el("div.verdict", {}, [line]),
+  ]);
+  const close = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Close"]);
+  const handle = openModal({ title: "Did it work?", body, narrow: true,
+    footer: el("div", { style: { display: "contents" } }, [el("span.spacer"), close]), initialFocus: "cancel" });
+  if (!handle) return;
+  close.addEventListener("click", () => handle.close());
+  watchVerdict(verifyId, line, {
+    onDone: (watch) => {
+      const v = watch.verdict || {};
+      if (v.next?.pid) {
+        const btn = el("button.btn.btn--sm", { type: "button", style: { marginTop: "10px" } },
+          [`Open ${fmt.imageName(v.next.name)} · ${v.next.pid}`]);
+        btn.addEventListener("click", () => openProcessModal(v.next.pid));
+        body.append(btn);
+      }
+      if (v.note) body.append(note("warn", fmt.esc(v.note), { margin: true }));
+    },
+  });
 }

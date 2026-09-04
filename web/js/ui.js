@@ -236,7 +236,7 @@ export function initModal() {
  * confirm button disabled only *while* the action is in flight.
  */
 export function confirmAction({
-  title, message, detail, confirmLabel = "Confirm", danger = true, onConfirm,
+  title, message, detail, confirmLabel = "Confirm", danger = true, onConfirm, onClosed,
 }) {
   const result = el("div.result");
   const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
@@ -265,6 +265,7 @@ export function confirmAction({
     title, body, footer, narrow: true,
     dismissible: false,
     initialFocus: "cancel",
+    onClose: onClosed || null,
   });
 }
 

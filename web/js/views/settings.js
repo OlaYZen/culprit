@@ -17,7 +17,7 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  emptyState, inlineResult, pendingSlot, readySlot, setBusy, skeletonFigures, skeletonSection, switchControl,
+  emptyState, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection, switchControl,
 } from "../ui.js";
 import { figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
 
@@ -105,6 +105,8 @@ export function createSettings() {
   const accountSlot = el("div");
   const trustSlot = el("div");
   const deploySlot = el("div");
+  const notifySlot = el("div");
+  const expectSlot = el("div");
   const form = el("form", { novalidate: true });
   const groupsSlot = el("div.cells.cells--2");
   form.append(groupsSlot);
@@ -117,7 +119,7 @@ export function createSettings() {
   }, [saveButton, revertButton, summary]));
   const infoRow = el("div.cols.cols--2");
   const nodesSlot = el("div");
-  root.append(el("div.stack", {}, [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, form, infoRow, nodesSlot]));
+  root.append(el("div.stack", {}, [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, notifySlot, expectSlot, form, infoRow, nodesSlot]));
 
   async function load() {
     head.setPending(true);
@@ -126,6 +128,8 @@ export function createSettings() {
     pendingSlot(accountSlot, skeletonSection("Account", 4));
     pendingSlot(trustSlot, skeletonSection("Network trust", 5));
     pendingSlot(deploySlot, skeletonSection("Agent deployment", 4));
+    pendingSlot(notifySlot, skeletonSection("Notifications", 6));
+    pendingSlot(expectSlot, skeletonSection("Expected findings", 3));
     if (!groupsSlot.childElementCount) {
       pendingSlot(groupsSlot, el("div", { style: { display: "contents" } },
         GROUPS.map((g) => skeletonSection(g.title, g.fields.length * 2))));
@@ -144,13 +148,15 @@ export function createSettings() {
       renderAccount();
       renderTrust();
       renderDeploy();
+      renderNotify();
+      renderExpectations();
       renderInfo();
       renderNodes();
       renderStats();
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, infoRow, nodesSlot]) readySlot(slot, []);
+      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
       readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
@@ -418,6 +424,175 @@ export function createSettings() {
     }));
   }
 
+  /* ── Notifications ───────────────────────────────────────────────── */
+  const NOTIFY_FIELDS = [
+    ["notify_ntfy_url", "ntfy topic URL", "https://ntfy.sh/<topic>", "Plain-text push to a phone or desktop. Leave blank to switch this channel off."],
+    ["notify_webhook_url", "Webhook URL", "https://…", "Receives a JSON POST per event: node, finding, evidence, culprits, and a text summary."],
+    ["notify_smtp_host", "SMTP server", "host", "Leave blank to switch e-mail off."],
+    ["notify_smtp_port", "SMTP port", "port", "587 for STARTTLS, 465 for implicit TLS, 25 for plain."],
+    ["notify_smtp_user", "SMTP user", "", "Optional."],
+    ["notify_smtp_password", "SMTP password", "", "Stored in config.json; never shown again here."],
+    ["notify_smtp_from", "From address", "address", "Defaults to the SMTP user."],
+    ["notify_smtp_to", "To address", "address", "Where findings are mailed."],
+  ];
+
+  function renderNotify() {
+    const entries = {};
+    let minSeverity = config.notify_min_severity || "warn";
+    const toggles = { notify_smtp_tls: config.notify_smtp_tls, notify_resolved: config.notify_resolved, notify_offline: config.notify_offline };
+    const columns = [el("div"), el("div")];
+    NOTIFY_FIELDS.forEach(([key, label, unit, help], index) => {
+      const isPassword = key === "notify_smtp_password";
+      const input = el("input", {
+        type: isPassword ? "password" : "text", id: `set-${key}`, autocomplete: isPassword ? "new-password" : "off", spellcheck: "false",
+        value: isPassword ? "" : (config[key] ?? ""),
+        placeholder: isPassword ? (config.notify_smtp_password_set ? "unchanged (set)" : "not set") : "",
+        "aria-describedby": `help-set-${key}`,
+      });
+      const error = el("div.field__err", { id: `err-${key}`, hidden: true });
+      entries[key] = { input, error, label };
+      input.addEventListener("input", () => clearFieldError(entries[key]));
+      columns[index < 2 ? 0 : 1].append(fieldRow({ id: `set-${key}`, label, unit, input, help, error }));
+    });
+    columns[0].append(
+      el("div", { style: { marginTop: "14px" } }, [segmented({ label: "Send from", value: minSeverity,
+        options: [{ value: "warn", label: "Warnings up" }, { value: "critical", label: "Critical only" }],
+        onChange: (v) => { minSeverity = v; } })]),
+      el("div.row", { style: { gap: "18px", marginTop: "14px", flexWrap: "wrap" } }, [
+        switchControl({ label: "Follow up when a finding clears", checked: toggles.notify_resolved, onChange: (v) => { toggles.notify_resolved = v; } }),
+        switchControl({ label: "Tell me when an agent stops reporting", checked: toggles.notify_offline, onChange: (v) => { toggles.notify_offline = v; } }),
+      ]),
+    );
+    columns[1].append(el("div", { style: { marginTop: "12px" } }, [
+      switchControl({ label: "STARTTLS", checked: toggles.notify_smtp_tls, title: "Upgrade the SMTP connection to TLS (not used on port 465, which is TLS from the start)",
+        onChange: (v) => { toggles.notify_smtp_tls = v; } }),
+    ]));
+
+    const result = el("div.result");
+    const statusNode = el("div");
+    const save = el("button.btn.btn--primary", { type: "button" }, ["Save notifications"]);
+    const test = el("button.btn", { type: "button", title: "Deliver a test message on every configured channel" }, ["Send test"]);
+    const renderStatus = async () => {
+      try {
+        const status = await api("/api/notify/status");
+        render(statusNode, kvs([
+          kv("Channels", status.channels?.length ? status.channels.join(", ") : "none configured", { tone: status.channels?.length ? "ok" : null }),
+          kv("Delivered", `${fmt.count(status.sent)} sent · ${fmt.count(status.failed)} failed · ${fmt.count(status.dropped)} dropped by the rate limit`, { mono: true }),
+          kv("Last sent", status.last_sent ? `${fmt.ago(status.last_sent)} — ${status.last_title || ""}` : fmt.dash),
+          kv("Last error", status.last_error || "none", { tone: status.last_error ? "crit" : "ok" }),
+          kv("Findings being tracked", fmt.count(status.active_findings), { mono: true }),
+        ]));
+      } catch { render(statusNode, el("div.faint.small", { text: "Status unavailable." })); }
+    };
+    save.addEventListener("click", async () => {
+      setBusy(save, true, "Saving…");
+      const patch = { notify_min_severity: minSeverity, ...toggles };
+      for (const [key, entry] of Object.entries(entries)) {
+        clearFieldError(entry);
+        patch[key] = key === "notify_smtp_port" ? Number(entry.input.value || 587) : entry.input.value;
+      }
+      try {
+        const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+        config = payload.config;
+        entries.notify_smtp_password.input.value = "";
+        entries.notify_smtp_password.input.placeholder = config.notify_smtp_password_set ? "unchanged (set)" : "not set";
+        inlineResult(result, "Saved. Only findings are ever sent — never a bare threshold.", "ok");
+        renderStatus();
+      } catch (error) {
+        const fieldErrors = error.payload?.field_errors || {};
+        let focused = false;
+        for (const [key, message] of Object.entries(fieldErrors)) {
+          if (!entries[key]) continue;
+          markFieldError(entries[key], message);
+          if (!focused) { entries[key].input.focus(); focused = true; }
+        }
+        inlineResult(result, Object.keys(fieldErrors).length ? "Not saved — see the fields." : error.message, "error");
+      }
+      setBusy(save, false, "Save notifications");
+    });
+    test.addEventListener("click", async () => {
+      setBusy(test, true, "Sending…");
+      try {
+        const outcome = await api("/api/notify/test", { method: "POST", body: "{}" });
+        const parts = Object.entries(outcome.channels || {}).map(([name, r]) => `${name}: ${r.ok ? "delivered" : r.error}`);
+        inlineResult(result, outcome.ok ? `Test delivered (${parts.join("; ")}).` : (outcome.error || parts.join("; ")), outcome.ok ? "ok" : "error");
+        renderStatus();
+      } catch (error) {
+        inlineResult(result, error.message, "error");
+      }
+      setBusy(test, false, "Send test");
+    });
+    readySlot(notifySlot, section({
+      title: "Notifications",
+      meta: config.notify_ntfy_url || config.notify_webhook_url || config.notify_smtp_host ? "configured" : "off",
+      body: el("div", {}, [
+        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" },
+          text: "Culprit pages you on a diagnosis, never on a threshold: a message goes out only once a finding has held for the sustain "
+              + "window, and it carries the node, the evidence and the named culprit. One message per finding while it holds, one more "
+              + "if it turns critical, and a follow-up when it clears. Findings marked as expected are never sent." }),
+        el("div.cols.cols--2", {}, columns),
+        el("div.formrow", { style: { marginTop: "14px" } }, [save, test, result]),
+        el("div", { style: { marginTop: "14px" } }, [statusNode]),
+      ]),
+    }));
+    renderStatus();
+  }
+
+  /* ── Expected findings ───────────────────────────────────────────── */
+  async function renderExpectations() {
+    let payload;
+    try {
+      payload = await api("/api/expectations");
+    } catch (error) {
+      readySlot(expectSlot, section({ title: "Expected findings", body: emptyState("Could not load", error.message) }));
+      return;
+    }
+    const list = payload.expectations || [];
+    const body = el("div");
+    if (!list.length) {
+      body.append(emptyState("Nothing is marked as expected",
+        "Mark a finding from the Lag Doctor when it is normal for that machine — a nightly backup, a scheduled index — "
+        + "and it will read as expected instead of as a problem, until it overruns its window."));
+    } else {
+      const table = el("table.tbl.tbl--tight");
+      table.innerHTML = "<thead><tr><th>Finding</th><th>Node</th><th>Only when led by</th><th>Reason</th><th>Window</th><th>Added</th><th></th></tr></thead>";
+      const tbody = el("tbody");
+      for (const row of list) {
+        const remove = el("button.btn.btn--sm", { type: "button" }, ["Remove"]);
+        const tr = el("tr", {}, [
+          el("td.mono", { text: row.key }),
+          el("td", { text: row.node === "*" ? "every node" : row.node }),
+          el("td", { text: row.culprit || "any process" }),
+          el("td", { text: row.reason }),
+          el("td", { text: windowText(row) }),
+          el("td.faint", { text: `${row.created_by || "?"} · ${fmt.ago(row.created_at)}` }),
+          el("td.n", {}, [remove]),
+        ]);
+        remove.addEventListener("click", async () => {
+          setBusy(remove, true, "Removing…");
+          try {
+            await api(`/api/expectations/${row.id}`, { method: "DELETE" });
+            tr.remove();
+            if (!tbody.childElementCount) renderExpectations();
+          } catch (error) {
+            setBusy(remove, false, "Remove");
+            remove.title = error.message;
+          }
+        });
+        tbody.append(tr);
+      }
+      table.append(tbody);
+      body.append(el("div.tblwrap", {}, [table]));
+    }
+    readySlot(expectSlot, section({
+      title: "Expected findings", meta: list.length ? `${list.length} marked` : "none",
+      body,
+      foot: "Windows use this host's local clock. An expected finding is still shown with its evidence; it is reported as expected "
+          + "(severity info), never notified, and not written to history as an incident — and if it is still active after its "
+          + "window ends, it comes back as a real finding.",
+    }));
+  }
+
   function fieldRow({ id, label, unit, input, help, error, area = false }) {
     return el("div.field", {}, [
       el("label.field__label", { for: id }, [el("span", { text: label }), unit ? el("span.field__unit", { text: unit }) : null]),
@@ -588,6 +763,16 @@ export function createSettings() {
     store.on("auth", () => { if (root.isActive && config) renderAccount(); }),
   ];
   return root;
+}
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function windowText(row) {
+  if (!row.start || !row.end) return "always";
+  const when = `${row.start}–${row.end}`;
+  const days = row.days || [];
+  if (!days.length) return `daily ${when}`;
+  return `${days.map((d) => DAY_NAMES[d] ?? d).join(", ")} ${when}`;
 }
 
 function markFieldError(entry, message) {
