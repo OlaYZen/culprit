@@ -146,6 +146,7 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | Pressure and caps **inside one unit / container** (cgroup PSI, quota, memory limit) | ● | ○ | ○ | ◑ | ○ |
 | Says **what changed** before a finding began | ● | ○ | ○ | ○ | ◑ logs |
 | Names **what breaks next** (fd / conntrack / inotify ceilings with the holder, next OOM victim, disk-full ETA with the writer) | ● | ◑ thresholds | ◑ thresholds | ◑ | ○ |
+| Shows **clients being turned away** (accept queue full, `ListenOverflows`) and names the listener | ● | ◑ node exporter counter, no port | ◑ counter | ○ | ○ |
 | **Remembers** whether an action helped last time; suggests what is routine | ● | ○ | ○ | ○ | ○ |
 | Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
@@ -276,7 +277,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **GPU** | A backend chain, DRM fdinfo (cross-vendor, per-PID), NVML (NVIDIA) and amdgpu sysfs, each degrading to an explicit reason when absent |
 | **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, a **fill forecast** per mount with the **processes writing there** and the space **held by deleted-but-open files**, SSD/HDD identity |
 | **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
-| **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, and a **one-click kill** with the same guards as End task |
+| **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, each listener's **accept queue against its backlog** with the kernel's turned-away rate (`ListenOverflows`) so a service that is dropping clients is named, and a **one-click kill** with the same guards as End task |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
@@ -381,6 +382,21 @@ restart, which it says); growth within 24 h becomes a finding (warn within
 reads as "rough", ranking the processes that have files open under that mount
 by write rate. Deleted-but-open files are listed with their size and holder;
 the finding says a restart or a truncate through `/proc/<pid>/fd` frees them.
+
+**Turned-away clients.** A service can be up, attributed and apparently idle
+while the kernel refuses connections on its behalf: once its accept queue (the
+completed handshakes it has not yet `accept()`ed) reaches the listen backlog,
+the next client is dropped before the service sees it, and `ListenOverflows` in
+`/proc/net/netstat` ticks. Each TCP port row carries its queue against its
+backlog (`ss -ltn`, the one unprivileged place the maximum is exposed; without
+`ss` the depth alone comes from `/proc/net/tcp` and the maximum is shown as
+unknown), the Ports view carries the overflow rate over the sampling interval,
+and a port whose queue is full while the counter ticks is a finding that ranks
+exactly the process holding the socket, with its unit named. Overflows with no
+full queue at sampling time become one unnamed finding that says the burst had
+drained, with no culprit -- only a full queue can overflow, so guessing the
+port would be invention. The counters are per network namespace: a container
+with its own stack keeps its own.
 
 **Verdict memory.** The verdicts stored with every action are the record: the
 process dialog shows, per action, how many tries and how each was judged on
