@@ -1,0 +1,56 @@
+# Publish the no-backend demo to GitHub Pages.
+#
+# The site is `tools/build_demo.py`'s output: the dashboard's own CSS and JS
+# with the recorded fixtures under web/demo/data and the in-browser stand-in
+# for the host (web/js/demo). It is rebuilt from the branch that pushed, so
+# the demo never drifts from the frontend it demonstrates.
+#
+# One-time setup in the repository: Settings › Pages › Source = "GitHub
+# Actions". Nothing is committed to a gh-pages branch.
+name: demo
+
+on:
+  push:
+    branches: [main, demo]
+    paths:
+      - "web/**"
+      - "tools/build_demo.py"
+      - "tools/check_frontend.py"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Module graph resolves (the demo module included)
+        run: python tools/check_frontend.py
+      - name: Build the static site
+        run: python tools/build_demo.py --out dist/demo
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/demo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
