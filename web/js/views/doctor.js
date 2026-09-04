@@ -17,7 +17,7 @@ import {
   emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
   skeletonStatus, switchControl,
 } from "../ui.js";
-import { culpritRow, gaugeRow, offenderRow, pill, section, viewHead } from "./shared.js";
+import { changeList, containerPill, culpritRow, gaugeRow, offenderRow, pill, section, viewHead } from "./shared.js";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -185,12 +185,18 @@ export function createDoctor() {
   function findingCard(finding) {
     const node = el("div.finding", { dataset: { severity: finding.severity } });
     if (finding.expected) node.dataset.expected = "true";
+    const unit = finding.unit;
+    const heldTone = finding.severity === "critical" ? "crit" : finding.severity === "warn" ? "warn" : "info";
+    const held = fmt.isNum(finding.since)
+      ? `since ${fmt.clock(finding.since)} · ${fmt.shortDuration(Math.max(0, Date.now() / 1000 - finding.since))}`
+      : finding.sustained_ticks ? `held ${finding.sustained_ticks} samples` : "just now";
     const meta = el("div.finding__meta", {}, [
       finding.external ? pill("outside this machine", "info") : null,
+      unit ? pill(unit.kind === "container" ? "inside a container" : "inside one unit", "info") : null,
       pill(finding.resource),
-      pill(finding.sustained_ticks ? `held ${finding.sustained_ticks} samples` : "just now",
-        finding.severity === "critical" ? "crit" : finding.severity === "warn" ? "warn" : "info"),
+      pill(held, heldTone),
     ]);
+    if (unit) meta.lastChild.title = `The condition has held for ${finding.sustained_ticks || "?"} consecutive samples.`;
     if (finding.expected) {
       meta.append(pill(`expected · ${finding.expected.reason}`, "ok"));
       meta.lastChild.title = `Marked as expected (${finding.expected.window}). Real severity: ${finding.severity_raw || "?"}.`;
@@ -230,6 +236,43 @@ export function createDoctor() {
         el("b", { text: "No process here is at fault. " }),
         document.createTextNode(`The cause is ${finding.blame}.`),
       ]));
+    }
+    if (unit) {
+      // The finding is confined to one unit / container: name it, and say
+      // whether the cap is a runtime one (what Culprit's Throttle leaves).
+      const where = containerPill(unit.container);
+      const row = el("div.finding__blame", {}, [
+        el("b", { text: unit.kind === "container" ? "Confined to a container: " : "Confined to one unit: " }),
+        el("code", { text: unit.name || unit.cgroup || "?" }),
+      ]);
+      if (where) row.append(document.createTextNode(" "), where);
+      if (unit.runtime_cap) row.append(document.createTextNode(" "), pill("runtime cap · gone after reboot", "warn"));
+      if (unit.manager === "user") row.append(document.createTextNode(" "), pill("user manager"));
+      node.append(row);
+    }
+    const suffering = finding.suffering || [];
+    if (suffering.length) {
+      // The victims' side of a machine-wide stall, from each unit's own PSI.
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", { text: "Units stalled hardest (their own cgroup PSI)" }));
+      group.append(el("div.pills", {}, suffering.map((entry) => {
+        const chip = pill(`${entry.name} · ${fmt.pct(entry.stall_pct)} stalled`, "warn");
+        const where = containerPill(entry.container);
+        if (where) chip.append(document.createTextNode(" "), where);
+        return chip;
+      })));
+      node.append(group);
+    }
+    const changes = finding.changes || [];
+    if (changes.length) {
+      // Coincidence, labelled as such. The reader draws the line.
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", {}, [
+        document.createTextNode("What changed just before it began "),
+        el("span.faint", { text: "— coincides with, not proof of cause" }),
+      ]));
+      group.append(changeList(changes));
+      node.append(group);
     }
     if (culprits.length) {
       const group = el("div.finding__culprits");

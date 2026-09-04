@@ -16,7 +16,7 @@ import {
   checkTree, copyButton, emptyState, icons, note, openModal, pendingSlot, readySlot, segmented, skeletonFigures,
   skeletonSection,
 } from "../ui.js";
-import { figures, kv, kvs, logItem, pill, section, subhead, viewHead } from "./shared.js";
+import { changeList, figures, kv, kvs, logItem, pill, section, subhead, viewHead } from "./shared.js";
 
 const GROUPS = [
   { label: "Crashes and stability", key: "crash", children: [
@@ -65,8 +65,16 @@ export function createEvents() {
       el("div.stack", {}, [skeletonSection("Events per day", 2), skeletonSection("Event log", 8)]),
       el("div.stack", {}, [skeletonSection("Sources", 6), skeletonSection("Crash dumps", 2)]),
     ]));
+    nodes.changes = el("div");
+    nodes.changesMeta = el("span");
     nodes.main = [
       el("div.stack", {}, [
+        section({
+          title: "What changed", meta: nodes.changesMeta, body: nodes.changes,
+          foot: "Units started, stopped or restarted, timers fired, mounts, listeners, logins, package upgrades, "
+              + "quota changes and processes that appeared and stayed — as the agent saw them. The Lag Doctor "
+              + "attaches the ones from just before a finding began.",
+        }),
         section({ title: "Events per day", meta: nodes.histMeta, body: el("div", { style: { height: "72px" } }, [nodes.histogram]) }),
         section({ title: "Event log", meta: nodes.listMeta, body: nodes.list }),
       ]),
@@ -102,6 +110,7 @@ export function createEvents() {
     }
     head.setPending(false);
     readySlot(mainRow, nodes.main);
+    renderChanges(state.changes);
 
     const counts = new Map();
     for (const event of events) counts.set(event.source_key, (counts.get(event.source_key) || 0) + 1);
@@ -216,7 +225,25 @@ export function createEvents() {
   }
 
   root.mount = () => { if (!built) build(); repaint(); };
-  root.subscriptions = [store.on(["events", "node"], () => { if (root.isActive) repaint(); })];
+  function renderChanges(changes) {
+    if (!changes) {
+      patchText(nodes.changesMeta, "");
+      render(nodes.changes, emptyState("Waiting for the agent's first slow pass", "The change log is filled in by the 20 s tier."));
+      return;
+    }
+    const list = (changes.events || []).slice(0, 60);
+    patchText(nodes.changesMeta, list.length
+      ? `${fmt.count(changes.count)} since ${fmt.dayTime(changes.recording_since)}`
+      : `nothing since ${fmt.dayTime(changes.recording_since)}`);
+    if (!list.length) {
+      render(nodes.changes, emptyState("Nothing has changed",
+        "No unit, timer, mount, listener, login, package or limit has changed since the agent started recording.", icons.ok));
+      return;
+    }
+    render(nodes.changes, changeList(list, { relativeTo: false }));
+  }
+
+  root.subscriptions = [store.on(["events", "changes", "node"], () => { if (root.isActive) repaint(); })];
   return root;
 }
 

@@ -17,7 +17,7 @@ import {
   emptyState, icons, minDelay, note, openModal, pendingSlot, readySlot, segmented, skeletonFigures, skeletonRows,
   skeletonSection,
 } from "../ui.js";
-import { containerPill, figures, logItem, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { changeList, containerPill, figures, logItem, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const RANGES = [
   { value: 3600, label: "1h" }, { value: 6 * 3600, label: "6h" }, { value: 24 * 3600, label: "24h" },
@@ -272,6 +272,13 @@ export function createTrends() {
       peak.addEventListener("click", () => inspectBucket(incident.peak_ts));
       chips.append(peak);
       extra.append(chips);
+      if ((incident.changes || []).length) {
+        // Coincidence, labelled as such: what the agent saw change in the
+        // ten minutes before the first bucket of this incident.
+        extra.append(el("div.faint.small", { style: { margin: "8px 0 2px" },
+          text: "What changed just before it began (coincides with, not proof of cause):" }));
+        extra.append(changeList(incident.changes));
+      }
       return logItem({
         ts: incident.start, severity: incident.severity,
         title: el("span", {}, [el("span.trunc", { text: incident.title }), el("span.faint", { style: { marginLeft: "8px", fontWeight: "400" }, text: span })]),

@@ -17,7 +17,7 @@ import {
   combobox, copyButton, emptyState, icons, note, pendingSlot, readySlot, searchField, segmented,
   skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { figures, kv, kvs, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { containerPill, figures, kv, kvs, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const STATUS_TONE = {
   running: "ok", exited: null, stopped: null, waiting: "info",
@@ -54,9 +54,10 @@ export function createServices() {
 
   const figSlot = el("div");
   const problemsSlot = el("div");
+  const pressureSlot = el("div");
   const attributionRow = el("div.cols.cols--2");
   const tableSlot = el("div");
-  root.append(el("div.stack", {}, [figSlot, problemsSlot, attributionRow, tableSlot]));
+  root.append(el("div.stack", {}, [figSlot, problemsSlot, pressureSlot, attributionRow, tableSlot]));
 
   function build() {
     built = true;
@@ -169,6 +170,7 @@ export function createServices() {
       rankSection("Heaviest units by memory", byMem, (s) => fmt.bytes(s.memory_bytes),
         "memory.current — what the kernel actually charges to the unit."),
     ]);
+    readySlot(pressureSlot, pressureSection(store.state.cgroups));
 
     const statusCounts = new Map();
     for (const service of services) statusCounts.set(service.status, (statusCounts.get(service.status) || 0) + 1);
@@ -217,6 +219,63 @@ export function createServices() {
       + `${fmt.count(summary.status_running)} running.`);
   }
 
+  /**
+   * Per-unit pressure and limits, from each unit's own cgroup: stall time
+   * inside the unit, CPU quota and how often it is hit, memory limit and how
+   * full it is. A machine that is idle overall can still have one service
+   * crawling against its own cap — this is where that shows.
+   */
+  function pressureSection(cgroups) {
+    const title = "Pressure and limits per unit";
+    if (!cgroups) return section({ title, body: emptyState("Waiting for the first sample", "") });
+    if (cgroups.available === false) {
+      return section({ title, body: emptyState("Not available", cgroups.reason || "cgroup v2 is required.") });
+    }
+    const units = (cgroups.units || []).filter((u) => (u.worst_stall || 0) >= 1 || u.cpu_quota_pct !== null
+      || u.memory_max !== null || (u.throttled_pct || 0) > 0 || (u.limit_hits_sec || 0) > 0 || (u.oom_kills || 0) > 0);
+    if (!units.length) {
+      return note("ok", `<strong>No unit is stalled or capped.</strong> ${fmt.count(cgroups.total_units)} unit cgroups sampled; `
+        + "none shows stall time, a CPU quota, a memory limit or a memory-limit event.");
+    }
+    const rows = units.slice(0, 20).map((unit) => {
+      const psi = unit.psi || {};
+      const stall = Math.max(psi.cpu_some || 0, psi.memory_full || 0, psi.io_full || 0);
+      const name = el("span.trunc", { text: unit.container?.name ? unit.container.name : unit.unit, title: unit.cgroup });
+      const label = el("span.row", { style: { gap: "6px", minWidth: 0 } }, [name]);
+      const where = containerPill(unit.container);
+      if (where) label.append(where);
+      if (unit.manager === "user") label.append(pill("user"));
+      const facts = el("span.pills");
+      if (stall >= 1) {
+        const which = [["CPU", psi.cpu_some], ["memory", psi.memory_full], ["IO", psi.io_full]]
+          .filter(([, v]) => (v || 0) >= 1).map(([k, v]) => `${k} ${fmt.pct(v)}`).join(" · ");
+        facts.append(pill(`stalled ${which}`, stall >= 10 ? "warn" : null));
+      }
+      if (unit.cpu_quota_pct !== null && unit.cpu_quota_pct !== undefined) {
+        const hit = unit.throttled_pct || 0;
+        const chip = pill(`quota ${fmt.pct(unit.cpu_quota_pct, 0)} of a core${hit > 0 ? ` · hit ${fmt.pct(hit, 0)} of periods` : ""}`,
+          hit >= 25 ? "crit" : hit > 0 ? "warn" : null);
+        chip.title = `${fmt.pct(unit.cpu_quota_machine_pct, 0)} of this machine`;
+        facts.append(chip);
+        if (unit.runtime_cap) facts.append(pill("runtime cap", "warn"));
+      }
+      if (unit.memory_max) {
+        const pct = unit.memory_limit_pct || 0;
+        facts.append(pill(`memory ${fmt.bytes(unit.memory_bytes)} of ${fmt.bytes(unit.memory_max)}${(unit.limit_hits_sec || 0) > 0 ? " · hitting the limit" : ""}`,
+          pct >= 95 || (unit.limit_hits_sec || 0) > 0 ? "crit" : pct >= 80 ? "warn" : null));
+      }
+      if (unit.oom_kills) facts.append(pill(`${unit.oom_kills} OOM kill${unit.oom_kills === 1 ? "" : "s"} inside`, "crit"));
+      return kv(label, facts);
+    });
+    return section({
+      title, meta: `${units.length} of ${fmt.count(cgroups.total_units)} units`,
+      body: kvs(rows, { wide: true }),
+      foot: "Stall time is each unit's own PSI (cpu some / memory full / io full, 10 s average). Quota and memory limit are "
+          + "the unit's cpu.max and memory.max; \"hit\" counts scheduling periods the unit was throttled in. A runtime cap is a "
+          + "systemctl set-property --runtime drop-in — what Culprit's Throttle creates — and disappears at reboot.",
+    });
+  }
+
   function rankSection(title, units, valueOf, foot) {
     const rows = units.map((unit) => kv(
       unit.pid
@@ -232,6 +291,6 @@ export function createServices() {
   }
 
   root.mount = () => { if (!built) build(); repaint(); };
-  root.subscriptions = [store.on(["services", "node"], () => { if (root.isActive) repaint(); })];
+  root.subscriptions = [store.on(["services", "cgroups", "node"], () => { if (root.isActive) repaint(); })];
   return root;
 }
