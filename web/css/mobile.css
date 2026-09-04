@@ -70,18 +70,27 @@
   .botnav__dot[data-severity="warn"] { background: var(--warn); }
 
   /* More sheet */
-  .sheet { position: fixed; inset: 0; z-index: 70; display: block; visibility: hidden; pointer-events: none; }
-  .sheet.is-open { visibility: visible; pointer-events: auto; }
-  .sheet__backdrop { position: absolute; inset: 0; background: var(--scrim); opacity: 0; transition: opacity var(--t) var(--ease); }
+  /* Closing must stay visible until the panel has slid out: `visibility` is
+     discrete, so without the delay it hides the sheet on the first frame and
+     the slide never shows (it snapped, whether closed by a tap or a drag). */
+  .sheet { --sheet-t: 220ms; position: fixed; inset: 0; z-index: 70; display: block; visibility: hidden; pointer-events: none;
+    transition: visibility 0s linear var(--sheet-t); }
+  .sheet.is-open { visibility: visible; pointer-events: auto; transition-delay: 0s; }
+  .sheet__backdrop { position: absolute; inset: 0; background: var(--scrim); opacity: 0; transition: opacity var(--sheet-t) var(--ease); }
   .sheet.is-open .sheet__backdrop { opacity: 1; }
   .sheet__panel {
     position: absolute; inset: auto 0 0 0; max-height: 84vh; overflow-y: auto;
     background: var(--bg-2); border-top: 1px solid var(--line-2);
     padding: 8px 14px calc(18px + env(safe-area-inset-bottom, 0px));
-    transform: translateY(101%); transition: transform var(--t) var(--ease);
+    transform: translateY(101%); transition: transform var(--sheet-t) var(--ease);
   }
   .sheet.is-open .sheet__panel { transform: none; }
-  .sheet__grab { width: 36px; height: 3px; margin: 4px auto 10px; background: var(--line-2); }
+  /* The grab handle is a real handle (mobile.js drags the sheet by it), so
+     the hit area is the full-width strip, not the 3px bar it draws. */
+  .sheet__grab { padding: 8px 0 8px; touch-action: none; cursor: grab; }
+  .sheet__grab::before { content: ""; display: block; width: 36px; height: 3px; margin: 0 auto; background: var(--line-2); }
+  .sheet__grab:active { cursor: grabbing; }
+  .sheet__panel.is-dragging, .sheet__backdrop.is-dragging { transition: none; }
   .sheet__label { padding: 10px 2px 6px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); }
   .sheet__views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); }
   .sheet__view {
