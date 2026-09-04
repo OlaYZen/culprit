@@ -68,7 +68,7 @@ and states the verdict in plain words ("IO pressure fell 100% → 5%; the findin
 cleared in 40 s", or "no change: `bash` was not the culprit, the next candidate
 is `rsync`").
 
-Seven more things follow from that loop:
+Ten more things follow from that loop:
 
 - **It names the container, not the shim.** A runaway process inside Docker,
   Podman or Kubernetes is labelled with its container (and image, and compose
@@ -100,6 +100,26 @@ Seven more things follow from that loop:
   their time. Every finding carries what changed in the ten minutes before it
   began, labelled *coincides with, not proof of cause*; incidents in Trends
   carry the same.
+- **It names what breaks next.** Hard limits fail outright, not slowly: a
+  process at 3,900 of its 4,096 file descriptors, connection tracking near
+  its table size, inotify watches nearly exhausted (the "sync stopped
+  working" failure), a unit near its TasksMax. Each is watched against its
+  own ceiling with the holder named, from half-way, and becomes a finding at
+  80%. Alongside, *if memory runs out*: the kernel's own `oom_score` ranking
+  says which process the OOM killer takes first, and the memory findings
+  carry it.
+- **It forecasts a full disk and names the writer.** Used space per mount is
+  fitted over the last hour; *"/var will be full in about 3 h at +240 GB/day"*
+  becomes a finding a day ahead, ranking the processes with open files under
+  that mount by their write rate, and it points out space held by
+  **deleted files still open** (the rotated log a daemon never closed), which
+  a restart frees without a reboot.
+- **It remembers what worked.** Every process dialog shows the track record
+  of earlier actions on that name or unit on that node, judged by their
+  verdicts: *"Throttle: helped 3 of 3, last 2 h ago · End task: no change 2 of
+  2"*. And a finding that recurred at the same hour on three or more days, led
+  by the same process, is offered as a suggested expectation with the window
+  pre-filled; a person still confirms.
 - **It explains the kernel.** `kworker/u8:3+flush-252:0` at 40% becomes
   *"writeback for device 252:0: the write reaching the disk, later than the
   process that did it"*; `kswapd0` is named a symptom of memory pressure, not
@@ -125,6 +145,8 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | Says when the cause is **outside the machine** (steal, thermal, NFS, RAID rebuild, interrupts) | ● | ○ | ○ | ○ | ○ |
 | Pressure and caps **inside one unit / container** (cgroup PSI, quota, memory limit) | ● | ○ | ○ | ◑ | ○ |
 | Says **what changed** before a finding began | ● | ○ | ○ | ○ | ◑ logs |
+| Names **what breaks next** (fd / conntrack / inotify ceilings with the holder, next OOM victim, disk-full ETA with the writer) | ● | ◑ thresholds | ◑ thresholds | ◑ | ○ |
+| **Remembers** whether an action helped last time; suggests what is routine | ● | ○ | ○ | ○ | ○ |
 | Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
 | **Setup** | one script, minutes | server + DB + agents + templates | services + exporters + dashboards | quick | heavy ingest pipeline |
@@ -252,12 +274,13 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Pressure (PSI)** | The kernel's own stall accounting from `/proc/pressure/*`: the measured fraction of wall time tasks spent waiting on CPU, memory or IO (`some` vs `full`), and per systemd unit |
 | **Memory** | MemAvailable (the honest field), commit charge vs limit, **major-fault rate** (real paging), swap in/out, OOM-kill counter, dirty/writeback |
 | **GPU** | A backend chain, DRM fdinfo (cross-vendor, per-PID), NVML (NVIDIA) and amdgpu sysfs, each degrading to an explicit reason when absent |
-| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, SSD/HDD identity |
+| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, a **fill forecast** per mount with the **processes writing there** and the space **held by deleted-but-open files**, SSD/HDD identity |
 | **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
 | **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, and a **one-click kill** with the same guards as End task |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
+| **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
 | **Events** | From journald: OOM kills, segfaults & core dumps, hung-task reports, disk/filesystem and MCE hardware errors, unit failures, unclean shutdowns, failed sign-ins, package history, crash artefacts, and pending-reboot state |
 | **Sessions** | Sign-in history from logind paired on session id, **current sessions with SSH logins named** (user + remote host), lock state, boots and shutdowns |
@@ -340,6 +363,34 @@ sections the tiers already produce; the host stores what it receives, so an
 incident's "what changed just before it began" survives an agent restart.
 Nothing is inferred from proximity: a timer that fired 30 s before an IO stall
 is listed, not accused.
+
+**Ceilings.** Nothing is slow yet; the next call fails. Each ceiling is
+reported from half-way with its holder (a process for its own descriptor
+limit or the inotify watches it holds; the machine for file handles, threads,
+PIDs and connection tracking; a unit for its task limit), and fires as a
+finding at 80%, critical at 95%, ranking exactly one culprit: the holder.
+Counts that depend on reading other users' descriptors are marked as lower
+bounds and the unlock is named. The OOM victims list is `/proc/<pid>/oom_score`
+read for every process: information on the Doctor page, attached to the
+memory findings when those fire.
+
+**Disk-fill forecast.** Each mount's used bytes are fitted by least squares
+over the last hour (after ten minutes of samples, and never across an agent
+restart, which it says); growth within 24 h becomes a finding (warn within
+6 h, critical within 1 h), with its fit quality stated so an uneven burst
+reads as "rough", ranking the processes that have files open under that mount
+by write rate. Deleted-but-open files are listed with their size and holder;
+the finding says a restart or a truncate through `/proc/<pid>/fd` frees them.
+
+**Verdict memory.** The verdicts stored with every action are the record: the
+process dialog shows, per action, how many tries and how each was judged on
+this node, before the same button is offered again. **Suggested expectations**
+come from stored incidents: the same finding key led by the same process on
+three or more distinct days within a 90-minute band of the clock, not already
+covered by an expectation, is offered on the finding card and in Settings with
+the window pre-filled (a weekday pattern only when each weekday was seen
+twice). Confirming it creates an ordinary expectation; nothing is inferred
+into the live diagnosis.
 
 **Expected findings.** A person can mark a finding as expected, for one node or
 all, optionally only when a named process leads it, optionally only in a daily
