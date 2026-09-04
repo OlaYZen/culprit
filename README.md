@@ -60,9 +60,32 @@ a `0`, and the payload counts how many processes were gated: **missing is never
 rendered as zero.** In a field full of dashboards that quietly show `0` when
 they can't read something, this is the feature that earns trust.
 
-And when you've found the culprit, you **act on it**: End task, renice, or kill
-whatever holds a port, on the local box or any machine in the fleet, right from
-the same screen.
+And when you've found the culprit, you **act on it**: End task, renice,
+**throttle** (cap the whole unit's CPU and IO, reversibly), or kill whatever
+holds a port, on any machine in the fleet, right from the same screen. Then
+Culprit **tells you whether it worked**: it keeps sampling after every action
+and states the verdict in plain words ("IO pressure fell 100% → 5%; the finding
+cleared in 40 s", or "no change: `bash` was not the culprit, the next candidate
+is `rsync`").
+
+Four more things follow from that loop:
+
+- **It names the container, not the shim.** A runaway process inside Docker,
+  Podman or Kubernetes is labelled with its container (and image, and compose
+  service) wherever it appears, read from the cgroup path for free and from the
+  runtime's socket when the agent may read it.
+- **It says when nobody is at fault.** CPU steal from a noisy hypervisor
+  neighbour, thermal or power throttling, swap on a spinning disk, processes
+  stuck on an unanswering NFS server: these are reported as *outside this
+  machine*, with no invented process ranking, and the same finding on several
+  nodes at once is folded into one **shared cause** on the fleet view.
+- **It pages on a diagnosis, never on a threshold.** ntfy, a webhook or e-mail
+  gets one message per finding while it holds, with the node, the evidence and
+  the named culprit, one more if it escalates, and a follow-up when it clears.
+- **You can tell it what's normal.** Mark a finding as *expected* (nightly
+  backup, 02:00–03:00, led by `borg`) and it reads as expected instead of as a
+  problem, until it overruns its window. Nothing is inferred; a person wrote it
+  down.
 
 ---
 
@@ -76,7 +99,10 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | **The question it answers** | *What's slowing this box, and does it matter?* | *Is a metric past a threshold?* | *Store & query metrics* | *Live metric dashboards* | *What security events happened?* |
 | Names the responsible **process / unit** | ● built in | ○ you correlate + SSH | ○ | ○ | ○ |
 | Tells **problem** from merely **busy** (kernel PSI) | ● | ○ static thresholds | ○ | ◑ | ○ |
-| **Act** from the UI (kill port, End task, renice) | ● | ○ | ○ | ○ | ○ |
+| **Act** from the UI (kill port, End task, renice, throttle) and **verify** the action helped | ● | ○ | ○ | ○ | ○ |
+| Names the **container** behind a PID | ● | ○ | ○ | ◑ | ○ |
+| Says when the cause is **outside the machine** (steal, thermal, NFS) | ● | ○ | ○ | ○ | ○ |
+| Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
 | **Setup** | one script, minutes | server + DB + agents + templates | services + exporters + dashboards | quick | heavy ingest pipeline |
 | **Footprint** on a watched box | psutil only, **no open ports**, ~a few KB/s | agent + checks | node_exporter | agent | forwarder + indexers |
@@ -177,17 +203,21 @@ cd culprit-agent && ./agent.sh https://<host>:8787 web-01.<secret>
 docker run -d --name culprit-agent --restart unless-stopped --pull always \
   --privileged --pid host --network host \
   -e CULPRIT_HOST=http://<host>:8787 -e CULPRIT_TOKEN=web-01.<secret> \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro \
   ghcr.io/olayzen/culprit-agent:latest
 ```
+
+(The read-only Docker socket is what lets the agent *name* the containers its
+culprits run in; without it they show as `docker <id>` with a note saying so.)
 
 The dashboard's **Nodes** view enrolls agents and shows a ready-to-paste command
 (native *and* Docker) with the token already filled in. A node picker appears in
 the title bar, and **every view (Overview, Lag Doctor, Processes, Services,
 Ports, Events, Trends) renders whichever node you select,** with full remote
-action parity: process detail, End task, renice and port-kill all work on
-agents, run by the identical collector code, with the same guards. If an agent
-goes quiet, the title bar tells you how stale the numbers are rather than letting
-them pass as live.
+action parity: process detail, End task, renice, throttle and port-kill all
+work on agents, run by the identical collector code, with the same guards. If an
+agent goes quiet, the title bar tells you how stale the numbers are rather than
+letting them pass as live (and, if you have set up notifications, tells you).
 
 ---
 
@@ -207,7 +237,7 @@ them pass as live.
 | **Events** | From journald: OOM kills, segfaults & core dumps, hung-task reports, disk/filesystem and MCE hardware errors, unit failures, unclean shutdowns, failed sign-ins, package history, crash artefacts, and pending-reboot state |
 | **Sessions** | Sign-in history from logind paired on session id, **current sessions with SSH logins named** (user + remote host), lock state, boots and shutdowns |
 | **Sync** | Syncthing, rclone, OneDrive, Nextcloud, Dropbox, plus an **inotify watch-exhaustion** panel: the failure that silently breaks sync while every status light stays green |
-| **Trends** | Everything above rolled up on disk, per node, so you can ask what was happening on `web-01` at 14:20 yesterday |
+| **Trends** | Everything above rolled up on disk, per node, so you can ask what was happening on `web-01` at 14:20 yesterday, with findings folded into **incidents** (start, end, peak, who led it for how many minutes, and every action taken with its verdict) |
 
 ---
 
@@ -232,6 +262,34 @@ per-process IO is permission-gated, the disk finding shows **no** culprits rathe
 than inventing a ranking, because a confident wrong answer is worse than an
 honest "I can't see this."
 
+Some findings have **no culprit on the machine at all**, and say so: CPU steal
+(the hypervisor's other guests), thermal or power throttling (the CPU cutting its
+own clock), swapping to a rotational disk (a hardware verdict, not a process's
+fault), and processes stuck in the kernel's NFS, SMB or FUSE client (the file
+server, or the network to it). These carry the blame in words and list no
+process ranking, except the D-state victims, which are labelled as victims.
+
+**Throttle** sits between renice and End task: it caps the CPU quota and IO
+weight of the systemd unit or container scope the process runs in, via
+`systemctl set-property --runtime`, so a backup or indexer is slowed rather than
+killed and the cap survives forks. It acts on the whole unit, and the dialog
+says how many processes that is before you apply it. System units need root or
+a polkit rule; the agent reports exactly that when it lacks it.
+
+After **every** action the host keeps watching the node's own findings and gives
+a verdict: *helped* (the findings that named the process cleared, or their
+resource's pressure halved), *partly* (some cleared; the rest is named, with who
+leads it now), *no change* (with the next candidate), or *nothing to verify*
+(nothing was under pressure). Verdicts are stored with the action and shown on
+the incident in Trends.
+
+**Expected findings.** A person can mark a finding as expected, for one node or
+all, optionally only when a named process leads it, optionally only in a daily
+window on chosen weekdays. It stays visible with its evidence, reads as
+*expected* (severity info, reason attached), is never notified or written to
+history as an incident, and comes back as a real finding, with a note on how far
+it overran, once its window has ended.
+
 ---
 
 ## Security & privacy
@@ -252,6 +310,9 @@ account and no telemetry.
 - **In transit:** plain HTTP exposes cookies and tokens, so on anything but a
   trusted LAN run TLS (`--ssl-certfile/--ssl-keyfile`, or a reverse proxy) and
   point agents at `https://`.
+- **Notifications** carry findings only, over channels you configure: an ntfy
+  topic URL, a JSON webhook, or SMTP. The SMTP password lives in `config.json`
+  and is never returned by the API. Delivery is rate-limited (20 per 10 min).
 - **Reverse proxies are refused until declared.** A forwarding header from an
   undeclared address gets a `400`, not silent trust, so a visitor can never spoof
   the address the login limiter keys on. An optional Host allow-list shuts DNS
