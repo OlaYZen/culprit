@@ -244,24 +244,8 @@ function initTheme() {
 }
 
 /* ══ Boot ══════════════════════════════════════════════════════════════ */
-// Demo mode (the GitHub Pages build, or `?demo` on any page): the frontend
-// runs unchanged against an in-browser stand-in for the host. The module is
-// only fetched when asked for, so a real dashboard never loads it.
-const DEMO = document.documentElement.dataset.demo === "1"
-  || new URLSearchParams(location.search).has("demo");
-
-async function boot() {
+function boot() {
   for (const node of $$("[data-bind]")) bind[node.dataset.bind] = node;
-
-  if (DEMO) {
-    try {
-      const { installDemo } = await import("./demo/index.js");
-      await installDemo();
-    } catch (error) {
-      console.error("[Culprit] demo mode failed to start:", error);
-      banner("demo", `Demo could not start: ${error.message}`, { tone: "error", sticky: true });
-    }
-  }
 
   initTheme();
   initModal();

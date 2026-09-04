@@ -1,6 +1,6 @@
 """Record the demo's fixtures from a live host, scrubbed.
 
-The GitHub Pages demo (`tools/build_demo.py`, `web/js/demo/`) has no backend:
+The GitHub Pages demo (this branch; `assets/js/demo/`) has no backend:
 everything the dashboard shows there is replayed from JSON recorded off a real
 fleet by this tool, so the demo speaks the product's real vocabulary -- the
 `available: False` panels, the gated sources, the honest em dashes -- instead
@@ -22,7 +22,11 @@ re-derived from a hash, machine ids / boot ids / journal cursors / disk
 serials are hashed, and `--replace old=new` handles anything else you spot.
 Read the output before committing it -- a journal line can hold anything.
 
-    .venv/bin/python tools/record_demo.py --rename Jellyfin=media --alias olayzen=sam
+    python3 tools/record_demo.py --url http://host:8787 --user me --password ... \
+        --rename Jellyfin=media --alias olayzen=sam
+
+Standard library only: run it from any checkout of this branch, against any
+host you can sign in to.
 """
 
 from __future__ import annotations
@@ -40,10 +44,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-import _auth
-
 ROOT = Path(__file__).resolve().parent.parent
-OUT_DEFAULT = ROOT / "web" / "demo" / "data"
+OUT_DEFAULT = ROOT / "assets" / "demo" / "data"
 
 SERIES_COLUMNS = ("cpu_avg", "cpu_max", "mem_percent_avg", "commit_max",
                   "hard_faults_avg", "hard_faults_max", "disk_latency_avg",
@@ -284,11 +286,7 @@ def main() -> int:
                         help="alias a user name everywhere it appears (paths, sessions, rows)")
     parser.add_argument("--replace", action="append", metavar="OLD=NEW",
                         help="replace a literal in every string value")
-    _auth.add_arguments(parser)
     args = parser.parse_args()
-    note = _auth.apply(args, uses=("url", "user", "password", "insecure"))
-    if note:
-        print(f"\033[90m{note}\033[0m")
     url = args.url or "http://127.0.0.1:8787"
 
     client = Client(url, bool(args.insecure))
