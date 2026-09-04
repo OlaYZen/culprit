@@ -8,6 +8,8 @@ tools_auth.json
 
 # SQLite database (holds scrypt password hashes + agent token hashes) + sidecars
 data/
+# ...but the demo's recorded, scrubbed fixtures are meant to be committed
+!web/demo/data/
 *.db
 *.db-wal
 *.db-shm
@@ -32,3 +34,6 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# Static demo site (tools/build_demo.py output)
+dist/

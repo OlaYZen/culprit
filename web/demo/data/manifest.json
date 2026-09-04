@@ -1,0 +1,47 @@
+{
+ "recorded_at": 1788528244.336436,
+ "nodes": [
+  {
+   "name": "arr",
+   "file": "nodes/arr.json"
+  },
+  {
+   "name": "media",
+   "file": "nodes/media.json"
+  },
+  {
+   "name": "edge",
+   "file": "nodes/edge.json"
+  },
+  {
+   "name": "nas",
+   "file": "nodes/nas.json"
+  },
+  {
+   "name": "dev",
+   "file": "nodes/dev.json"
+  }
+ ],
+ "host": "host.json",
+ "series_columns": [
+  "cpu_avg",
+  "cpu_max",
+  "mem_percent_avg",
+  "commit_max",
+  "hard_faults_avg",
+  "hard_faults_max",
+  "disk_latency_avg",
+  "disk_latency_max",
+  "gpu_avg",
+  "gpu_max",
+  "net_recv_avg",
+  "net_sent_avg"
+ ],
+ "top_ranges": [
+  3600,
+  21600,
+  86400,
+  259200,
+  604800
+ ]
+}
