@@ -307,6 +307,7 @@ export function createDoctor() {
     const meta = el("div.finding__meta", {}, [
       finding.external ? pill("outside this machine", "info") : null,
       unit ? pill(unit.kind === "container" ? "inside a container" : "inside one unit", "info") : null,
+      finding.port ? pill(`port ${finding.port}`, "info", { mono: true }) : null,
       pill(finding.resource),
       pill(held, heldTone),
     ]);

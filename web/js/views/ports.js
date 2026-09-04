@@ -10,6 +10,12 @@
  *
  * A socket owned by another user shows with no process and a Kill that is
  * disabled with the reason, never a blank or a lie.
+ *
+ * The Backlog column is the symptom side: each TCP listener's accept queue
+ * (completed handshakes the service has not yet accepted) against its listen
+ * backlog. A full queue while the kernel's ListenOverflows counter ticks means
+ * clients are being turned away before the service ever sees them — the row
+ * says "dropping" and the Doctor names the process.
  */
 
 import { delegate, el, patchText, render } from "../util/dom.js";
@@ -18,13 +24,14 @@ import { api, store } from "../stream.js";
 import {
   confirmAction, emptyState, note, pendingSlot, readySlot, searchField, segmented, skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { figures, openProcessModal, pill, procBase, section, viewHead } from "./shared.js";
+import { figures, meter, openProcessModal, pill, procBase, section, viewHead } from "./shared.js";
 
 export function createPorts() {
   const root = el("div.view", { dataset: { view: "ports" } });
   const view = { query: "", scope: null };
   const nodes = {};
   let built = false;
+  let backlogInfo = {};
 
   const search = searchField({
     placeholder: "Filter by port, process or unit…", label: "Filter ports",
@@ -53,6 +60,7 @@ export function createPorts() {
     table.innerHTML = `<thead><tr>
       <th class="r">Port</th><th>Proto</th><th>Exposure</th><th>Service</th><th>User</th>
       <th class="r" title="Established inbound connections to this port right now">Conns</th>
+      <th title="Accept queue: completed connections waiting for the service to accept() them, against its listen backlog. A full queue turns new clients away.">Backlog</th>
       <th>Bound to</th><th class="r">Actions</th>
     </tr></thead>`;
     table.append(nodes.tbody);
@@ -62,9 +70,10 @@ export function createPorts() {
       body: el("div.tblwrap", {}, [table]),
       foot: "“Kill” terminates the process holding the port (SIGTERM), the same guarded action as End task — PID 1, "
           + "kernel threads and critical services (sshd, systemd, dbus…) are refused. On a remote node it is relayed "
-          + "to the agent, which runs it locally.",
+          + "to the agent, which runs it locally. “Backlog” is the accept queue against its maximum: full means the "
+          + "kernel is dropping new connections to that port because the service is not accepting fast enough.",
     });
-    pendingSlot(figSlot, skeletonFigures(6));
+    pendingSlot(figSlot, skeletonFigures(7));
     pendingSlot(tableSlot, skeletonSection("Listening ports", 10));
 
     delegate(nodes.tbody, "click", "[data-pid]", (event, node) => {
@@ -112,7 +121,7 @@ export function createPorts() {
     if (!built) return;
     if (!store.state.ports) {
       head.setPending(true);
-      pendingSlot(figSlot, skeletonFigures(6));
+      pendingSlot(figSlot, skeletonFigures(7));
       pendingSlot(tableSlot, skeletonSection("Listening ports", 10));
       return;
     }
@@ -130,7 +139,24 @@ export function createPorts() {
     }
     const ports = payload.ports || [];
     const totals = payload.totals || {};
+    const backlog = payload.backlog || {};
     readySlot(tableSlot, nodes.section);
+
+    // Turned away: the kernel's ListenOverflows rate over the sampling
+    // interval. A counter needs two readings, so the first sample is "…".
+    let turnedAway;
+    if (backlog.available === false) {
+      turnedAway = { label: "Turned away", value: fmt.dash, hint: "counters not readable" };
+    } else if (!fmt.isNum(backlog.overflows_sec)) {
+      turnedAway = { label: "Turned away", value: "…", hint: "first sample; needs two readings" };
+    } else {
+      const dropping = backlog.overflows_sec > 0;
+      turnedAway = {
+        label: "Turned away", value: `${fmt.fixed(backlog.overflows_sec, 1)}/s`,
+        tone: dropping ? "crit" : "ok",
+        hint: dropping ? "connections dropped: accept queue full" : "no accept-queue overflows",
+      };
+    }
 
     readySlot(figSlot, figures([
       { label: "Listening ports", value: fmt.count(totals.ports ?? ports.length) },
@@ -139,13 +165,30 @@ export function createPorts() {
       { label: "TCP", value: fmt.count(totals.tcp ?? 0) },
       { label: "UDP", value: fmt.count(totals.udp ?? 0) },
       { label: "Inbound conns", value: fmt.count(totals.connections ?? 0), hint: "established right now" },
+      turnedAway,
     ]));
 
+    const notes = [];
     if (payload.unattributed_note) {
-      render(noteSlot, note("warn", `${fmt.esc(payload.unattributed_note)}. Those rows show without a process and cannot be killed from here.`));
-    } else {
-      render(noteSlot, []);
+      notes.push(note("warn", `${fmt.esc(payload.unattributed_note)}. Those rows show without a process and cannot be killed from here.`));
     }
+    const dropping = backlog.turned_away || [];
+    if (dropping.length) {
+      notes.push(note("crit", `Port${dropping.length > 1 ? "s" : ""} ${fmt.esc(dropping.join(", "))} `
+        + `${dropping.length > 1 ? "are" : "is"} turning clients away: the accept queue is full and the kernel dropped `
+        + `${fmt.esc(fmt.fixed(backlog.overflows_sec, 1))} connection attempts/s. The service is not accepting fast enough; `
+        + "the Doctor names the process."));
+    } else if (backlog.note) {
+      notes.push(note("warn", fmt.esc(backlog.note)));
+    }
+    if (backlog.available === false) {
+      notes.push(note("info", `Turned-away counters unavailable: ${fmt.esc(backlog.reason || "unknown reason")}.`));
+    } else if (backlog.queues_available === false) {
+      notes.push(note("info", `${fmt.esc(backlog.queues_reason || "Listen backlogs could not be read")}. `
+        + "The Backlog column shows the current queue depth from /proc/net/tcp with no maximum, so no port can be "
+        + "called full from here."));
+    }
+    render(noteSlot, notes);
 
     let rows = ports;
     if (view.scope) rows = rows.filter((p) => p.scope === view.scope);
@@ -158,9 +201,10 @@ export function createPorts() {
           || (proc.units || []).some((u) => String(u).toLowerCase().includes(q))));
     }
 
+    backlogInfo = backlog;
     render(nodes.tbody, rows.map(portRow));
     if (!rows.length) {
-      render(nodes.tbody, el("tr", {}, [el("td", { colspan: "8" }, [ports.length
+      render(nodes.tbody, el("tr", {}, [el("td", { colspan: "9" }, [ports.length
         ? emptyState(`No port matches “${search.input.value.trim()}”`, "Try a port number, a process name, or a unit name.")
         : emptyState("Nothing is listening", "No process on this machine is accepting connections.")])]));
     }
@@ -207,6 +251,7 @@ export function createPorts() {
       el("td.wide", { style: { maxWidth: "340px" } }, [serviceCell]),
       el("td.faint", { text: primary?.username || fmt.dash }),
       el("td.n", { text: entry.connections ? fmt.count(entry.connections) : fmt.dash }),
+      el("td", { style: { minWidth: "96px" } }, [backlogCell(entry, backlogInfo)]),
       el("td.mono.faint.small", { text: bindLabel(entry.addresses), title: (entry.addresses || []).join(", ") }),
       el("td.n", {}, [actionCell]),
     ]);
@@ -215,6 +260,31 @@ export function createPorts() {
   root.mount = () => { if (!built) build(); repaint(); };
   root.subscriptions = [store.on(["ports", "node"], () => { if (root.isActive) repaint(); })];
   return root;
+}
+
+/** The accept queue against its backlog: a number pair, a thin meter, and
+ *  "dropping" when the kernel is turning clients away at this port. A dash
+ *  with the reason when it is UDP or the queue could not be read. */
+function backlogCell(entry, backlog) {
+  const queue = entry.accept_queue;
+  if (!queue) {
+    const why = (entry.protocols || []).includes("tcp")
+      ? (backlog.queues_reason || "accept queue not readable") : "UDP has no accept queue";
+    return el("span.faint", { text: fmt.dash, title: why });
+  }
+  if (!fmt.isNum(queue.max)) {
+    return el("span.mono.small", { text: `${fmt.count(queue.current)} / ?`,
+      title: backlog.queues_reason || "The listen backlog maximum needs `ss`; only the current depth is known." });
+  }
+  const tone = entry.turned_away ? "crit" : queue.pct >= 80 ? "warn" : null;
+  const top = el("div.row.row--between", { style: { gap: "6px" } }, [
+    el("span.mono.small", { class: `mono small${tone ? ` tone-${tone}` : ""}`, text: `${fmt.count(queue.current)} / ${fmt.count(queue.max)}` }),
+    entry.turned_away ? pill("dropping", "crit") : null,
+  ]);
+  return el("div", { title: `${fmt.count(queue.current)} connection(s) waiting to be accepted, listen backlog ${fmt.count(queue.max)}`
+    + (entry.turned_away ? ". Full: the kernel is dropping new connections here." : "") }, [
+    top, meter(queue.pct, { tone: tone || "ok", thin: true }),
+  ]);
 }
 
 function bindLabel(addresses) {
