@@ -523,6 +523,10 @@ def audit_deployment(rep: Report) -> None:
         if pattern not in gitignore:
             rep.add("WARN", "gitignore", ".gitignore",
                     f"{pattern} not ignored -- a TLS key next to the checkout gets committed")
+    for name in ("config.json", "agent.json", "tools_auth.json"):
+        if name not in gitignore:
+            rep.add("HIGH", "gitignore", ".gitignore",
+                    f"{name} not ignored -- it holds credentials in the clear")
     # The two security tools must agree on what is public.
     sibling = ROOT / "tools" / "check_security.py"
     if sibling.exists():
@@ -609,7 +613,7 @@ def audit_repo(rep: Report) -> None:
     bad = 0
     for name in tracked:
         base = Path(name).name
-        if base in ("config.json", "agent.json", ".env") or \
+        if base in ("config.json", "agent.json", "tools_auth.json", ".env") or \
                 base.endswith((".db", ".sqlite", ".db-wal", ".pem", ".key")):
             bad += 1
             rep.add("HIGH", "tracked-secret", name, "runtime/credential file is tracked")
@@ -632,7 +636,7 @@ def audit_repo(rep: Report) -> None:
         rep.ok("repo", f"{len(tracked)} tracked files: no credentials, no runtime state")
 
     # Modes on the files that hold hashes and tokens.
-    candidates = [ROOT / "agent.json"]
+    candidates = [ROOT / "agent.json", ROOT / "tools_auth.json"]
     if (ROOT / "data").exists():
         candidates += sorted((ROOT / "data").glob("*.db*"))
     for candidate in candidates:

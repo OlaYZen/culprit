@@ -56,6 +56,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+import _auth  # noqa: E402 -- tools/ is sys.path[0] when run as a script
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -1763,7 +1765,11 @@ def main() -> int:
                         help="print only non-PASS findings")
     parser.add_argument("--json", metavar="PATH",
                         help="also write every finding to a JSON file")
+    _auth.add_arguments(parser)
     args = parser.parse_args()
+    note = _auth.apply(args, uses=("url", "user", "password", "insecure"))
+    if note:
+        print(f"{DIM}{note}{RESET}")
     url = args.url or f"http://127.0.0.1:{args.port}"
 
     only = {g for g in args.only.split(",") if g}
