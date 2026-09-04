@@ -27,6 +27,7 @@ export function initMobile() {
     if (sheet.classList.contains("is-open")) close(); else open();
   });
   for (const node of $$("[data-msheet-close]", sheet)) node.addEventListener("click", close);
+  wireGrab(sheet, close);
   document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
 
   document.addEventListener("culprit:navigate", (event) => {
@@ -43,6 +44,63 @@ export function initMobile() {
 
   store.on(["diagnosis", "services", "events", "sync", "volumes", "nodes"], (state) => updateBadges(state));
   updateBadges(store.state);
+}
+
+/**
+ * The grab handle drags the sheet. Pointer events so a finger and a mouse
+ * share one path; the panel follows the pointer down (never up), the backdrop
+ * fades with it, and on release the sheet finishes closing when it was pulled
+ * past a third of its height or flicked, otherwise it springs back. A tap on
+ * the handle still closes it, as it did when it was only a button.
+ */
+function wireGrab(sheet, close) {
+  const grab = $(".sheet__grab", sheet);
+  const panel = $(".sheet__panel", sheet);
+  const backdrop = $(".sheet__backdrop", sheet);
+  if (!grab || !panel) return;
+  let active = null;   // { startY, lastY, lastT, velocity } while a drag is in progress
+
+  const offset = (event) => Math.max(0, event.clientY - active.startY);
+  const reset = () => {
+    panel.classList.remove("is-dragging");
+    backdrop?.classList.remove("is-dragging");
+    // Clearing the inline transform in the same frame as the class change
+    // makes the transition start from where the finger left the sheet.
+    panel.style.transform = "";
+    if (backdrop) backdrop.style.opacity = "";
+  };
+
+  grab.addEventListener("pointerdown", (event) => {
+    if (!sheet.classList.contains("is-open") || active) return;
+    active = { startY: event.clientY, lastY: event.clientY, lastT: event.timeStamp, velocity: 0 };
+    grab.setPointerCapture(event.pointerId);
+    panel.classList.add("is-dragging");
+    backdrop?.classList.add("is-dragging");
+  });
+  grab.addEventListener("pointermove", (event) => {
+    if (!active) return;
+    const dt = event.timeStamp - active.lastT;
+    if (dt > 0) active.velocity = (event.clientY - active.lastY) / dt;   // px per ms, downwards positive
+    active.lastY = event.clientY;
+    active.lastT = event.timeStamp;
+    const dy = offset(event);
+    panel.style.transform = `translateY(${dy}px)`;
+    if (backdrop) backdrop.style.opacity = String(Math.max(0, 1 - dy / panel.offsetHeight));
+  });
+  grab.addEventListener("pointerup", (event) => {
+    if (!active) return;
+    const dy = offset(event);
+    const tap = dy < 6;
+    const dismiss = tap || dy > panel.offsetHeight / 3 || active.velocity > 0.6;
+    active = null;
+    reset();
+    if (dismiss) close();
+  });
+  grab.addEventListener("pointercancel", () => {
+    if (!active) return;
+    active = null;
+    reset();
+  });
 }
 
 function updateBadges(state) {
