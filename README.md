@@ -20,6 +20,14 @@
 
 ---
 
+> **Try it before you install anything:** **[olayzen.github.io/culprit](https://olayzen.github.io/culprit/)**
+> is the real dashboard running in your browser on a recording of a real five-machine
+> fleet -- no backend, nothing leaves the page. Every few minutes an ffmpeg transcode
+> saturates one node: watch the Lag Doctor name it, end it from the process dialog,
+> and read the verdict. Actions are simulated there, and the banner says so.
+
+---
+
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Watch more machines](#watch-more-machines)
@@ -266,6 +274,24 @@ agent goes quiet, the title bar tells you how stale the numbers are rather than
 letting them pass as live (and, if you have set up notifications, tells you).
 
 ---
+
+### Try it without installing
+
+The [demo](https://olayzen.github.io/culprit/) is this repository's own `web/`
+served as a static site with an in-browser stand-in for the host
+(`web/js/demo/`): the same views, charts and dialogs, answered from JSON that
+`tools/record_demo.py` recorded off a real fleet and scrubbed (hostnames, users,
+public addresses, MACs, machine ids). What it adds is the liveness a recording
+cannot hold -- numbers that wander around their recorded values, one scripted
+incident that repeats, an agent that went quiet -- and every write (end task,
+renice, throttle, expectations, settings) acts on that in-browser world, with
+the verdict watch judging the action the way the host would.
+
+To run it yourself: `python3 tools/build_demo.py` writes `dist/demo/`; serve it
+with any static server (`python3 -m http.server -d dist/demo 8080`). Any real
+host also answers `?demo` on its URL, which is how the demo is developed. The
+site on GitHub Pages is rebuilt by `.github/workflows/demo.yml` on every push,
+so it never drifts from the frontend it demonstrates.
 
 ## What it watches
 
