@@ -25,8 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from culprit import config as config_module  # noqa: E402
 from culprit import linux  # noqa: E402
-from culprit.collectors import disks, events, gpu, network, ports, processes  # noqa: E402
-from culprit.collectors import services, sync, sysinfo  # noqa: E402
+from culprit.collectors import cgroups, disks, events, gpu, kernel, network  # noqa: E402
+from culprit.collectors import ports, processes, services, sync, sysinfo  # noqa: E402
+from culprit.collectors.changes import ChangeLog  # noqa: E402
 from culprit.collectors.cpu_mem import CpuMemoryCollector  # noqa: E402
 from culprit.collectors.lag import LagAnalyzer  # noqa: E402
 
@@ -264,6 +265,38 @@ def main() -> int:
                  f"{medium['media_type']})  smart="
                  f"{medium['smart_reason'] or medium['status'] or 'unknown'}")
 
+    # Per-unit pressure/limits and the kernel's own state (proc tier).
+    cg_collector = cgroups.CgroupCollector()
+    timed("CgroupCollector.sample (first)", cg_collector.sample, budget_ms=120)
+    cg = timed("CgroupCollector.sample (warm)", cg_collector.sample, budget_ms=60)
+    if cg:
+        if cg["available"]:
+            note(f"{cg['total_units']} unit cgroups, {cg['emitted']} notable "
+                 f"(stalled, capped or limited)")
+            for unit in cg["units"][:4]:
+                psi = unit["psi"]
+                note(f"  {unit['unit'][:40]}: stall cpu={psi.get('cpu_some')} "
+                     f"mem={psi.get('memory_full')} io={psi.get('io_full')} "
+                     f"quota={unit['cpu_quota_pct']} throttled={unit['throttled_pct']} "
+                     f"mem_limit={unit['memory_limit_pct']} runtime_cap={unit['runtime_cap']}")
+        else:
+            note(f"{YELLOW}unavailable{RESET}: {cg['reason']}")
+    kn_collector = kernel.KernelCollector()
+    timed("KernelCollector.sample (first)", kn_collector.sample, budget_ms=20)
+    kn = timed("KernelCollector.sample (warm)", kn_collector.sample, budget_ms=10)
+    if kn:
+        md = kn["mdstat"]
+        note(f"mdstat: {'%d array(s)' % len(md['arrays']) if md['available'] else md['reason']}"
+             + (f", syncing: {[a['name'] for a in md['syncing']]}" if md.get("syncing") else ""))
+        irq = kn["irq"]
+        if irq.get("available") and irq.get("cores"):
+            note("busiest interrupt per core: "
+                 + ", ".join(f"cpu{c['core']}={c['top'][0]['name'] if c['top'] else '-'}"
+                             for c in irq["cores"]))
+    explained = [(p["name"], p["kernel"]["role"]) for p in
+                 (result["processes"] if result else []) if p.get("kernel")]
+    note(f"kernel threads explained (active now): {explained[:4] or 'none active'}")
+
     svc_collector = services.ServiceCollector()
     svc = timed("ServiceCollector.sample (first)", svc_collector.sample,
                 budget_ms=2500)
@@ -279,6 +312,21 @@ def main() -> int:
         for problem in svc["problems"][:5]:
             note(f"  [{problem['severity']}] {problem['name']}: "
                  f"{problem['detail'][:70]}")
+
+    # The change log: baseline on the first observation, so a second pass
+    # over unchanged sections must produce nothing.
+    change_log = ChangeLog()
+    change_log.observe_services(svc)
+    change_log.observe_cgroups(cg)
+    change_log.observe_processes(result["processes"] if result else [])
+    change_log.observe_services(svc)
+    change_log.observe_cgroups(cg)
+    changes = change_log.snapshot()
+    marker = GREEN if changes["count"] == 0 else RED
+    note(f"{marker}change log after an unchanged second pass: {changes['count']} "
+         f"event(s) (expected 0){RESET}")
+    if changes["count"]:
+        failures.append("change log reported changes for identical observations")
 
     net_detail = timed("NetworkDetailCollector.sample",
                        network.NetworkDetailCollector().sample, budget_ms=2000)
