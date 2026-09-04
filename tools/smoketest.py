@@ -188,6 +188,14 @@ def main() -> int:
         note(f"states: {result['by_state']}")
         if result["io_note"]:
             note(f"{YELLOW}{result['io_note']}{RESET}")
+        if totals.get("containers"):
+            named = sum(1 for r in result["processes"]
+                        if r.get("container") and r["container"].get("name"))
+            note(f"containers: {totals['containers']} with "
+                 f"{totals['container_processes']} processes; {named} processes "
+                 "carry a container name")
+        if result.get("container_note"):
+            note(f"{YELLOW}{result['container_note']}{RESET}")
         # psutil.pids() is the ground truth for "did we see every process".
         actual = len(psutil.pids())
         seen = totals["count"]

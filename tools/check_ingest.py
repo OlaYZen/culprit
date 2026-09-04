@@ -233,7 +233,10 @@ def readback(ctx: Ctx, node: str) -> list[str]:
                 strict_json(r.text)
             except ValueError as exc:
                 problems.append(f"{target}: body is not strict JSON ({exc})")
-    r = safe_req(ctx, "GET", "/api/stream", cookie=ctx.cookie, max_read=12_000_000, timeout=8.0)
+    # Only the first frame is judged; stop reading at its boundary rather than
+    # waiting for 12 MB of node frames from a fleet that reports every second.
+    r = safe_req(ctx, "GET", "/api/stream", cookie=ctx.cookie, max_read=12_000_000, timeout=8.0,
+                 stop_at=b"\n\n")
     if r is not None:
         frame = next((line[6:] for line in r.text.split("\n") if line.startswith("data: ")), None)
         if frame is None and r.status == 200:

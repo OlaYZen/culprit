@@ -146,7 +146,7 @@ class Http:
     def req(self, method: str, target: str, *, body: bytes | str | None = None,
             headers: dict[str, str] | None = None, cookie: str | None = None,
             json_body: Any = None, max_read: int = 4 * 1024 * 1024,
-            timeout: float | None = None) -> Resp:
+            timeout: float | None = None, stop_at: bytes | None = None) -> Resp:
         hdrs = {"User-Agent": "culprit-check-security/1"}
         if json_body is not None:
             body = json.dumps(json_body).encode()
@@ -166,8 +166,25 @@ class Http:
                 conn.putheader("Content-Length", str(len(body)))
             conn.endheaders(body)
             raw = conn.getresponse()
-            # Streaming responses (SSE) never end: read a bounded slice.
-            data = raw.read(max_read)
+            # Streaming responses (SSE) never end: read a bounded slice. A
+            # plain read(max_read) on a chunked stream blocks until that
+            # many bytes have arrived, which a host with chatty agents may
+            # take an hour to send -- so with `stop_at` the read stops as
+            # soon as the marker (an SSE frame boundary) has been seen.
+            if stop_at is None:
+                data = raw.read(max_read)
+            else:
+                chunks: list[bytes] = []
+                got = 0
+                while got < max_read:
+                    piece = raw.read1(min(65536, max_read - got))
+                    if not piece:
+                        break
+                    chunks.append(piece)
+                    got += len(piece)
+                    if stop_at in b"".join(chunks[-2:]):
+                        break
+                data = b"".join(chunks)
             resp = Resp(raw.status, {k.lower(): v for k, v in raw.getheaders()},
                         data)
             if self.observer is not None:
@@ -1008,6 +1025,37 @@ def check_authenticated_writes(ctx: Ctx) -> None:
            {"confirm": True}, (404,), "terminate on unknown agent")
     expect("POST", "/api/nodes/sectest-nope/processes/1/priority",
            {"level": "low"}, (404,), "renice on unknown agent")
+    expect("POST", "/api/nodes/sectest-nope/processes/1/throttle",
+           {"level": "max"}, (422,), "throttle with an unknown level")
+    expect("POST", "/api/nodes/sectest-nope/processes/1/throttle",
+           {"level": "half"}, (404,), "throttle on unknown agent")
+    expect("GET", "/api/nodes/sectest-nope/actions/1", None, (404,),
+           "verdict for an action that does not exist")
+    # Expectations: every field validated; nothing is created on a 422.
+    expect("POST", "/api/expectations", {"key": "", "reason": ""}, (422,),
+           "expectation without key or reason")
+    expect("POST", "/api/expectations", {"key": "psi_io", "reason": "x",
+                                         "days": [9]}, (422,), "expectation with a bad weekday")
+    expect("POST", "/api/expectations", {"key": "psi_io", "reason": "x",
+                                         "start": "25:00", "end": "26:00"}, (422,),
+           "expectation with a bad time")
+    expect("POST", "/api/expectations", {"key": "../x", "reason": "x"}, (422,),
+           "expectation with a path-like key")
+    expect("POST", "/api/expectations", [], (400, 422), "expectation as an array")
+    expect("DELETE", "/api/expectations/999999999", None, (404,), "delete unknown expectation")
+    leaked = [e for e in (ctx.http.req("GET", "/api/expectations", cookie=c).json() or {})
+              .get("expectations", []) if isinstance(e, dict) and e.get("reason") == "x"]
+    if leaked:
+        bad += 1
+        rep.add("HIGH", "write-validation",
+                f"{len(leaked)} expectation(s) were created from invalid bodies -- delete them")
+    # Notification settings: only findings can be sent, and only to http(s).
+    expect("PUT", "/api/settings?persist=false", {"notify_ntfy_url": "ftp://x"}, (422,),
+           "ntfy URL with a non-http scheme")
+    expect("PUT", "/api/settings?persist=false", {"notify_min_severity": "info"}, (422,),
+           "notification floor below warn")
+    expect("PUT", "/api/settings?persist=false", {"notify_smtp_port": 70000}, (422,),
+           "SMTP port out of range")
     expect("GET", "/api/nodes/sectest-nope/processes/1", None, (404,),
            "detail on unknown agent")
     expect("POST", "/api/agents/sectest-nope/revoke", None, (404,), "revoke unknown")
