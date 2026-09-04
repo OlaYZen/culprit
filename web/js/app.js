@@ -12,7 +12,7 @@ import { $, $$, patchAttr, patchClass, patchStyle, patchText, show } from "./uti
 import * as fmt from "./util/format.js";
 import { redrawAll } from "./charts.js";
 import { api, store } from "./stream.js";
-import { banner, dismissBanner, initModal, initScrollTop, wireCopy } from "./ui.js";
+import { banner, combobox, dismissBanner, initModal, initScrollTop, wireCopy } from "./ui.js";
 import { createOverview } from "./views/overview.js";
 import { createDoctor } from "./views/doctor.js";
 import { createProcesses } from "./views/processes.js";
@@ -56,9 +56,17 @@ let current = null;
 const bind = {};
 
 /* ══ Routing ═══════════════════════════════════════════════════════════ */
-function navigate(name, { push = true } = {}) {
-  if (!FACTORIES[name]) name = "overview";
-  if (current === name) return;
+function navigate(target, { push = true } = {}) {
+  // "#settings/network": the view, then the page inside it. A view that has
+  // pages exposes setPage; the hash is the only thing the tabs write.
+  const [base, page] = String(target || "").split("/");
+  const name = FACTORIES[base] ? base : "overview";
+  const hash = `#${name}${page ? `/${page}` : ""}`;
+  if (current === name) {
+    if (page) { views.get(name)?.setPage?.(page); $("#main").scrollTop = 0; }
+    if (push && location.hash !== hash) history.pushState({ view: hash.slice(1) }, "", hash);
+    return;
+  }
 
   const container = $("#views");
   let view = views.get(name);
@@ -87,19 +95,18 @@ function navigate(name, { push = true } = {}) {
   document.title = `${TITLES[name]} — Culprit`;
   $("#main").scrollTop = 0;
 
-  if (push) {
-    const hash = `#${name}`;
-    if (location.hash !== hash) history.pushState({ view: name }, "", hash);
-  }
+  if (push && location.hash !== hash) history.pushState({ view: hash.slice(1) }, "", hash);
 
+  view.setPage?.(page);
   view.mount?.();
 }
 
 /* ══ Node picker ═══════════════════════════════════════════════════════ */
+let nodePicker = null;
+
 function updateNodePicker(state) {
   const wrap = $("#nodesel-wrap");
-  const select = $("#node-select");
-  if (!wrap || !select) return;
+  if (!wrap || !nodePicker) return;
   const nodes = state.nodes || [];
   wrap.hidden = nodes.length === 0;
 
@@ -108,16 +115,15 @@ function updateNodePicker(state) {
     label: `${node.name}${node.online ? "" : node.enabled === false ? " · revoked" : " · offline"}`,
   }));
   const signature = wanted.map((o) => `${o.value}|${o.label}`).join(";");
-  if (select.dataset.signature !== signature) {
-    select.dataset.signature = signature;
-    select.replaceChildren(...wanted.map((option) => {
-      const node = document.createElement("option");
-      node.value = option.value;
-      node.textContent = option.label;
-      return node;
-    }));
+  if (nodePicker.dataset.signature !== signature) {
+    nodePicker.dataset.signature = signature;
+    nodePicker.setOptions(wanted);
   }
-  if (store.node && select.value !== store.node) select.value = store.node;
+  const value = store.node ?? "";
+  if (nodePicker.dataset.value !== value) {
+    nodePicker.dataset.value = value;
+    nodePicker.setValue(store.node ?? null);
+  }
 
   const chosen = nodes.find((n) => n.name === store.node);
   patchAttr(bind["node-dot"], "data-state", !store.node ? null : chosen?.online ? null : "offline");
@@ -248,11 +254,19 @@ function boot() {
   initScrollTop($("#main"));
   wireCopy(document.body);
 
-  $("#node-select")?.addEventListener("change", (event) => {
-    store.setNode(event.target.value);
-    updateNodePicker(store.state);
-    updateNodeStale(store.state);
+  // uxgoodpatterns: searchable select — a fleet can have dozens of agents,
+  // so the picker filters as you type; there is no "All" row because every
+  // view describes exactly one machine.
+  nodePicker = combobox({
+    options: [], value: null, allLabel: null, ariaLabel: "Node",
+    onChange: (value) => {
+      store.setNode(value);
+      updateNodePicker(store.state);
+      updateNodeStale(store.state);
+    },
   });
+  nodePicker.id = "node-select";
+  $("#nodesel-wrap")?.append(nodePicker);
   store.on("nodes", () => store.pickDefaultNode());
   store.on("nodes", (state) => updateNodePicker(state));
   store.on("node_meta", (state) => updateNodeStale(state));

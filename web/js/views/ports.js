@@ -8,8 +8,9 @@
  * node-aware endpoint the process views use, so the critical-process guards
  * apply and it works identically on a remote agent.
  *
- * A socket owned by another user shows with no process and a Kill that is
- * disabled with the reason, never a blank or a lie.
+ * A socket owned by another user shows with no process and, in place of
+ * Kill, the reason it cannot be killed — never a blank, a lie, or a disabled
+ * button whose tooltip a keyboard user can never reach.
  *
  * The Backlog column is the symptom side: each TCP listener's accept queue
  * (completed handshakes the service has not yet accepted) against its listen
@@ -241,7 +242,7 @@ export function createPorts() {
         || (entry.unattributed
           ? ((entry.owners || []).length ? `owned by ${entry.owners.join(", ")} — needs CAP_SYS_PTRACE or root` : "owned by another user — needs root")
           : "nothing here can be signalled");
-      actionCell = el("button.btn.btn--sm", { type: "button", disabled: true, title: reason }, ["Kill"]);
+      actionCell = el("span.faint.small", { text: shortReason(reason), title: reason });
     }
 
     return el("tr", { dataset: primary ? { pid: String(primary.pid) } : {} }, [
@@ -260,6 +261,19 @@ export function createPorts() {
   root.mount = () => { if (!built) build(); repaint(); };
   root.subscriptions = [store.on(["ports", "node"], () => { if (root.isActive) repaint(); })];
   return root;
+}
+
+/** Why Kill is unavailable, short enough for a table cell; the full sentence
+ *  from the agent stays in the title. */
+function shortReason(reason) {
+  const text = String(reason || "").toLowerCase();
+  if (text.includes("pid 1")) return "init process";
+  if (text.includes("culprit itself")) return "Culprit itself";
+  if (text.includes("kernel thread")) return "kernel thread";
+  if (text.includes("critical system process")) return "critical process";
+  if (text.includes("no longer exists")) return "gone";
+  if (text.includes("root") || text.includes("access denied") || text.includes("cap_sys_ptrace")) return "needs root";
+  return "can’t kill";
 }
 
 /** The accept queue against its backlog: a number pair, a thin meter, and

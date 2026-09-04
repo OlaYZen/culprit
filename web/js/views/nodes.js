@@ -89,11 +89,14 @@ export function createNodes() {
           text: "Runs the agent privileged in the host's namespaces (full port attribution) and auto-updates on "
               + "re-run. Some managed hosts (e.g. TrueNAS SCALE) disallow privileged/host mounts — there, use the native install below." }),
         subhead("Or native (agent.sh bundle)"),
+        codeRow("git clone https://github.com/OlaYZen/culprit-agent.git && cd culprit-agent", "Copy clone"),
         codeRow(payload.deploy_command, "Copy command"),
         el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" },
-          text: "Copy the culprit-agent/ folder to that server and run the command inside it (as root for full "
-              + "attribution). It saves the config to agent.json; install culprit-agent.service afterwards to keep "
-              + "it running. Adjust the URL if agents reach this host by a different address." }),
+          text: "Clone the agent repo on that server, then run the command inside it. agent.sh creates a venv, "
+              + "checks the host accepts the token, saves both to agent.json, and offers to set itself up as a "
+              + "systemd service that starts on boot. Run it under sudo for a system service as root (full process "
+              + "and port attribution); without sudo it becomes a user service. Adjust the URL if agents reach "
+              + "this host by a different address; add --insecure for a self-signed certificate." }),
       ]),
     }));
     revealSlot.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -143,7 +146,7 @@ export function createNodes() {
         message: revoked
           ? `This issues a fresh token and starts accepting ${node.name}'s reports again.`
           : "The current token stops working the moment the new one is minted.",
-        detail: "The running agent keeps its old token in agent.json and will log 401s until you rerun agent.sh with the new one.",
+        detail: "The running agent keeps its old token in agent.json and will log 401s until you run ./agent.sh --configure on it with the new one and restart the service.",
         confirmLabel: revoked ? "Re-enable" : "New token",
         onConfirm: async () => {
           const payload = await api(`/api/agents/${encodeURIComponent(node.name)}/token`, { method: "POST" });
