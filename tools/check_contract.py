@@ -190,13 +190,26 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "node:ports": [
             "available", "totals.ports", "totals.public", "totals.local",
             "totals.tcp", "totals.udp", "totals.connections",
-            "totals.unattributed",
+            "totals.unattributed", "totals.turned_away",
+            # Turned-away clients: the kernel's listen-drop rates over the
+            # sampling interval (None on the first sample), whether `ss`
+            # supplied the backlog maxima, and the ports found full while
+            # overflows ticked.
+            "backlog.available", "backlog.reason", "backlog.interval",
+            "backlog.overflows_sec", "backlog.drops_sec",
+            "backlog.syn_drops_sec", "backlog.syn_cookies_sec",
+            "backlog.queues_available", "backlog.queues_reason",
+            "backlog.somaxconn", "backlog.turned_away", "backlog.note",
             "ports[].port", "ports[].protocols", "ports[].scope",
             "ports[].addresses", "ports[].families", "ports[].connections",
             "ports[].unattributed", "ports[].owners",
             "ports[].killable", "ports[].processes",
+            # accept_queue is null for UDP and when nothing could be read;
+            # its `max` is null without `ss` (depth alone from /proc/net/tcp).
+            "ports[].accept_queue", "ports[].turned_away",
             "ports[].processes[].pid", "ports[].processes[].name",
             "ports[].processes[].username", "ports[].processes[].units",
+            "ports[].processes[].unit",
             "ports[].processes[].can_kill", "ports[].processes[].is_self",
         ],
     },
