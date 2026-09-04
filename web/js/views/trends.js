@@ -17,7 +17,7 @@ import {
   emptyState, icons, minDelay, note, openModal, pendingSlot, readySlot, segmented, skeletonFigures, skeletonRows,
   skeletonSection,
 } from "../ui.js";
-import { figures, logItem, openProcessModal, section, viewHead } from "./shared.js";
+import { containerPill, figures, logItem, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const RANGES = [
   { value: 3600, label: "1h" }, { value: 6 * 3600, label: "6h" }, { value: 24 * 3600, label: "24h" },
@@ -104,8 +104,9 @@ export function createTrends() {
         foot: "Grouped by image name, so a browser that restarted three times is still counted as one thing.",
       }),
       section({
-        title: "Past findings", meta: nodes.findMeta, body: nodes.findings,
-        foot: "Every sustained warning or critical finding that was recorded, with the processes blamed at the time.",
+        title: "Incidents", meta: nodes.findMeta, body: nodes.findings,
+        foot: "Consecutive recordings of one finding folded into a span: when it started, when it ended, its peak, "
+            + "who led it for how many of its minutes, and what was done about it — with the doctor's verdict on each action.",
       }),
     ];
   }
@@ -139,15 +140,15 @@ export function createTrends() {
     head.setPending(true);
     pendingSlot(figSlot, skeletonFigures(7));
     pendingSlot(bottomRow, el("div", { style: { display: "contents" } }, [
-      skeletonSection("Heaviest processes over this range", 8), skeletonSection("Past findings", 5),
+      skeletonSection("Heaviest processes over this range", 8), skeletonSection("Incidents", 5),
     ]));
     try {
       const columns = Array.from(new Set(METRIC_SETS.flatMap((s) => s.columns)));
       const node = encodeURIComponent(store.node);
-      const [series, top, findings, stats] = await Promise.all([
+      const [series, top, incidents, stats] = await Promise.all([
         api(`/api/history/series?since=${since}&columns=${columns.join(",")}&node=${node}`),
         api(`/api/history/top?since=${since}&limit=15&node=${node}`),
-        api(`/api/history/findings?since=${since}&limit=120&node=${node}`),
+        api(`/api/history/incidents?since=${since}&limit=80&node=${node}`),
         api("/api/history/stats"),
       ]);
 
@@ -172,7 +173,7 @@ export function createTrends() {
       }
       readySlot(bottomRow, nodes.bottom);
       renderTop(top.processes || []);
-      renderFindings(findings.findings || []);
+      renderIncidents(incidents.incidents || []);
       renderStats(stats, series);
     } catch (error) {
       head.setPending(false);
@@ -229,24 +230,55 @@ export function createTrends() {
     patchText(nodes.topMeta, `${processes.length} images`);
   }
 
-  function renderFindings(findings) {
-    if (!findings.length) {
-      render(nodes.findings, emptyState("No sustained problems recorded", "Nothing crossed a threshold for long enough to be written down.", icons.ok));
+  const VERDICT_TONE = { helped: "ok", partial: "info", no_change: "warn" };
+  const ACTION_LABEL = { terminate: "End task", priority: "Lower priority", throttle: "Throttle" };
+
+  function renderIncidents(incidents) {
+    if (!incidents.length) {
+      render(nodes.findings, emptyState("No incidents recorded", "Nothing crossed a threshold for long enough to be written down.", icons.ok));
       patchText(nodes.findMeta, "");
       return;
     }
-    render(nodes.findings, el("div.log", {}, findings.map((finding) => {
-      let extra = null;
-      if (finding.culprits?.length) {
-        extra = el("div.pills", { style: { marginTop: "5px" } }, finding.culprits.slice(0, 4).map((culprit) => {
-          const chip = el("button.copybtn", { type: "button" }, [`${fmt.imageName(culprit.name)} · ${culprit.share || ""}`]);
-          chip.addEventListener("click", () => openProcessModal(culprit.pid));
-          return chip;
-        }));
+    render(nodes.findings, el("div.log", {}, incidents.map((incident) => {
+      const lead = incident.lead;
+      const span = incident.ongoing
+        ? `since ${fmt.dayTime(incident.start)} · still active`
+        : `${fmt.dayTime(incident.start)} → ${fmt.clock(incident.end)} · ${fmt.shortDuration(incident.duration_seconds)}`;
+      const who = lead
+        ? `Led by ${fmt.imageName(lead.name)}${lead.container?.name ? ` (in ${lead.container.name})` : ""} `
+          + `for ${lead.led} of ${incident.buckets} minute${incident.buckets === 1 ? "" : "s"}.`
+        : "No process was blamed.";
+      const extra = el("div", { style: { marginTop: "6px" } });
+      const chips = el("div.pills");
+      for (const culprit of (incident.culprits || []).slice(0, 4)) {
+        const chip = el("button.copybtn", { type: "button",
+          title: `Seen in ${culprit.buckets} of ${incident.buckets} minutes · opens whatever holds PID ${culprit.pid} now` },
+        [`${fmt.imageName(culprit.name)}${culprit.share ? ` · ${culprit.share}` : ""}`]);
+        const where = containerPill(culprit.container);
+        if (where) chip.append(where);
+        chip.addEventListener("click", () => openProcessModal(culprit.pid));
+        chips.append(chip);
       }
-      return logItem({ ts: finding.ts, severity: finding.severity, title: finding.title, text: fmt.clip(finding.detail, 170), extra });
+      for (const action of incident.actions || []) {
+        const verdict = action.verdict || {};
+        const label = `${ACTION_LABEL[action.action] || action.action} ${fmt.imageName(action.name || "?")} `
+          + `${fmt.clock(action.ts)} → ${verdict.outcome ? verdict.outcome.replace("_", " ") : "no verdict"}`;
+        const chip = pill(label, VERDICT_TONE[verdict.outcome] || null);
+        chip.title = verdict.text || "";
+        chips.append(chip);
+      }
+      if (incident.ongoing) chips.append(pill("ongoing", "warn"));
+      const peak = el("button.copybtn", { type: "button", title: "The processes recorded at this incident's worst minute" }, ["Processes at peak"]);
+      peak.addEventListener("click", () => inspectBucket(incident.peak_ts));
+      chips.append(peak);
+      extra.append(chips);
+      return logItem({
+        ts: incident.start, severity: incident.severity,
+        title: el("span", {}, [el("span.trunc", { text: incident.title }), el("span.faint", { style: { marginLeft: "8px", fontWeight: "400" }, text: span })]),
+        text: who, extra,
+      });
     })));
-    patchText(nodes.findMeta, `${findings.length} recorded`);
+    patchText(nodes.findMeta, `${incidents.length} incident${incidents.length === 1 ? "" : "s"}`);
   }
 
   async function inspectBucket(ts) {

@@ -245,18 +245,28 @@ export function createOverview() {
     try {
       const payload = await api("/api/fleet");
       fleetLoaded = true;
-      renderFleet(payload.nodes || []);
+      renderFleet(payload.nodes || [], payload.shared || []);
     } catch { /* transient; next tick retries */ } finally {
       fleetBusy = false;
     }
   }
 
-  function renderFleet(list) {
+  function renderFleet(list, shared) {
     const online = list.filter((n) => n.online).length;
+    // The same finding on several nodes in the same minute is one cause they
+    // share, not several culprits: say so above the cards.
+    const causes = shared.length ? el("div.shared", {}, shared.map((cause) => {
+      const body = el("span", {}, [
+        el("strong", { text: "Shared cause: " }),
+        document.createTextNode(`${cause.title} on ${cause.nodes.join(", ")} at the same time. `
+          + `This points at ${cause.hint} — not at a process on any of them.`),
+      ]);
+      return note(cause.severity === "critical" ? "crit" : "warn", body);
+    })) : null;
     readySlot(fleetSlot, section({
       title: "Fleet",
       meta: `${online} of ${list.length} online · click a node to view it`,
-      body: el("div.fleet", {}, list.map(fleetCard)),
+      body: el("div", {}, [causes, el("div.fleet", {}, list.map(fleetCard))]),
     }));
   }
 

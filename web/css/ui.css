@@ -450,6 +450,26 @@
 .culprit__name { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .culprit__pid { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); }
 .culprit__share { margin-left: auto; color: var(--fg); font-variant-numeric: tabular-nums; }
+/* "in <container>" chip; the glyph marks it as a place, not a state. */
+.pill--where { gap: 4px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill__glyph { font-size: 10px; opacity: 0.8; }
+.pname__where { margin-left: 6px; }
+/* Expected findings stay visible but read as background, not as alarm. */
+.finding[data-expected="true"] { opacity: 0.66; border-left-style: dashed; }
+.finding[data-expected="true"] .finding__title { font-weight: 500; }
+.finding__actions { margin-left: 4px; }
+.finding__blame { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); font-size: var(--fs-s); color: var(--fg-2); line-height: 1.5; }
+.finding__blame b { color: var(--fg-1); font-weight: 600; }
+.finding__blame.tone-warn b { color: var(--warn); }
+/* Verdict line after an action: the doctor keeps sampling and reports. */
+.verdict { margin-top: 10px; padding: 8px 10px; background: var(--bg-2); border-left: 2px solid var(--line-2); }
+.verdict .result { display: flex; align-items: flex-start; font-size: var(--fs-s); line-height: 1.5; }
+.verdict .result svg { margin-top: 3px; }
+/* Shared-cause notes above the fleet grid. */
+.shared { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+/* Day-of-week picker in the expectation dialog. */
+.daypick { display: flex; flex-wrap: wrap; gap: 4px; }
+.daypick .btn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 
 /* ── Offender row ──────────────────────────────────────────────────────── */
 .offender {

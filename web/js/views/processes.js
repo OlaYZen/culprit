@@ -19,7 +19,7 @@ import {
   combobox, emptyState, pendingSlot, readySlot, searchField, segmented, skeletonFigures, skeletonSection,
   switchControl,
 } from "../ui.js";
-import { figures, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { containerPill, figures, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const COLUMNS = [
   { key: "tree", label: "", sortable: false, width: "10px" },
@@ -220,7 +220,9 @@ export function createProcesses() {
     const filtered = view.query || view.user || view.hideIdle;
     patchText(nodes.meta, `${shown.length} of ${all.length}${filtered ? " (filtered)" : ""}`);
     patchText(nodes.foot, `Sampled directly from /proc in ${fmt.ms(payload.sample_ms)} — every process on the machine, not a subset.`
-      + `${payload.io_note ? ` ${payload.io_note}.` : ""}`);
+      + `${payload.io_note ? ` ${payload.io_note}.` : ""}`
+      + `${totals.containers ? ` ${totals.container_processes} process${totals.container_processes === 1 ? "" : "es"} in ${totals.containers} container${totals.containers === 1 ? "" : "s"}.` : ""}`
+      + `${payload.container_note ? ` ${payload.container_note}.` : ""}`);
     patchText(nodes.lead, `${fmt.count(totals.count)} processes across ${payload.cores ?? "?"} logical cores. `
       + "Click any row for command line, handles, sockets and per-thread times.");
 
@@ -275,8 +277,9 @@ export function createProcesses() {
     const mark = el("span.pname__mark", { text: fmt.monogram(proc.name) });
     const treeIndent = el("span.pname__tree");
     const label = el("span.pname__text");
-    cells.name.replaceChildren(el("div.pname", {}, [treeIndent, mark, label]));
-    return { tr, cells, label, mark, treeIndent, flags: {} };
+    const where = el("span.pname__where");
+    cells.name.replaceChildren(el("div.pname", {}, [treeIndent, mark, label, where]));
+    return { tr, cells, label, mark, treeIndent, where, flags: {} };
   }
 
   function updateRow(entry, proc, depth, scale) {
@@ -285,6 +288,12 @@ export function createProcesses() {
     patchAttr(entry.tr, "title", proc.exe || proc.name);
     patchText(entry.treeIndent, depth ? "│ ".repeat(depth - 1) + "└ " : "");
     patchText(entry.mark, fmt.monogram(proc.name));
+    // Container chip, rebuilt only when the container (or its name) changes.
+    const whereKey = proc.container ? `${proc.container.id}:${proc.container.name || ""}` : "";
+    if (entry.flags.where !== whereKey) {
+      entry.flags.where = whereKey;
+      entry.where.replaceChildren(containerPill(proc.container) || "");
+    }
 
     patchText(cells.pid, String(proc.pid));
     patchText(cells.username, proc.username || fmt.dash);

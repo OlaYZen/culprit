@@ -12,9 +12,14 @@
 import { el, patchAttr, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { drawGauge } from "../charts.js";
-import { store } from "../stream.js";
-import { emptyState, icons, pendingSlot, readySlot, skeletonSection, skeletonStatus } from "../ui.js";
+import { api, store } from "../stream.js";
+import {
+  emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
+  skeletonStatus, switchControl,
+} from "../ui.js";
 import { culpritRow, gaugeRow, offenderRow, pill, section, viewHead } from "./shared.js";
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const PRESSURE_EXPLAIN = {
   cpu: "Kernel-measured stall time: the fraction of wall time runnable tasks spent waiting "
@@ -146,7 +151,10 @@ export function createDoctor() {
     }
 
     const findings = diagnosis.findings || [];
-    patchText(nodes.findMeta, findings.length ? `${findings.length} active` : "none");
+    const expected = findings.filter((f) => f.expected).length;
+    const real = findings.length - expected;
+    patchText(nodes.findMeta, findings.length
+      ? `${real} active${expected ? ` · ${expected} expected` : ""}` : "none");
     if (!findings.length) {
       render(nodes.findings, emptyState("No sustained pressure",
         "Nothing has been above its threshold for long enough to matter. Momentary spikes are ignored on purpose.",
@@ -176,15 +184,35 @@ export function createDoctor() {
 
   function findingCard(finding) {
     const node = el("div.finding", { dataset: { severity: finding.severity } });
-    node.append(el("div.finding__head", {}, [
-      el("div.finding__title", { text: finding.title }),
-      el("div.finding__meta", {}, [
-        pill(finding.resource),
-        pill(finding.sustained_ticks ? `held ${finding.sustained_ticks} samples` : "just now",
-          finding.severity === "critical" ? "crit" : finding.severity === "warn" ? "warn" : "info"),
-      ]),
-    ]));
+    if (finding.expected) node.dataset.expected = "true";
+    const meta = el("div.finding__meta", {}, [
+      finding.external ? pill("outside this machine", "info") : null,
+      pill(finding.resource),
+      pill(finding.sustained_ticks ? `held ${finding.sustained_ticks} samples` : "just now",
+        finding.severity === "critical" ? "crit" : finding.severity === "warn" ? "warn" : "info"),
+    ]);
+    if (finding.expected) {
+      meta.append(pill(`expected · ${finding.expected.reason}`, "ok"));
+      meta.lastChild.title = `Marked as expected (${finding.expected.window}). Real severity: ${finding.severity_raw || "?"}.`;
+      const unmark = el("button.btn.btn--sm.finding__actions", { type: "button", title: "Stop treating this as expected" }, ["Unmark"]);
+      unmark.addEventListener("click", () => removeExpectation(finding.expected.id, unmark));
+      meta.append(unmark);
+    } else {
+      const mark = el("button.btn.btn--sm.finding__actions", { type: "button",
+        title: "Say this is normal — here is why, and when" }, ["Mark as expected…"]);
+      mark.addEventListener("click", () => openExpectDialog(finding));
+      meta.append(mark);
+    }
+    node.append(el("div.finding__head", {}, [el("div.finding__title", { text: finding.title }), meta]));
     node.append(el("div.finding__text", { text: finding.detail }));
+    if (finding.expected_overrun) {
+      const o = finding.expected_overrun;
+      node.append(el("div.finding__blame.tone-warn", {}, [
+        el("b", { text: "Overran its window. " }),
+        document.createTextNode(`This was expected (${o.reason}, ${o.window}) and is still active `
+          + `${fmt.isNum(o.minutes) ? `${o.minutes} min ` : ""}after the window ended.`),
+      ]));
+    }
 
     // Evidence numbers, so the claim is checkable.
     const entries = Object.entries(finding.evidence || {})
@@ -195,13 +223,135 @@ export function createDoctor() {
     }
 
     const culprits = finding.culprits || [];
+    if (finding.external) {
+      // Nobody on this machine is at fault: say who is, instead of ranking
+      // processes under a problem none of them caused.
+      node.append(el("div.finding__blame", {}, [
+        el("b", { text: "No process here is at fault. " }),
+        document.createTextNode(`The cause is ${finding.blame}.`),
+      ]));
+    }
     if (culprits.length) {
       const group = el("div.finding__culprits");
-      group.append(el("span.label", { text: `Leading contributors by ${finding.resource}` }));
+      group.append(el("span.label", { text: finding.victims
+        ? "Processes stuck waiting (victims, not culprits)"
+        : `Leading contributors by ${finding.resource}` }));
       culprits.forEach((culprit, index) => group.append(culpritRow(culprit, index)));
       node.append(group);
     }
     return node;
+  }
+
+  async function removeExpectation(id, button) {
+    setBusy(button, true, "Removing…");
+    try {
+      await api(`/api/expectations/${id}`, { method: "DELETE" });
+      button.replaceWith(el("span.faint.small", { text: "unmarked — applies from the next sample" }));
+    } catch (error) {
+      setBusy(button, false, "Unmark");
+      button.title = error.message;
+    }
+  }
+
+  /** "This is normal": reason, scope, optional culprit, optional daily window. */
+  function openExpectDialog(finding) {
+    const lead = (finding.culprits || [])[0];
+    const leadName = lead ? fmt.imageName(lead.name) : null;
+    const state = { node: store.node, culprit: leadName, window: false, days: new Set(), start: "02:00", end: "03:00" };
+
+    const reason = el("input", { type: "text", id: "exp-reason", "data-autofocus": "", autocomplete: "off",
+      placeholder: "e.g. nightly borg backup", "aria-describedby": "exp-reason-help" });
+    const reasonErr = el("div.field__err", { hidden: true });
+    const scope = segmented({ label: "Applies to",
+      options: [{ value: store.node, label: `This node (${store.node})` }, { value: "*", label: "All nodes" }],
+      value: store.node, onChange: (v) => { state.node = v; } });
+    const culpritSwitch = leadName ? switchControl({
+      label: `Only when ${leadName} leads it`, checked: true,
+      title: "Off: any process may lead it and it is still expected",
+      onChange: (v) => { state.culprit = v ? leadName : null; },
+    }) : null;
+
+    const timeRow = el("div.row", { style: { gap: "10px", alignItems: "center" } });
+    const startIn = el("input", { type: "time", value: state.start, "aria-label": "Window start" });
+    const endIn = el("input", { type: "time", value: state.end, "aria-label": "Window end" });
+    startIn.addEventListener("input", () => { state.start = startIn.value; });
+    endIn.addEventListener("input", () => { state.end = endIn.value; });
+    timeRow.append(el("div.input", { style: { width: "110px" } }, [startIn]), el("span.faint", { text: "to" }),
+      el("div.input", { style: { width: "110px" } }, [endIn]));
+    const days = el("div.daypick", { role: "group", "aria-label": "Days" });
+    DAY_NAMES.forEach((name, index) => {
+      const btn = el("button.btn.btn--sm", { type: "button", "aria-pressed": "false" }, [name]);
+      btn.addEventListener("click", () => {
+        if (state.days.has(index)) state.days.delete(index); else state.days.add(index);
+        btn.setAttribute("aria-pressed", state.days.has(index) ? "true" : "false");
+      });
+      days.append(btn);
+    });
+    const windowBody = el("div", { hidden: true, style: { marginTop: "8px" } }, [
+      timeRow,
+      el("div.faint.small", { style: { margin: "8px 0 4px" }, text: "On these days (none selected = every day). Times are the host's local clock." }),
+      days,
+    ]);
+    const windowSwitch = switchControl({
+      label: "Only during a daily window", checked: false,
+      onChange: (v) => { state.window = v; windowBody.hidden = !v; },
+    });
+
+    const body = el("div", {}, [
+      el("p", {}, [
+        document.createTextNode("Mark "),
+        el("b", { text: finding.title }),
+        document.createTextNode(" as expected. It stays visible with its evidence, but reads as normal instead of as a problem — until it runs past its window."),
+      ]),
+      el("div.field", { style: { marginTop: "12px" } }, [
+        el("label.field__label", { for: "exp-reason" }, [el("span", { text: "Reason" })]),
+        el("div.input", {}, [reason]),
+        el("div.field__help", { id: "exp-reason-help", text: "Shown next to the finding, so say what is running." }),
+        reasonErr,
+      ]),
+      el("div", { style: { marginTop: "12px" } }, [scope]),
+      culpritSwitch ? el("div", { style: { marginTop: "10px" } }, [culpritSwitch]) : null,
+      el("div", { style: { marginTop: "10px" } }, [windowSwitch]),
+      windowBody,
+    ]);
+    const result = el("div.result");
+    const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
+    const save = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" } }, ["Mark as expected"]);
+    const handle = openModal({
+      title: "Mark as expected", body, narrow: true,
+      footer: el("div", { style: { display: "contents" } }, [result, el("span.spacer"), cancel, save]),
+    });
+    if (!handle) return;
+    cancel.addEventListener("click", () => handle.close());
+    const submit = async () => {
+      reasonErr.hidden = true;
+      reason.closest(".input")?.classList.remove("is-invalid");
+      setBusy(save, true, "Saving…");
+      try {
+        await api("/api/expectations", {
+          method: "POST",
+          body: JSON.stringify({
+            node: state.node, key: finding.key, culprit: state.culprit, reason: reason.value,
+            days: state.window ? [...state.days].sort() : [],
+            start: state.window ? state.start : null, end: state.window ? state.end : null,
+          }),
+        });
+        inlineResult(result, "Saved — reads as expected from the next sample.", "ok");
+        setTimeout(() => handle.close(), 900);
+      } catch (error) {
+        const errors = error.payload?.field_errors || {};
+        if (errors.reason) {
+          reasonErr.textContent = errors.reason;
+          reasonErr.hidden = false;
+          reason.closest(".input")?.classList.add("is-invalid");
+          reason.focus();
+        }
+        inlineResult(result, errors.reason ? "See the field above." : (errors.start || errors.end || errors.days || error.message), "error");
+        setBusy(save, false, "Mark as expected");
+      }
+    };
+    save.addEventListener("click", submit);
+    reason.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } });
   }
 
   root.mount = () => { if (!built) build(); update(store.state); };
