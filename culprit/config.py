@@ -127,6 +127,22 @@ class Config:
     # wildcards, or IP literals -- no ports, the port is never compared.
     trusted_hosts: list[str] = field(default_factory=list)
 
+    # --- notifications (host only) ----------------------------------------
+    # Only *findings* are ever sent -- diagnoses that survived the sustain
+    # window -- never a raw threshold. Empty = channel off. See notify.py.
+    notify_ntfy_url: str = ""          # e.g. https://ntfy.sh/my-topic
+    notify_webhook_url: str = ""       # any endpoint accepting a JSON POST
+    notify_smtp_host: str = ""
+    notify_smtp_port: int = 587
+    notify_smtp_user: str = ""
+    notify_smtp_password: str = ""     # never returned by the API
+    notify_smtp_from: str = ""
+    notify_smtp_to: str = ""
+    notify_smtp_tls: bool = True       # STARTTLS (port 465 uses implicit TLS)
+    notify_min_severity: str = "warn"  # "warn" or "critical"
+    notify_resolved: bool = True       # send a follow-up when a finding clears
+    notify_offline: bool = True        # send when an agent stops reporting
+
     # --- ui ---
     ui: dict[str, Any] = field(default_factory=dict)
 
@@ -181,6 +197,48 @@ EDITABLE = {
     "allow_process_actions", "open_browser", "ui",
     "deploy_host", "agent_command",
     "trusted_proxies", "trusted_hosts",
+    "notify_ntfy_url", "notify_webhook_url", "notify_smtp_host",
+    "notify_smtp_port", "notify_smtp_user", "notify_smtp_password",
+    "notify_smtp_from", "notify_smtp_to", "notify_smtp_tls",
+    "notify_min_severity", "notify_resolved", "notify_offline",
+}
+
+# Text fields with a shape: the validator returns the cleaned value or
+# raises ValueError with a message the Settings form shows inline.
+def _url_or_empty(value: str) -> str:
+    value = value.strip()
+    if value and not value.startswith(("http://", "https://")):
+        raise ValueError("must start with http:// or https://")
+    if len(value) > 512:
+        raise ValueError("too long")
+    return value
+
+
+def _severity(value: str) -> str:
+    value = value.strip().lower()
+    if value not in ("warn", "critical"):
+        raise ValueError("expected 'warn' or 'critical'")
+    return value
+
+
+def _short_text(value: str) -> str:
+    value = value.strip()
+    if len(value) > 256:
+        raise ValueError("too long")
+    if any(c in value for c in "\r\n"):
+        raise ValueError("must be a single line")
+    return value
+
+
+TEXT_VALIDATORS: dict[str, Any] = {
+    "notify_ntfy_url": _url_or_empty,
+    "notify_webhook_url": _url_or_empty,
+    "notify_min_severity": _severity,
+    "notify_smtp_host": _short_text,
+    "notify_smtp_user": _short_text,
+    "notify_smtp_password": _short_text,
+    "notify_smtp_from": _short_text,
+    "notify_smtp_to": _short_text,
 }
 
 # Lists of text entries, validated by culprit.trust rather than by range.
@@ -217,6 +275,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "weight_gpu": (0, 10), "weight_faults": (0, 10), "weight_stuck": (0, 10),
     "event_lookback_days": (1, 3650),
     "event_max_per_source": (10, 5000),
+    "notify_smtp_port": (1, 65535),
 }
 
 
@@ -318,8 +377,11 @@ def update(patch: dict[str, Any], persist: bool = True) -> tuple[Config, list[st
                     value = float(value)
                 elif spec.type in ("str", str):
                     value = str(value).strip()
-            except (TypeError, ValueError):
-                errors.append(f"{key}: expected a number")
+                    if key in TEXT_VALIDATORS:
+                        value = TEXT_VALIDATORS[key](value)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{key}: {exc}" if key in TEXT_VALIDATORS
+                              else f"{key}: expected a number")
                 continue
             if key in LIMITS:
                 low, high = LIMITS[key]
