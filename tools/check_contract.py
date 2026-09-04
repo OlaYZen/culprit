@@ -73,11 +73,15 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].disk_latency_ms", "nodes[].net_down", "nodes[].net_up",
             "nodes[].findings", "nodes[].headline", "nodes[].hostname",
             "nodes[].uptime_seconds", "nodes[].process_count",
+            # Findings active on several nodes at once (one shared cause).
+            "shared",
         ],
     },
     "doctor": {
         "node:diagnosis": [
             "status", "severity", "headline", "pressure_mode",
+            # Host-side annotation: how many findings are marked expected.
+            "expected_count",
             "pressures.cpu", "pressures.mode",
             "pressures.detail.psi_cpu", "pressures.detail.psi_memory",
             "pressures.detail.psi_io",
@@ -88,14 +92,17 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "pressures.detail.disk_busy",
             "offenders[].pid", "offenders[].name", "offenders[].lag_score",
             "offenders[].lag_reasons", "offenders[].lag_breakdown",
+            "offenders[].container",
         ],
+        "/api/expectations": ["expectations"],
     },
     "processes": {
         "node:process_table": [
             "mode", "cores", "sample_ms", "by_state", "io_note",
             "totals.count", "totals.threads", "totals.handles",
             "totals.d_state", "totals.stuck", "totals.kernel_threads",
-            "totals.io_unreadable",
+            "totals.io_unreadable", "totals.containers",
+            "totals.container_processes", "container_note",
             "totals.working_set", "totals.read_bytes_sec", "totals.write_bytes_sec",
             "processes[].pid", "processes[].ppid", "processes[].name",
             "processes[].exe", "processes[].username", "processes[].lag_score",
@@ -106,6 +113,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "processes[].major_faults_sec", "processes[].run_delay_ms",
             "processes[].elapsed_seconds", "processes[].state",
             "processes[].stuck", "processes[].is_kthread", "processes[].is_self",
+            "processes[].container",
         ],
     },
     "services": {
@@ -227,6 +235,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "/api/history/series?since=0": ["available", "ts", "series", "count"],
         "/api/history/top?since=0": ["processes"],
         "/api/history/findings?since=0": ["findings"],
+        "/api/history/incidents?since=0": ["incidents", "bucket_seconds"],
+        "/api/history/actions?since=0": ["actions"],
     },
     "settings": {
         "/api/settings": [
@@ -238,6 +248,12 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.open_browser", "config.rollup_seconds",
             "config.deploy_host", "config.agent_command",
             "config.trusted_proxies", "config.trusted_hosts",
+            "config.notify_ntfy_url", "config.notify_webhook_url",
+            "config.notify_smtp_host", "config.notify_smtp_port",
+            "config.notify_smtp_user", "config.notify_smtp_password_set",
+            "config.notify_smtp_from", "config.notify_smtp_to",
+            "config.notify_smtp_tls", "config.notify_min_severity",
+            "config.notify_resolved", "config.notify_offline",
             "access.client", "access.peer", "access.host", "access.scheme",
             "access.via_proxy", "access.runtime_proxies", "access.always_hosts",
             "config.cpu_high", "config.cpu_queue_per_core",
@@ -251,6 +267,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.event_lookback_days", "config.event_max_per_source",
             "config.history_enabled", "limits", "editable",
         ],
+        "/api/notify/status": ["channels", "sent", "failed", "dropped",
+                               "last_sent", "last_error", "active_findings"],
     },
 }
 
