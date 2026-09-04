@@ -22,7 +22,7 @@
   .topbar > .topbar__tools { display: none; }
   .topbar__node { gap: 6px; flex: 1; justify-content: flex-end; }
   .topbar__status { margin-left: 0; }
-  .nodepick select { max-width: 40vw; }
+  .nodepick .combo__val { max-width: 40vw; }
 
   .view { padding: 14px 14px calc(var(--botnav-h) + 28px); }
   .view__head { margin-bottom: 16px; }

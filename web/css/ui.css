@@ -349,6 +349,32 @@
 
 .formrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
+/* ── Sub-navigation (pages inside one view) ────────────────────────────── */
+.subnav {
+  position: sticky; top: 0; z-index: 3;
+  display: flex; gap: 2px;
+  margin-bottom: var(--gap);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto; scrollbar-width: none;
+}
+.subnav::-webkit-scrollbar { display: none; }
+.subnav__item {
+  display: inline-flex; align-items: center; gap: 7px;
+  flex: 0 0 auto;
+  padding: 9px 12px 8px;
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  font-size: var(--fs-s); font-weight: 500;
+  color: var(--fg-2); white-space: nowrap;
+  transition: color var(--t) var(--ease), border-color var(--t) var(--ease);
+}
+.subnav__item > svg { width: 14px; height: 14px; flex: 0 0 auto; opacity: 0.8; }
+.subnav__item:hover { color: var(--fg-1); }
+.subnav__item.is-on { color: var(--fg-1); border-bottom-color: var(--accent); }
+.subnav__item.is-on > svg { opacity: 1; color: var(--accent-1); }
+.subnav__item:focus-visible { outline-offset: -2px; border-radius: 0; }
+
 /* ── Combobox (searchable select) ──────────────────────────────────────── */
 .combo { position: relative; }
 .combo__btn {

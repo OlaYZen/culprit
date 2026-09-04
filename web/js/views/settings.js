@@ -11,13 +11,22 @@
  *   on the range and returns per-field errors, rendered verbatim.
  *
  * Settings that take effect immediately (history on/off) are toggle switches.
+ *
+ * The view is split into pages behind a sticky sub-navigation (General,
+ * Deployment, Sampling, Account, Network, Notifications, Expected findings)
+ * because one long column meant scrolling past the tuning form to reach
+ * anything else. Deployment is its own page, second from the left: enrolling
+ * a machine is the thing people come here for most.
+ * The page is in the hash (`#settings/network`) so it can be linked to and
+ * survives a reload; the router hands it to `setPage`.
  */
 
 import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  emptyState, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection, switchControl,
+  checkbox, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection,
+  subnav, switchControl,
 } from "../ui.js";
 import { figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
 
@@ -86,6 +95,16 @@ const GROUPS = [
   },
 ];
 
+const PAGES = [
+  { key: "general", label: "General", icon: icons.sliders },
+  { key: "deployment", label: "Deployment", icon: icons.deploy },
+  { key: "sampling", label: "Sampling", icon: icons.timer },
+  { key: "account", label: "Account", icon: icons.user },
+  { key: "network", label: "Network", icon: icons.shield },
+  { key: "notifications", label: "Notifications", icon: icons.bell },
+  { key: "expected", label: "Expected findings", icon: icons.calendar },
+];
+
 export function createSettings() {
   const root = el("div.view", { dataset: { view: "settings" } });
   const nodes = {};
@@ -102,6 +121,9 @@ export function createSettings() {
 
   const figSlot = el("div");
   const togglesSlot = el("div");
+  // Feedback for the immediate switches lives next to them, on their page —
+  // not in the tuning form's summary on another page.
+  const immediateResult = el("div.result");
   const accountSlot = el("div");
   const trustSlot = el("div");
   const deploySlot = el("div");
@@ -119,7 +141,28 @@ export function createSettings() {
   }, [saveButton, revertButton, summary]));
   const infoRow = el("div.cols.cols--2");
   const nodesSlot = el("div");
-  root.append(el("div.stack", {}, [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, notifySlot, expectSlot, form, infoRow, nodesSlot]));
+
+  const pages = {
+    general: el("div.stack", {}, [figSlot, togglesSlot, infoRow]),
+    deployment: el("div.stack", {}, [deploySlot]),
+    sampling: el("div.stack", {}, [form]),
+    account: el("div.stack", {}, [accountSlot]),
+    network: el("div.stack", {}, [trustSlot, nodesSlot]),
+    notifications: el("div.stack", {}, [notifySlot]),
+    expected: el("div.stack", {}, [expectSlot]),
+  };
+  let page = "general";
+  // The tabs only write the hash; the router reads it back into setPage, so
+  // Back / Forward and a pasted link all go through one path.
+  const tabs = subnav({ label: "Settings pages", items: PAGES, value: page, onChange: (key) => { location.hash = `#settings/${key}`; } });
+  root.append(tabs, ...Object.values(pages));
+  root.setPage = (key) => {
+    if (key && !pages[key]) return;
+    if (key) page = key;
+    for (const [name, node] of Object.entries(pages)) node.hidden = name !== page;
+    tabs.setValue(page);
+  };
+  root.setPage(page);
 
   async function load() {
     head.setPending(true);
@@ -178,7 +221,7 @@ export function createSettings() {
   function renderToggles() {
     readySlot(togglesSlot, section({
       title: "Immediate settings",
-      body: el("div.row", { style: { gap: "22px" } }, [
+      body: el("div.row", { style: { gap: "22px", flexWrap: "wrap" } }, [
         switchControl({ label: "Record history to disk", checked: config.persist_history,
           title: "Writes rolled-up samples to a local SQLite file", onChange: (v) => applyImmediate({ persist_history: v }) }),
         switchControl({ label: "Allow process actions", checked: config.allow_process_actions,
@@ -190,6 +233,7 @@ export function createSettings() {
         switchControl({ label: "Label containers by name", checked: (config.ui || {}).container_label !== "id",
           title: "On: \"docker: portainer\". Off: \"docker: f566c851aa3c\" (the id). Names need the agent to read the runtime's socket; otherwise the id shows either way",
           onChange: (v) => applyImmediate({ ui: { ...(config.ui || {}), container_label: v ? "name" : "id" } }) }),
+        immediateResult,
       ]),
       foot: "Switches rather than checkboxes because they take effect the moment you flip them — there is nothing to submit.",
     }));
@@ -415,7 +459,7 @@ export function createSettings() {
           fieldRow({ id: hostInput.id, label: "Host address agents report to", unit: "URL or IP:port", input: hostInput,
             help: "The address the deploy command tells an agent to POST reports to. Leave blank to use the address you reached this dashboard on." }),
           fieldRow({ id: cmdInput.id, label: "Runner command", unit: "prepended to the command", input: cmdInput,
-            help: "What runs the agent bundle. Use “sudo ./agent.sh” to run the agent as root, which unlocks full port and process attribution." }),
+            help: "What runs the agent bundle. Use “sudo ./agent.sh” so the agent installs as a system service running as root, which unlocks full port and process attribution; plain ./agent.sh makes a user service." }),
         ]),
         el("div", {}, [
           subhead("Deploy command preview"),
@@ -461,13 +505,14 @@ export function createSettings() {
       el("div", { style: { marginTop: "14px" } }, [segmented({ label: "Send from", value: minSeverity,
         options: [{ value: "warn", label: "Warnings up" }, { value: "critical", label: "Critical only" }],
         onChange: (v) => { minSeverity = v; } })]),
-      el("div.row", { style: { gap: "18px", marginTop: "14px", flexWrap: "wrap" } }, [
-        switchControl({ label: "Follow up when a finding clears", checked: toggles.notify_resolved, onChange: (v) => { toggles.notify_resolved = v; } }),
-        switchControl({ label: "Tell me when an agent stops reporting", checked: toggles.notify_offline, onChange: (v) => { toggles.notify_offline = v; } }),
+      // Checkboxes, not switches: nothing here applies until Save notifications.
+      el("div.row", { style: { gap: "14px", marginTop: "14px", flexWrap: "wrap" } }, [
+        checkbox({ label: "Follow up when a finding clears", checked: toggles.notify_resolved, onChange: (v) => { toggles.notify_resolved = v; } }),
+        checkbox({ label: "Tell me when an agent stops reporting", checked: toggles.notify_offline, onChange: (v) => { toggles.notify_offline = v; } }),
       ]),
     );
     columns[1].append(el("div", { style: { marginTop: "12px" } }, [
-      switchControl({ label: "STARTTLS", checked: toggles.notify_smtp_tls, title: "Upgrade the SMTP connection to TLS (not used on port 465, which is TLS from the start)",
+      checkbox({ label: "STARTTLS", checked: toggles.notify_smtp_tls, title: "Upgrade the SMTP connection to TLS (not used on port 465, which is TLS from the start)",
         onChange: (v) => { toggles.notify_smtp_tls = v; } }),
     ]));
 
@@ -743,12 +788,12 @@ export function createSettings() {
       config = payload.config;
       // Views that read preferences (container labels) listen for this.
       store.ingest({ config: payload.config }, ["config"]);
-      inlineResult(summary, "Applied.", "ok");
-      setTimeout(() => summary.replaceChildren(), 2200);
+      inlineResult(immediateResult, "Applied.", "ok");
+      setTimeout(() => immediateResult.replaceChildren(), 2200);
       renderInfo();
       renderStats();
     } catch (error) {
-      inlineResult(summary, error.message, "error");
+      inlineResult(immediateResult, error.message, "error");
     }
   }
 

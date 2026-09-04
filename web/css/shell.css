@@ -46,6 +46,7 @@
   border: 1px solid var(--line-2);
   border-radius: var(--r);
   background: var(--bg-2);
+  position: relative;
 }
 .nodepick[hidden] { display: none; }
 .nodepick__dot {
@@ -55,23 +56,27 @@
   flex: 0 0 auto;
 }
 .nodepick__dot[data-state="offline"] { background: var(--crit); }
-.nodepick select {
-  appearance: none;
-  -webkit-appearance: none;
+/* The combobox sits inside the pill, so it drops its own border and box:
+   the pill is the control. `.combo` is static so the popup positions
+   against the pill and lines up with its edges. */
+.nodepick:hover { border-color: var(--fg-3); }
+.nodepick:focus-within { border-color: var(--accent); }
+.nodepick .combo { position: static; }
+.nodepick .combo__btn {
+  min-width: 0;
+  height: 100%;
+  padding: 0;
   border: 0;
   background: transparent;
-  padding-right: 16px;
   font-weight: 500;
-  font-size: var(--fs-s);
   color: var(--fg-1);
-  cursor: pointer;
-  max-width: 200px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b8d94' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M7 10l5 5 5-5'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0 center;
-  background-size: 12px;
 }
-.nodepick select:focus { outline: none; }
+.nodepick .combo__btn:focus-visible { outline: none; }
+.nodepick .combo__val { max-width: 200px; }
+.nodepick .combo__pop {
+  left: -1px;
+  min-width: max(calc(100% + 2px), 200px);
+}
 
 .topbar__host {
   display: inline-flex;
@@ -281,6 +286,7 @@
 /* ── Layout grids ──────────────────────────────────────────────────────── */
 .stack { display: flex; flex-direction: column; gap: var(--gap); }
 .stack > * { min-width: 0; }
+.stack[hidden] { display: none; }   /* a page behind a sub-navigation */
 
 .cols { display: grid; gap: var(--gap); align-items: start; }
 .cols > * { min-width: 0; }

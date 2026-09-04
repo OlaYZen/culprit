@@ -38,6 +38,14 @@ export const icons = {
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 0 1-13.7 5.6"/><path d="M4 12a8 8 0 0 1 13.7-5.6"/><path d="M17.5 3.5v3.5H14M6.5 20.5V17H10"/></svg>',
   plug: '<svg viewBox="0 0 24 24"><path d="M9 3v6M15 3v6M6 9h12v3a6 6 0 0 1-12 0z"/><path d="M12 18v3"/></svg>',
   offline: '<svg viewBox="0 0 24 24"><path d="M2 8.5a15 15 0 0 1 20 0M5.5 12a10 10 0 0 1 13 0M9 15.5a5 5 0 0 1 6 0M12 19v.5"/><path d="M3 3l18 18"/></svg>',
+  // Settings pages.
+  sliders: '<svg viewBox="0 0 24 24"><path d="M4 7h9M19 7h1M4 17h3M13 17h7"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg>',
+  deploy: '<svg viewBox="0 0 24 24"><rect x="3" y="14" width="18" height="7" rx="1.5"/><path d="M12 3v8M8.5 6.5L12 3l3.5 3.5M6.5 17.5h.5"/></svg>',
+  timer: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7.5"/><path d="M12 13.5l3-3M9.5 2.5h5M12 2.5V6"/></svg>',
+  user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M4.5 21c0-4 3.4-6.5 7.5-6.5s7.5 2.5 7.5 6.5"/></svg>',
+  shield: '<svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3.2 8.2-7.5 9.5-4.3-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+  bell: '<svg viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
 };
 
 const toneIcon = (tone) => ({
@@ -418,6 +426,36 @@ export function segmented({ label, options, value, onChange }) {
   return node;
 }
 
+/* ══ Sub-navigation ════════════════════════════════════════════════════ */
+/**
+ * Pages inside one view (Settings): a row of tabs that sticks to the top of
+ * the scroller, so a long view becomes several short ones and the tab you
+ * want is always one click away instead of a screen of scrolling. Only one
+ * page is shown at a time; `setValue` moves the highlight without firing.
+ */
+export function subnav({ label, items, value, onChange }) {  // items: {key, label, icon?}
+  const node = el("nav.subnav", { "aria-label": label || "Pages" });
+  const buttons = new Map();
+  for (const item of items) {
+    const button = el("button.subnav__item", {
+      type: "button", dataset: { page: item.key }, "aria-current": item.key === value ? "page" : null,
+    }, [item.icon ? frag(item.icon) : null, el("span", { text: item.label })]);
+    if (item.key === value) button.classList.add("is-on");
+    button.addEventListener("click", () => { node.setValue(item.key); onChange(item.key); });
+    buttons.set(item.key, button);
+    node.append(button);
+  }
+  node.setValue = (next) => {
+    for (const [key, button] of buttons) {
+      const on = key === next;
+      button.classList.toggle("is-on", on);
+      if (on) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    }
+  };
+  return node;
+}
+
 /* ══ Toggle switch ═════════════════════════════════════════════════════ */
 /** For independent settings that take effect immediately — no submit step. */
 export function switchControl({ label, checked, onChange, title }) {
@@ -427,6 +465,23 @@ export function switchControl({ label, checked, onChange, title }) {
     input,
     el("span.toggle__track", {}, [el("span.toggle__knob")]),
     el("span", { text: label }),
+  ]);
+  input.addEventListener("change", () => onChange(input.checked));
+  node.setChecked = (next) => { input.checked = !!next; };
+  return node;
+}
+
+/**
+ * A checkbox, for a choice that only applies when a Save / Confirm button is
+ * pressed (uxgoodpatterns: checkboxes for grouped selection with submit — a
+ * switch would promise an immediate effect the form does not deliver).
+ * Same markup as the rows of `checkTree`, so it looks like one family.
+ */
+export function checkbox({ label, checked, onChange, title }) {
+  const input = el("input", { type: "checkbox" });
+  input.checked = !!checked;
+  const node = el("label.check", { title: title || "" }, [
+    input, el("span.check__box"), el("span", { text: label }),
   ]);
   input.addEventListener("change", () => onChange(input.checked));
   node.setChecked = (next) => { input.checked = !!next; };
@@ -464,9 +519,9 @@ export function searchField({ placeholder, label, onInput }) {
  * Combobox for lists of ~10 or more options. Types to filter, shows "No
  * results", clears the search on close, keeps showing the selected value.
  */
-export function combobox({ label, options, value, onChange, allLabel = "All" }) {
+export function combobox({ label, options, value, onChange, allLabel = "All", ariaLabel = null }) {
   const valueNode = el("span.combo__val");
-  const button = el("button.combo__btn", { type: "button" });
+  const button = el("button.combo__btn", { type: "button", "aria-label": ariaLabel, "aria-haspopup": "listbox" });
   button.append(valueNode);
   button.insertAdjacentHTML("beforeend", icons.caret);
 
@@ -486,8 +541,13 @@ export function combobox({ label, options, value, onChange, allLabel = "All" }) 
   let cursor = 0;
 
   const labelFor = (val) => (val === null || val === undefined)
-    ? allLabel
+    ? (allLabel ?? "")
     : items.find((o) => String(o.value) === String(val))?.label ?? String(val);
+  // `allLabel: null` means there is no "everything" choice (the node picker:
+  // every view describes exactly one machine).
+  const choices = () => (allLabel === null ? items : [{ value: null, label: allLabel, count: null }, ...items]);
+  const isCurrent = (option) => (option.value === null && current === null)
+    || String(option.value) === String(current);
 
   const paint = () => {
     valueNode.replaceChildren();
@@ -497,7 +557,7 @@ export function combobox({ label, options, value, onChange, allLabel = "All" }) 
 
   const renderList = () => {
     const query = search.value.trim().toLowerCase();
-    const shown = [{ value: null, label: allLabel, count: null }, ...items]
+    const shown = choices()
       .filter((o) => !query || String(o.label).toLowerCase().includes(query));
     list.replaceChildren();
     if (!shown.length) {
@@ -514,14 +574,13 @@ export function combobox({ label, options, value, onChange, allLabel = "All" }) 
       if (option.count !== null && option.count !== undefined) {
         item.append(el("span.count", { text: String(option.count) }));
       }
-      const selected = (option.value === null && current === null)
-        || String(option.value) === String(current);
-      item.classList.toggle("is-selected", selected);
+      item.classList.toggle("is-selected", isCurrent(option));
       item.classList.toggle("is-cursor", index === cursor);
       item.addEventListener("click", () => {
         current = option.value;
         paint();
         close();
+        button.focus();
         onChange(current);
       });
       list.append(item);
@@ -545,7 +604,7 @@ export function combobox({ label, options, value, onChange, allLabel = "All" }) 
 
   button.addEventListener("click", () => (pop.hidden ? open() : close()));
   search.addEventListener("input", () => { cursor = 0; renderList(); });
-  search.addEventListener("keydown", (event) => {
+  const keys = (event) => {
     const shown = $$(".combo__opt", list);
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -560,7 +619,8 @@ export function combobox({ label, options, value, onChange, allLabel = "All" }) 
       close();
       button.focus();
     }
-  });
+  };
+  search.addEventListener("keydown", keys);
 
   node.setOptions = (next) => { items = next; if (!pop.hidden) renderList(); paint(); };
   node.setValue = (next) => { current = next; paint(); };

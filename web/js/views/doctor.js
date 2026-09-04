@@ -14,8 +14,8 @@ import * as fmt from "../util/format.js";
 import { drawGauge } from "../charts.js";
 import { api, store } from "../stream.js";
 import {
-  emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
-  skeletonStatus, switchControl,
+  checkbox, emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
+  skeletonStatus,
 } from "../ui.js";
 import { changeList, containerPill, culpritRow, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
 
@@ -450,7 +450,8 @@ export function createDoctor() {
     const scope = segmented({ label: "Applies to",
       options: [{ value: store.node, label: `This node (${store.node})` }, { value: "*", label: "All nodes" }],
       value: store.node, onChange: (v) => { state.node = v; } });
-    const culpritSwitch = leadName ? switchControl({
+    // Checkboxes, not switches: these apply when Mark as expected is pressed.
+    const culpritSwitch = leadName ? checkbox({
       label: `Only when ${leadName} leads it`, checked: true,
       title: "Off: any process may lead it and it is still expected",
       onChange: (v) => { state.culprit = v ? leadName : null; },
@@ -481,7 +482,7 @@ export function createDoctor() {
       el("div.faint.small", { style: { margin: "8px 0 4px" }, text: "On these days (none selected = every day). Times are the host's local clock." }),
       days,
     ]);
-    const windowSwitch = switchControl({
+    const windowSwitch = checkbox({
       label: "Only during a daily window", checked: state.window,
       onChange: (v) => { state.window = v; windowBody.hidden = !v; },
     });
