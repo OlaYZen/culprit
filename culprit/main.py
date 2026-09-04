@@ -30,7 +30,11 @@ from . import config as config_module
 from . import trust
 from .auth import SESSION_COOKIE, Auth, ensure_default_user
 from .db import LOCAL_NODE, History
+from .expect import Expectations
+from .expect import validate as validate_expectation
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
+from .notify import Notifier
+from .verdict import ActionVerifier
 from .sampler import LIVE_KEYS, Sampler
 from .state import Broker, Store
 from .util import is_elevated
@@ -44,11 +48,28 @@ sampler: Sampler | None = None
 auth: Auth | None = None
 registry: NodeRegistry | None = None
 commands: CommandBroker | None = None
+expectations: Expectations | None = None
+verifier: ActionVerifier | None = None
+notifier: Notifier | None = None
+
+
+async def _sweep_loop() -> None:
+    """Housekeeping the ingest path cannot do: verdicts whose node went quiet,
+    notifications for findings that resolved or nodes that stopped reporting."""
+    while True:
+        await asyncio.sleep(15.0)
+        try:
+            if verifier is not None:
+                verifier.sweep()
+            if notifier is not None:
+                notifier.sweep()
+        except Exception:  # noqa: BLE001 -- housekeeping must not die
+            log.exception("sweep failed")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global history, auth, registry, commands
+    global history, auth, registry, commands, expectations, verifier, notifier
     cfg = config_module.load()
     logging.basicConfig(
         level=logging.INFO,
@@ -70,6 +91,13 @@ async def lifespan(app: FastAPI):
     registry = NodeRegistry(history, rollup_seconds=cfg.rollup_seconds,
                             history_top=cfg.history_top_processes)
     commands = CommandBroker()
+    expectations = Expectations(history)
+    verifier = ActionVerifier(history)
+    notifier = Notifier()
+    registry.expectations = expectations
+    registry.verifier = verifier
+    registry.notifier = notifier
+    sweeper = asyncio.get_running_loop().create_task(_sweep_loop())
     # This host is an aggregator + dashboard only: it ingests external agents
     # and serves the UI, and no longer samples its own machine. So the local
     # sampler is not started and the host never appears as a node -- there is
@@ -94,6 +122,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        sweeper.cancel()
         if registry is not None:
             registry.flush_all()
         if sampler is not None:
@@ -430,23 +459,79 @@ async def api_node_process_detail(
                                 {"pid": pid, "extras": extras or ""})
 
 
+async def _verified_action(request: Request, name: str, action: str,
+                           payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a process action on an agent and start watching what happens.
+
+    The node's diagnosis *before* the action is the baseline; the verifier
+    then follows the node's next diagnoses and reaches a verdict (helped /
+    no change / ...), readable at /api/nodes/{name}/actions/{verify_id}. The
+    action itself is unchanged -- the verdict is extra, never a gate.
+    """
+    assert registry is not None and verifier is not None
+    baseline = (registry.get_snapshot(name) or {}).get("diagnosis") or {}
+    result = await _agent_command(name, action, payload)
+    result = dict(result) if isinstance(result, dict) else {"result": result}
+    try:
+        verify_id = verifier.start(
+            name, action, int(payload.get("pid") or 0) or None,
+            str(result.get("name") or "") or None,
+            str(result.get("unit") or "") or None, result, baseline,
+            getattr(request.state, "user", None))
+    except Exception:  # noqa: BLE001 -- the action succeeded; say so regardless
+        log.exception("could not start verdict watch")
+        verify_id = None
+    result["verify_id"] = verify_id
+    log.info("%s pid %s on '%s' by %s -> %s", action, payload.get("pid"), name,
+             getattr(request.state, "user", "?"),
+             "ok" if result.get("ok", True) else result.get("reason"))
+    return result
+
+
 @app.post("/api/nodes/{name}/processes/{pid}/terminate")
 async def api_node_terminate(
-    name: str, pid: int,
+    request: Request, name: str, pid: int,
     force: bool = Body(False, embed=True),
     confirm: bool = Body(False, embed=True),
 ) -> dict[str, Any]:
     if not confirm:
         raise HTTPException(400, "confirm must be true for a terminate request")
-    return await _agent_command(name, "terminate",
-                                {"pid": pid, "force": force})
+    return await _verified_action(request, name, "terminate",
+                                  {"pid": pid, "force": force})
 
 
 @app.post("/api/nodes/{name}/processes/{pid}/priority")
 async def api_node_priority(
-    name: str, pid: int, level: str = Body(..., embed=True),
+    request: Request, name: str, pid: int, level: str = Body(..., embed=True),
 ) -> dict[str, Any]:
-    return await _agent_command(name, "priority", {"pid": pid, "level": level})
+    return await _verified_action(request, name, "priority",
+                                  {"pid": pid, "level": level})
+
+
+_THROTTLE_LEVELS = ("half", "quarter", "release")
+
+
+@app.post("/api/nodes/{name}/processes/{pid}/throttle",
+          summary="Cap the CPU/IO of the unit a process runs in")
+async def api_node_throttle(
+    request: Request, name: str, pid: int, level: str = Body(..., embed=True),
+) -> dict[str, Any]:
+    if level not in _THROTTLE_LEVELS:
+        raise HTTPException(422, f"level must be one of {', '.join(_THROTTLE_LEVELS)}")
+    return await _verified_action(request, name, "throttle",
+                                  {"pid": pid, "level": level})
+
+
+@app.get("/api/nodes/{name}/actions/{action_id}",
+         summary="Progress and verdict of an action taken on this node")
+async def api_node_action(name: str, action_id: int) -> dict[str, Any]:
+    assert verifier is not None
+    watch = verifier.get(action_id)
+    if watch is None or watch["node"] != name:
+        raise HTTPException(404, "no such action being watched (verdicts are "
+                                 "kept for 15 minutes; older ones are in "
+                                 "/api/history/actions)")
+    return watch
 
 
 @app.get("/api/nodes", summary="Enrolled agent nodes and their status")
@@ -462,7 +547,8 @@ async def api_fleet() -> dict[str, Any]:
     every node's full snapshot into the browser. The host is an aggregator and
     is not itself a node."""
     assert registry is not None
-    return {"nodes": registry.fleet(), "ts": time.time()}
+    return {"nodes": registry.fleet(), "shared": registry.shared_causes(),
+            "ts": time.time()}
 
 
 # ------------------------------------------------- agent management (web UI)
@@ -516,6 +602,10 @@ def _docker_command(request: Request, token: str) -> str:
         " -v /var/lib/ubuntu-advantage:/var/lib/ubuntu-advantage:ro"
         " -v /var/log/journal:/var/log/journal:ro -v /etc/machine-id:/etc/machine-id:ro"
         " -v /run/systemd:/run/systemd:ro -v /run/dbus:/run/dbus:ro"
+        # Read-only Docker socket: lets the agent name the containers its
+        # culprits run in (see collectors/containers.py) -- without it they
+        # show as runtime + short id, with a note saying so.
+        " -v /var/run/docker.sock:/var/run/docker.sock:ro"
         " ghcr.io/olayzen/culprit-agent:latest"
     )
 
@@ -580,6 +670,8 @@ async def api_agent_delete(name: str, request: Request) -> dict[str, Any]:
         raise HTTPException(404, f"no agent named '{name}'")
     log.info("agent '%s' deleted by %s", name,
              getattr(request.state, "user", "?"))
+    if notifier is not None:
+        notifier.forget_node(name)
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name,
             "note": "stored history for this node is kept"}
@@ -829,6 +921,97 @@ async def api_history_findings(
             "findings": history.findings(start, limit, node=node)}
 
 
+@app.get("/api/history/incidents",
+         summary="Past findings folded into incidents (start, end, peak, culprits)")
+async def api_history_incidents(
+    since: float | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    node: str = Query(LOCAL_NODE),
+) -> dict[str, Any]:
+    if history is None:
+        raise HTTPException(503, "history is not initialised")
+    start = since if since is not None else time.time() - 24 * 3600
+    cfg = config_module.get()
+    return {"since": start, "node": node, "bucket_seconds": cfg.rollup_seconds,
+            "incidents": history.incidents(start, limit, node=node,
+                                           bucket_seconds=cfg.rollup_seconds)}
+
+
+@app.get("/api/history/actions", summary="Actions taken and their verdicts")
+async def api_history_actions(
+    since: float | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    node: str | None = Query(None),
+) -> dict[str, Any]:
+    if history is None:
+        raise HTTPException(503, "history is not initialised")
+    start = since if since is not None else time.time() - 24 * 3600
+    return {"since": start, "node": node,
+            "actions": history.actions(start, node=node, limit=limit)}
+
+
+# ------------------------------------------------------------- expectations
+@app.get("/api/expectations", summary="Findings marked as expected")
+async def api_expectations() -> dict[str, Any]:
+    assert expectations is not None
+    return {"expectations": expectations.list()}
+
+
+@app.post("/api/expectations", summary="Mark a finding as expected")
+async def api_expectation_add(request: Request,
+                              payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    assert history is not None and expectations is not None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "expected a JSON object")
+    clean, errors = validate_expectation(payload)
+    if errors:
+        return JSONResponse(status_code=422,
+                            content={"ok": False, "field_errors": errors})
+    if len(expectations.list()) >= 200:
+        raise HTTPException(409, "too many expectations (200); remove some first")
+    try:
+        new_id = history.add_expectation(
+            clean["node"], clean["key"], clean["culprit"], clean["reason"],
+            clean["days"], clean["start"], clean["end"],
+            getattr(request.state, "user", None))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(503, f"could not save: {exc}")
+    expectations.reload()
+    log.info("expectation %d added by %s: %s on %s (%s)", new_id,
+             getattr(request.state, "user", "?"), clean["key"], clean["node"],
+             clean["reason"])
+    return JSONResponse({"ok": True, "id": new_id, **clean})
+
+
+@app.delete("/api/expectations/{expectation_id}",
+            summary="Stop treating a finding as expected")
+async def api_expectation_remove(expectation_id: int,
+                                 request: Request) -> dict[str, Any]:
+    assert history is not None and expectations is not None
+    if not history.remove_expectation(expectation_id):
+        raise HTTPException(404, "no such expectation")
+    expectations.reload()
+    log.info("expectation %d removed by %s", expectation_id,
+             getattr(request.state, "user", "?"))
+    return {"ok": True, "id": expectation_id}
+
+
+# ------------------------------------------------------------ notifications
+@app.get("/api/notify/status", summary="Notification channels and delivery stats")
+async def api_notify_status() -> dict[str, Any]:
+    assert notifier is not None
+    return notifier.status()
+
+
+@app.post("/api/notify/test", summary="Send a test message on every channel")
+async def api_notify_test(request: Request) -> dict[str, Any]:
+    assert notifier is not None
+    log.info("notification test requested by %s",
+             getattr(request.state, "user", "?"))
+    return await asyncio.get_running_loop().run_in_executor(
+        None, notifier.send_test)
+
+
 @app.get("/api/history/events", summary="Stored event-log entries")
 async def api_history_events(
     since: float | None = Query(None),
@@ -916,6 +1099,16 @@ async def api_put_settings(
     """
     if not isinstance(patch, dict) or not patch:
         raise HTTPException(400, "expected a non-empty object of settings")
+    # The SMTP password is write-only: the form never has it, so an empty
+    # string means "leave it", and only an explicit null clears it.
+    if "notify_smtp_password" in patch:
+        if patch["notify_smtp_password"] is None:
+            patch["notify_smtp_password"] = ""
+        elif patch["notify_smtp_password"] == "":
+            patch.pop("notify_smtp_password")
+            if not patch:
+                return JSONResponse({"ok": True, "persisted": persist,
+                                     "config": _public_config()})
     if "trusted_proxies" in patch or "trusted_hosts" in patch:
         blocked = _lockout_guard(request, patch)
         if blocked:
@@ -1084,6 +1277,10 @@ def _public_config() -> dict[str, Any]:
     payload = cfg.to_dict()
     # The absolute DB path is not the browser's business.
     payload.pop("db_path", None)
+    # The SMTP password never leaves the server; the form only learns
+    # whether one is set.
+    payload["notify_smtp_password_set"] = bool(payload.get("notify_smtp_password"))
+    payload["notify_smtp_password"] = ""
     payload["history_enabled"] = bool(history and history.ready
                                       and history.recording)
     payload["history_error"] = history.error if history else None

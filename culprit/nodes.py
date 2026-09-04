@@ -170,6 +170,20 @@ class _Node:
         self.bucket_worst = "ok"
 
 
+# Finding keys whose simultaneous appearance on several nodes points at
+# something they share rather than at any one of them, with what that is.
+SHARED_CAUSES = {
+    "psi_io": "storage these nodes share (a SAN, a NAS, or one hypervisor's "
+              "disks), or the path to it",
+    "disk_latency": "storage these nodes share (a SAN, a NAS, or one "
+                    "hypervisor's disks), or the path to it",
+    "disk_queue": "storage these nodes share, or the path to it",
+    "stuck_procs": "a file server they all mount, or the network to it",
+    "cpu_steal": "the hypervisor: these guests sit on one contended host",
+    "swap_slow": "one hypervisor's slow disks backing every guest's swap",
+}
+
+
 class NodeRegistry:
     def __init__(self, history: History, rollup_seconds: int = 60,
                  history_top: int = 8) -> None:
@@ -178,6 +192,12 @@ class NodeRegistry:
         self.history_top = history_top
         self._nodes: dict[str, _Node] = {}
         self._lock = threading.Lock()
+        # Host-side observers of each node's diagnosis, in the order they
+        # run: expectations rewrite the verdict (an expected finding is not
+        # a problem), then the verifier and notifier read the result.
+        self.expectations: Any = None    # culprit.expect.Expectations
+        self.verifier: Any = None        # culprit.verdict.ActionVerifier
+        self.notifier: Any = None        # culprit.notify.Notifier
 
     # ----------------------------------------------------------------- ingest
     def ingest(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -208,7 +228,22 @@ class NodeRegistry:
                 node.agent_version = meta["version"]
             settings = dict(node.settings)
             merged = node.snapshot
+            diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
 
+        if isinstance(diagnosis, dict):
+            # This report carried a fresh diagnosis (delta reports resend it
+            # only when it changed). Annotate in place -- the snapshot is
+            # host-owned after sanitise -- then let the observers see it.
+            for hook in (self.expectations, self.verifier, self.notifier):
+                if hook is None:
+                    continue
+                try:
+                    if hook is self.expectations:
+                        hook.annotate(name, diagnosis, now)
+                    else:
+                        hook.observe(name, diagnosis, now)
+                except Exception:  # noqa: BLE001 -- an observer must never break ingest
+                    log.exception("diagnosis observer failed for %s", name)
         self._accumulate(node, merged, now)
         if self.history.ready and "events" in snapshot:
             # Only when the events section was actually in this report --
@@ -340,6 +375,41 @@ class NodeRegistry:
                 node = self._nodes.get(str(meta["name"]))
                 snapshot = node.snapshot if node else {}
             out.append(summarise_snapshot(meta, snapshot))
+        return out
+
+    def shared_causes(self) -> list[dict[str, Any]]:
+        """Findings active on several online nodes at once, for the keys
+        where that pattern means a shared cause. Three machines stalling on
+        IO in the same minute are not three culprits: they are one NAS."""
+        by_key: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            for node in self._nodes.values():
+                meta = self._meta(node)
+                if not meta["online"]:
+                    continue
+                diagnosis = _d(node.snapshot.get("diagnosis"))
+                findings = diagnosis.get("findings")
+                if not isinstance(findings, list):
+                    continue   # a hostile or old agent: not a list, not a verdict
+                for finding in findings:
+                    if not isinstance(finding, dict) or finding.get("expected"):
+                        continue
+                    key = str(finding.get("key"))
+                    if key not in SHARED_CAUSES or \
+                            finding.get("severity") not in ("warn", "critical"):
+                        continue
+                    entry = by_key.setdefault(key, {
+                        "key": key, "title": _short(finding.get("title")),
+                        "nodes": [], "severity": "warn",
+                        "hint": SHARED_CAUSES[key],
+                    })
+                    entry["nodes"].append(node.name)
+                    if finding.get("severity") == "critical":
+                        entry["severity"] = "critical"
+        out = [e for e in by_key.values() if len(e["nodes"]) >= 2]
+        for entry in out:
+            entry["nodes"].sort()
+        out.sort(key=lambda e: (-len(e["nodes"]), e["key"]))
         return out
 
     def flush_all(self) -> None:
