@@ -325,6 +325,15 @@ export async function openProcessModal(pid) {
   }
 
   body.replaceChildren(processDetailBody(detail));
+  // What happened the last times this process (or its unit) was acted on:
+  // the verdict store is the memory. Host-side and cheap; it never delays
+  // the detail itself, and stays absent when there is no record.
+  const recordSlot = el("div");
+  body.append(recordSlot);
+  api(`/api/history/record?node=${encodeURIComponent(store.node)}&name=${encodeURIComponent(detail.name || "")}`
+    + `&unit=${encodeURIComponent(detail.unit?.name || "")}`)
+    .then((payload) => { const block = trackRecord(payload); if (block) recordSlot.replaceChildren(block); })
+    .catch((error) => console.warn("track record unavailable:", error));
   wireCopy(body);
   buildProcessFooter(handle.footer, detail);
 }
@@ -507,6 +516,33 @@ function processDetailBody(detail) {
   }).node);
 
   return wrap;
+}
+
+const ACTION_WORD = { terminate: "End task", priority: "Lower priority", throttle: "Throttle" };
+const OUTCOME_WORD = { helped: "helped", partial: "partly helped", no_change: "no change", moot: "nothing to verify", unknown: "unknown", pending: "still watching" };
+
+/** "Throttle: helped 3 of 3, last 2 h ago · End task: no change 2 of 2." */
+function trackRecord(payload) {
+  const record = payload?.record || {};
+  const actions = Object.keys(record);
+  if (!actions.length) return null;
+  const rows = actions.map((action) => {
+    const entry = record[action];
+    const outcomes = Object.entries(entry.outcomes || {}).sort((a, b) => b[1] - a[1])
+      .map(([outcome, n]) => `${OUTCOME_WORD[outcome] || outcome} ${n}`).join(", ");
+    const tone = entry.last_outcome === "helped" ? "ok" : entry.last_outcome === "no_change" ? "warn" : null;
+    const value = el("span", {}, [
+      pill(outcomes, tone),
+      el("span.faint.small", { text: ` of ${entry.tries} · last ${fmt.ago(entry.last_ts)}`, title: entry.last_text || "" }),
+    ]);
+    return kv(`${ACTION_WORD[action] || action}${entry.same_unit ? " (unit)" : ""}`, value);
+  });
+  return el("div", { style: { marginTop: "10px" } }, [
+    subhead("Track record"),
+    el("div.faint.small", { style: { margin: "2px 0 6px" },
+      text: "How the last actions on this process name (or its unit) on this node were judged afterwards." }),
+    kvs(rows),
+  ]);
 }
 
 function buildProcessFooter(footer, detail) {
