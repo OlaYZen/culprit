@@ -335,7 +335,7 @@ def test_startup(r: Runner, tmp: Path) -> None:
     r.check("no users: 0.0.0.0 refused",
             "refusing" in (refuse_exposed_without_users("0.0.0.0", empty) or ""))
     r.check("no users: a LAN address refused",
-            refuse_exposed_without_users("192.168.1.5", empty) is not None)
+            refuse_exposed_without_users("192.0.2.10", empty) is not None)
     gate = Auth(empty)
     r.check("no users: gate is open", gate.gate("/api/snapshot") == "open")
     r.check("no users: agent path still agent-gated", gate.gate("/api/agents/report") == "agent")
@@ -456,10 +456,10 @@ def test_trust(r: Runner) -> None:
     # `local` pinned: the machine running this check has its own addresses,
     # which must not decide whether 192.168.1.6 passes.
     mine = frozenset(trust.LOOPBACK_HOSTS | {"10.7.7.7", "boxname"})
-    hosts = trust.policy([], ["dash.example.com", "*.lan", "192.168.1.5", "::1"])
+    hosts = trust.policy([], ["dash.example.com", "*.lan", "192.0.2.10", "::1"])
     for header, ok in (("dash.example.com", True), ("DASH.example.com:8787", True),
                        ("dash.example.com.", True), ("a.lan", True), ("x.y.lan", True),
-                       ("lan", False), ("evil.example", False), ("192.168.1.5:8787", True),
+                       ("lan", False), ("evil.example", False), ("192.0.2.10:8787", True),
                        ("192.168.1.6", False), ("[::1]:8787", True), ("localhost", True),
                        ("127.0.0.1:8787", True), ("", False), ("dash.example.com.evil", False),
                        ("10.7.7.7:8787", True), ("BoxName", True)):

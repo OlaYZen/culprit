@@ -22,7 +22,10 @@ CULPRIT_HOST=0.0.0.0 ./culprit.sh [--run]   # bind all interfaces so remote agen
 .venv/bin/python -m culprit agents add <name>   # enroll an agent (prints token ONCE)
 
 # Agent: deploy the sibling ../culprit-agent checkout to the target server, then:
-cd ../culprit-agent && ./agent.sh <host-url> <token>   # bootstrap venv (psutil only) + save config + run
+cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL + token (saved to agent.json,
+                                         # checked against the host), then OFFERS a systemd service (system
+                                         # unit under sudo, user unit otherwise); --run for the foreground,
+                                         # --run <url> <token> when nothing is saved, --configure to change
 ../culprit-agent/sync-package.sh   # maintainer: refresh ../culprit-agent/culprit/ from this package
 ```
 
