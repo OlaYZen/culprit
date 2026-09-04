@@ -732,3 +732,13 @@
 .offenders { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 0 28px; }
 .offenders > .offender + .offender { border-top: 1px solid var(--line); }
 @media (max-width: 900px) { .offenders { grid-template-columns: 1fr; } }
+
+/* ── Change log rows (What changed / coincides-with lists) ─────────────── */
+.changes { display: flex; flex-direction: column; }
+.changes__row { display: grid; grid-template-columns: 96px 64px minmax(0, 1fr); gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: var(--fs-s); align-items: baseline; }
+.changes__row:last-child { border-bottom: 0; }
+.changes__when { color: var(--fg-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.changes__kind { color: var(--fg-3); font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.changes__title { color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.changes__row[data-severity="warn"] .changes__title { color: var(--warn); }
+.finding__culprits .changes { margin-top: 2px; }

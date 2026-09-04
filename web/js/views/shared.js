@@ -158,6 +158,44 @@ export function logItem({ ts, when, title, text, severity, tags, extra }) {
   return el("div.log__item", { dataset: severity ? { severity } : {} }, [whenNode, main]);
 }
 
+/* ══ Change log rows ═══════════════════════════════════════════════════ */
+const CHANGE_SOURCE_LABEL = {
+  units: "unit", timers: "timer", mounts: "mount", ports: "port", network: "network",
+  processes: "process", containers: "container", limits: "limit", packages: "packages",
+  logins: "login", system: "system",
+};
+
+/**
+ * "What changed" list: one line per change, with when it happened relative to
+ * the moment in question ("4 min before", "30 s after") or as a clock time.
+ * These are facts with a time, never causes — the label says "coincides with".
+ */
+export function changeList(changes, { relativeTo = true } = {}) {
+  const list = el("div.changes");
+  for (const change of changes || []) {
+    const offset = Number(change.offset_seconds);
+    let when;
+    if (relativeTo && fmt.isNum(offset)) {
+      const magnitude = Math.abs(offset);
+      const span = magnitude < 60 ? `${Math.round(magnitude)} s` : fmt.shortDuration(magnitude);
+      when = offset <= 0 ? `${span} before` : `${span} after`;
+    } else {
+      when = fmt.dayTime(change.ts);
+    }
+    const whenNode = el("span.changes__when", { text: when });
+    if (change.exact === false) {
+      whenNode.textContent += " ≈";
+      whenNode.title = "Noticed on the next sampling pass — the change happened up to 20 s earlier.";
+    }
+    list.append(el("div.changes__row", { dataset: { severity: change.severity || "info" } }, [
+      whenNode,
+      el("span.changes__kind", { text: CHANGE_SOURCE_LABEL[change.source] || change.source || "" }),
+      el("span.changes__title", { text: change.title || "", title: change.detail || change.title || "" }),
+    ]));
+  }
+  return list;
+}
+
 /* ══ Offender / culprit rows ═══════════════════════════════════════════ */
 const BREAKDOWN_LABELS = {
   cpu: "CPU", memory: "Memory", disk: "Disk I/O",
@@ -328,6 +366,15 @@ function processDetailBody(detail) {
       This process has sat in D-state for several samples — blocked inside the
       kernel${detail.wchan ? ` in <code>${fmt.esc(detail.wchan)}</code>` : ""}, almost always on
       dead storage or an unreachable network mount. It cannot be killed until the I/O completes.`,
+    { margin: true }));
+  }
+
+  if (detail.kernel) {
+    // A kernel thread: say what it is before anyone reaches for "End task".
+    const explained = detail.kernel;
+    wrap.append(note("info", `<strong>Kernel thread: ${fmt.esc(explained.role || "")}.</strong> ${fmt.esc(explained.why || "")}`
+      + (explained.look_at ? ` <span class="faint">Look at: ${fmt.esc(explained.look_at)}.</span>` : "")
+      + (explained.symptom_of ? ` <span class="faint">Its activity is a symptom of ${fmt.esc(explained.symptom_of)} pressure — the culprits are the processes driving that.</span>` : ""),
     { margin: true }));
   }
 
