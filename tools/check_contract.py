@@ -92,8 +92,16 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "pressures.detail.disk_busy",
             "offenders[].pid", "offenders[].name", "offenders[].lag_score",
             "offenders[].lag_reasons", "offenders[].lag_breakdown",
-            "offenders[].container",
+            "offenders[].container", "offenders[].unit",
         ],
+        # Per-unit pressure/limits and the kernel's own state feed the
+        # findings (unit_throttled / unit_memlimit / unit_stalled /
+        # raid_sync / softirq_core) and the "suffering" and "changes"
+        # attachments; the sections themselves are what the views read.
+        "node:cgroups": ["available", "units", "total_units"],
+        "node:kernel": ["available", "mdstat.available", "mdstat.arrays",
+                        "irq.available", "irq.cores", "irq.top"],
+        "node:changes": ["available", "events", "count", "recording_since"],
         "/api/expectations": ["expectations"],
     },
     "processes": {
@@ -113,7 +121,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "processes[].major_faults_sec", "processes[].run_delay_ms",
             "processes[].elapsed_seconds", "processes[].state",
             "processes[].stuck", "processes[].is_kthread", "processes[].is_self",
-            "processes[].container",
+            "processes[].container", "processes[].unit",
         ],
     },
     "services": {
@@ -124,6 +132,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "summary.total", "summary.user_units",
             "problems", "timers", "cgroup_attribution",
         ],
+        # "Pressure and limits per unit" section.
+        "node:cgroups": ["available", "units", "total_units"],
     },
     "storage": {
         # store.volumes -> snapshot.volumes; store.disk (the view's "activity")
@@ -194,6 +204,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "updates.events", "policy.events",
             "pending_reboot.pending", "pending_reboot.reasons",
         ],
+        # "What changed" section: the agent's change log.
+        "node:changes": ["available", "events", "count", "recording_since"],
     },
     "sessions": {
         "node:events": [
