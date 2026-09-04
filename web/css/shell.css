@@ -42,20 +42,13 @@
   align-items: center;
   gap: 8px;
   height: 28px;
-  padding: 0 8px 0 10px;
+  padding: 0 8px 0 9px;
   border: 1px solid var(--line-2);
   border-radius: var(--r);
   background: var(--bg-2);
   position: relative;
 }
 .nodepick[hidden] { display: none; }
-.nodepick__dot {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: var(--ok);
-  flex: 0 0 auto;
-}
-.nodepick__dot[data-state="offline"] { background: var(--crit); }
 /* The combobox sits inside the pill, so it drops its own border and box:
    the pill is the control. `.combo` is static so the popup positions
    against the pill and lines up with its edges. */

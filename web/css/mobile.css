@@ -23,6 +23,12 @@
   .topbar__node { gap: 6px; flex: 1; justify-content: flex-end; }
   .topbar__status { margin-left: 0; }
   .nodepick .combo__val { max-width: 40vw; }
+  /* The pill is at the right edge here, so a popup hung off its left edge
+     would run off screen: pin it under the top bar across the full width. */
+  .nodepick .combo__pop {
+    position: fixed; top: calc(var(--topbar-h) + 4px); left: 10px; right: 10px;
+    min-width: 0; max-width: none;
+  }
 
   .view { padding: 14px 14px calc(var(--botnav-h) + 28px); }
   .view__head { margin-bottom: 16px; }
