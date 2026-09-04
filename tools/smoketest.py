@@ -357,8 +357,9 @@ def main() -> int:
 
     # The port map reuses the unit pid->unit map, so feed it what the service
     # collector just produced -- exactly as the sampler's slow tick does.
+    ports_collector = ports.PortsCollector()
     port_map = timed("PortsCollector.sample",
-                     lambda: ports.PortsCollector().sample(
+                     lambda: ports_collector.sample(
                          service_map=(svc or {}).get("by_pid")), budget_ms=200)
     if port_map and port_map["available"]:
         t = port_map["totals"]
@@ -369,8 +370,27 @@ def main() -> int:
             procs = entry["processes"]
             who = (procs[0]["name"] if procs
                    else ("(other user)" if entry["unattributed"] else "-"))
+            queue = entry.get("accept_queue")
+            depth = (f"{queue['current']}/{queue['max'] if queue['max'] is not None else '?'}"
+                     if queue else "-")
             note(f"  :{entry['port']:<5} {'/'.join(entry['protocols']):<7} "
-                 f"{entry['scope']:<7} {who:<20} kill={entry['killable']}")
+                 f"{entry['scope']:<7} {who:<20} kill={entry['killable']} "
+                 f"backlog={depth}{' DROPPING' if entry.get('turned_away') else ''}")
+        # Turned-away clients: the rates need two readings, so sample again
+        # after a beat and report the counters that then have a rate.
+        time.sleep(1.0)
+        backlog = (ports_collector.sample(service_map=(svc or {}).get("by_pid"))
+                   or {}).get("backlog") or {}
+        if backlog.get("available"):
+            note("turned away: "
+                 + ", ".join(f"{k}={backlog.get(f'{k}_sec')}/s"
+                             for k in ("overflows", "drops", "syn_drops", "syn_cookies"))
+                 + f" over {backlog.get('interval')}s; somaxconn={backlog.get('somaxconn')}; "
+                 + ("backlog maxima from ss" if backlog.get("queues_available")
+                    else f"{YELLOW}no backlog maxima{RESET}: {backlog.get('queues_reason')}")
+                 + (f"; full while overflowing: {backlog['turned_away']}" if backlog.get("turned_away") else ""))
+        else:
+            note(f"{YELLOW}turned-away counters unavailable{RESET}: {backlog.get('reason')}")
     elif port_map:
         note(f"{YELLOW}port map unavailable{RESET}: {port_map.get('reason')}")
 
