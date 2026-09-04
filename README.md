@@ -68,7 +68,7 @@ and states the verdict in plain words ("IO pressure fell 100% → 5%; the findin
 cleared in 40 s", or "no change: `bash` was not the culprit, the next candidate
 is `rsync`").
 
-Four more things follow from that loop:
+Seven more things follow from that loop:
 
 - **It names the container, not the shim.** A runaway process inside Docker,
   Podman or Kubernetes is labelled with its container (and image, and compose
@@ -86,6 +86,27 @@ Four more things follow from that loop:
   backup, 02:00–03:00, led by `borg`) and it reads as expected instead of as a
   problem, until it overruns its window. Nothing is inferred; a person wrote it
   down.
+- **It sees pressure inside one unit.** cgroup v2 keeps the same PSI files
+  for every service and container, so an idle machine with one service
+  crawling is diagnosed as *"`nginx.service` is stalled on IO 40% of the time
+  while the machine is at 3%"*, ranked among *its* processes. The most common
+  reason turns out to be a cap: *"hitting its CPU quota in 100% of periods
+  (20% of one core)"* or *"at its memory limit (97% of 512 MB)"*, with the
+  cap's origin named, including a runtime `set-property` cap that Culprit's own
+  Throttle left behind and nobody released.
+- **It tells you what changed.** Units started, stopped or restarted, timers
+  that fired, mounts, listeners, logins, package upgrades, quota changes,
+  containers, and processes that appeared and stayed are written down with
+  their time. Every finding carries what changed in the ten minutes before it
+  began, labelled *coincides with, not proof of cause*; incidents in Trends
+  carry the same.
+- **It explains the kernel.** `kworker/u8:3+flush-252:0` at 40% becomes
+  *"writeback for device 252:0: the write reaching the disk, later than the
+  process that did it"*; `kswapd0` is named a symptom of memory pressure, not
+  a culprit; `ksoftirqd/2` pinned becomes *"core 2 is busy servicing
+  interrupts for virtio1-input.0"* with the IRQ named; a RAID resync or a
+  degraded array, dm-crypt's CPU cost, and a SCSI device being reset are
+  reported as what they are, with progress where there is any.
 
 ---
 
@@ -101,7 +122,9 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | Tells **problem** from merely **busy** (kernel PSI) | ● | ○ static thresholds | ○ | ◑ | ○ |
 | **Act** from the UI (kill port, End task, renice, throttle) and **verify** the action helped | ● | ○ | ○ | ○ | ○ |
 | Names the **container** behind a PID | ● | ○ | ○ | ◑ | ○ |
-| Says when the cause is **outside the machine** (steal, thermal, NFS) | ● | ○ | ○ | ○ | ○ |
+| Says when the cause is **outside the machine** (steal, thermal, NFS, RAID rebuild, interrupts) | ● | ○ | ○ | ○ | ○ |
+| Pressure and caps **inside one unit / container** (cgroup PSI, quota, memory limit) | ● | ○ | ○ | ◑ | ○ |
+| Says **what changed** before a finding began | ● | ○ | ○ | ○ | ◑ logs |
 | Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
 | **Setup** | one script, minutes | server + DB + agents + templates | services + exporters + dashboards | quick | heavy ingest pipeline |
@@ -233,7 +256,9 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
 | **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, and a **one-click kill** with the same guards as End task |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
-| **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup** |
+| **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
+| **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
+| **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
 | **Events** | From journald: OOM kills, segfaults & core dumps, hung-task reports, disk/filesystem and MCE hardware errors, unit failures, unclean shutdowns, failed sign-ins, package history, crash artefacts, and pending-reboot state |
 | **Sessions** | Sign-in history from logind paired on session id, **current sessions with SSH logins named** (user + remote host), lock state, boots and shutdowns |
 | **Sync** | Syncthing, rclone, OneDrive, Nextcloud, Dropbox, plus an **inotify watch-exhaustion** panel: the failure that silently breaks sync while every status light stays green |
@@ -282,6 +307,39 @@ resource's pressure halved), *partly* (some cleared; the rest is named, with who
 leads it now), *no change* (with the next candidate), or *nothing to verify*
 (nothing was under pressure). Verdicts are stored with the action and shown on
 the incident in Trends.
+
+**Inside one unit.** Every unit's cgroup carries its own `cpu.pressure`,
+`memory.pressure` and `io.pressure`, its `cpu.max` quota with `cpu.stat`'s
+count of throttled periods, and `memory.max` with `memory.events`. Three
+findings come from that, each confined to the unit and ranking only its own
+processes: *hitting its CPU quota* (throttled in ≥25% of scheduling periods;
+the detail says whether the cap is the unit's configuration or a runtime
+`systemctl set-property` drop-in, which is what Throttle creates and what a
+reboot removes), *at its memory limit* (≥95% of `memory.max`, or the kernel
+hitting the limit), and *stalled inside* (the unit's stall time over the
+machine's threshold while the machine as a whole is under half of it). An OOM
+kill confined to a unit is reported as such instead of as a machine-wide one.
+When the whole machine is stalled, the machine-level finding lists the units
+stalled hardest, from their own PSI, as the victims' side of the same number.
+
+**The kernel, explained.** Kernel threads never rank as culprits (kswapd being
+busy is a symptom of memory pressure, not its cause), but they are no longer a
+bare name either: each active one carries what it is and what it is a symptom
+of, on its row and in its detail. Four kernel-side causes become findings of
+their own: a RAID resync / check / recovery / reshape from `/proc/mdstat` (with
+percent, speed and ETA; `info` unless disk pressure is up, and *degraded, no
+rebuild* is critical), a core pinned by `ksoftirqd` (with the busiest interrupt
+on that core named from `/proc/interrupts`), dm-crypt's CPU cost (ranking the
+processes doing the IO that is being encrypted), and the SCSI error handler
+resetting a device that stopped answering.
+
+**What changed.** Each finding records when it began and carries the change
+log's entries from the ten minutes before, as *coincides with*. The change log
+is the agent's own record (a ring of the last six hours), built by diffing the
+sections the tiers already produce; the host stores what it receives, so an
+incident's "what changed just before it began" survives an agent restart.
+Nothing is inferred from proximity: a timer that fired 30 s before an IO stall
+is listed, not accused.
 
 **Expected findings.** A person can mark a finding as expected, for one node or
 all, optionally only when a named process leads it, optionally only in a daily
@@ -351,13 +409,18 @@ disk), ~230 processes, 209 systemd units, a 1.3 GB journal:
 | Tier | Interval | Steady-state cost |
 |---|---|---|
 | fast · cpu, mem, PSI, gpu, disk, net | 1 s | ~2-4 ms |
-| proc · full table + lag scoring | 2 s | ~25-40 ms |
+| proc · full table, per-unit cgroups, kernel state + lag scoring | 2 s | ~35-55 ms |
 | slow · units + cgroups, mounts, sockets, probes, sync | 20 s | ~0.5-1.2 s |
 | events · journal, crash files, pending reboot | 120 s | ~0.6-1 s warm |
 
 **Total: well under 5% of one core, ~65 MB resident.** A watched machine's agent
 depends only on psutil and the standard library, opens no ports, and sends a few
 KB/s (delta-compressed: unchanged sections aren't resent).
+
+Those numbers are measured, not promised: `tools/perf.py` runs the real sampler
+for five minutes and prints each tier's cold, median and p90 tick cost next to
+this table (`--compress` shrinks the slow and events cadences for a one-minute
+check), so you can see whether the claims hold on your machine.
 
 The engineering leans on measurement, not habit: a direct `/proc` scan beats
 psutil for the process table (**8 ms vs 45 ms**) and carries signals its iterator
