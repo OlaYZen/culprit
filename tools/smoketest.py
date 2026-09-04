@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from culprit import config as config_module  # noqa: E402
 from culprit import linux  # noqa: E402
-from culprit.collectors import cgroups, disks, events, gpu, kernel, network  # noqa: E402
+from culprit.collectors import ceilings, cgroups, disks, events, gpu, kernel, network  # noqa: E402
 from culprit.collectors import ports, processes, services, sync, sysinfo  # noqa: E402
 from culprit.collectors.changes import ChangeLog  # noqa: E402
 from culprit.collectors.cpu_mem import CpuMemoryCollector  # noqa: E402
@@ -251,13 +251,21 @@ def main() -> int:
                  f"run_delay={detail.get('run_delay_total_ms')}ms total")
 
     print("\n--- slow tier " + "-" * 58)
-    volumes = timed("VolumeCollector.sample", disks.VolumeCollector().sample,
+    volumes = timed("VolumeCollector.sample",
+                    lambda: disks.VolumeCollector().sample(
+                        processes=result["processes"] if result else None),
                     budget_ms=500)
     if volumes:
         for volume in volumes["volumes"]:
+            fc = volume.get("forecast") or {}
             note(f"{volume['mountpoint']:<12} {volume['fstype']:<6} "
                  f"{volume['percent']:>5.1f}% used  free={_mb(volume['free'])} "
-                 f"(+{_mb(volume['reserved'])} root-reserved)")
+                 f"(+{_mb(volume['reserved'])} root-reserved)  growth="
+                 f"{fc.get('trend') or fc.get('reason')}  writers="
+                 f"{[(w['name'], round(w['write_bytes_sec'])) for w in volume.get('writers', [])][:3]}"
+                 f"  held_deleted={len(volume.get('held_deleted', []))}")
+        if volumes.get("writers_note"):
+            note(f"{YELLOW}{volumes['writers_note']}{RESET}")
         for skip in volumes["skipped"]:
             note(f"{YELLOW}skipped{RESET} {skip['device']}: {skip['reason']}")
         for medium in volumes["media"]:
@@ -296,6 +304,16 @@ def main() -> int:
     explained = [(p["name"], p["kernel"]["role"]) for p in
                  (result["processes"] if result else []) if p.get("kernel")]
     note(f"kernel threads explained (active now): {explained[:4] or 'none active'}")
+
+    ceil = timed("CeilingCollector.sample",
+                 lambda: ceilings.CeilingCollector().sample(
+                     processes=result["processes"] if result else None), budget_ms=80)
+    if ceil:
+        note(f"{ceil['watched']} ceilings watched, {len(ceil['limits'])} past half-way; "
+             f"{ceil['fds_unreadable']} processes' fds not readable; conntrack="
+             f"{ceil['conntrack'].get('current')}/{ceil['conntrack'].get('max')}")
+        note("OOM killer would take first: "
+             + ", ".join(f"{v['name']} (score {v['oom_score']})" for v in ceil["oom"]["next"][:3]))
 
     svc_collector = services.ServiceCollector()
     svc = timed("ServiceCollector.sample (first)", svc_collector.sample,

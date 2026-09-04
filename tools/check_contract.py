@@ -102,6 +102,10 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "node:kernel": ["available", "mdstat.available", "mdstat.arrays",
                         "irq.available", "irq.cores", "irq.top"],
         "node:changes": ["available", "events", "count", "recording_since"],
+        # Ceilings + the OOM killer's ranking (slow tier).
+        "node:ceilings": ["available", "limits", "watched", "fds_unreadable",
+                          "conntrack.available", "oom.available", "oom.next",
+                          "oom.protected"],
         "/api/expectations": ["expectations"],
     },
     "processes": {
@@ -144,6 +148,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "volumes.volumes[].used", "volumes.volumes[].free",
             "volumes.volumes[].reserved",
             "volumes.volumes[].percent", "volumes.volumes[].readonly",
+            # Fill forecast + who writes there (+ deleted-but-held files).
+            "volumes.volumes[].forecast.available", "volumes.volumes[].writers",
+            "volumes.volumes[].held_deleted", "volumes.writers_gated",
             "volumes.media[].name", "volumes.media[].model",
             "volumes.media[].interface", "volumes.media[].media_type",
             "volumes.media[].size", "volumes.media[].firmware",
