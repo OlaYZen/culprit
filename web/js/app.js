@@ -125,8 +125,6 @@ function updateNodePicker(state) {
     nodePicker.setValue(store.node ?? null);
   }
 
-  const chosen = nodes.find((n) => n.name === store.node);
-  patchAttr(bind["node-dot"], "data-state", !store.node ? null : chosen?.online ? null : "offline");
 }
 
 function updateNodeStale(state) {
