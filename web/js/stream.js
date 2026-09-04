@@ -57,6 +57,9 @@ class Store {
     this.everConnected = false;
     this.lastFrameAt = 0;
     this._nodePoll = null;
+    // Each machine's sections as they were when the view left it, by node
+    // name, so coming back is instant (see setNode).
+    this._snapshots = new Map();
   }
 
   /* ------------------------------------------------------------- node switch */
@@ -66,20 +69,37 @@ class Store {
 
   async setNode(name) {
     if (name === this.node) return;
+    if (this.node) this._remember(this.node);
     this.node = name;
     clearInterval(this._nodePoll);
     this._nodePoll = null;
     this.state.node_meta = null;
-    // Drop the previous machine's sections so every view falls back to its
-    // skeleton until the new node's first snapshot lands, instead of showing
-    // the old machine's numbers under the new machine's name.
+    // Drop the previous machine's sections: the old machine's numbers must
+    // never show under the new machine's name. A machine seen earlier in this
+    // session gets its last sections straight back, so every view paints real
+    // numbers (a few seconds old at most) instead of a skeleton while the fresh
+    // snapshot is fetched; a machine never viewed before still skeletons.
     for (const key of SECTIONS) if (key !== "config") delete this.state[key];
+    const cached = name ? this._snapshots.get(name) : null;
+    if (cached) Object.assign(this.state, cached);
     // Every view's charts hold the previous node's history; they listen for
     // this and clear, so two machines' lines never blend into one trace.
     this.emit("node");
     if (!name) return;   // nothing selected (no agents yet) -> views show empty
     await this._pollNode();
     this._armNodePoll();
+  }
+
+  /** Keep the sections currently in state under this node's name. Only what
+   *  the node actually has is kept, so a switch-away during a still-loading
+   *  first visit stores nothing and the next visit skeletons as it should. */
+  _remember(node) {
+    const kept = {};
+    for (const key of SECTIONS) {
+      if (key !== "config" && this.state[key] !== undefined) kept[key] = this.state[key];
+    }
+    if (Object.keys(kept).length) this._snapshots.set(node, kept);
+    else this._snapshots.delete(node);
   }
 
   /** Auto-select a node when none is chosen or the chosen one has vanished: the
