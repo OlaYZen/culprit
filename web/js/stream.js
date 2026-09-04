@@ -22,7 +22,7 @@
 const SECTIONS = [
   "system", "cpu", "memory", "psi", "gpu", "disk", "network", "pressures",
   "process_table", "diagnosis", "volumes", "services", "network_detail",
-  "ports", "sync", "events", "cgroups", "kernel", "changes", "config",
+  "ports", "sync", "events", "cgroups", "kernel", "changes", "ceilings", "config",
 ];
 
 class Store {

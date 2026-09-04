@@ -129,6 +129,66 @@ class Expectations:
         with self._lock:
             self._rows = rows
 
+    def suggest(self, node: str, days: int = 14) -> list[dict[str, Any]]:
+        """Findings that recur at the same time of day, led by the same
+        process, on several distinct days -- offered as candidates for
+        "mark as expected". A person still confirms; nothing is inferred
+        into the live diagnosis."""
+        now = time.time()
+        incidents = self.history.incidents(now - days * 86400, limit=1000, node=node)
+        groups: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+        for incident in incidents:
+            if incident.get("severity") not in ("warn", "critical"):
+                continue
+            lead = incident.get("lead") or {}
+            key = (str(incident.get("key")), str(lead.get("name")) if lead.get("name") else None)
+            groups.setdefault(key, []).append(incident)
+        out = []
+        for (key, culprit), items in groups.items():
+            if self._covered(node, key, culprit):
+                continue
+            dates = {time.strftime("%Y-%m-%d", time.localtime(float(i["start"]))) for i in items}
+            if len(dates) < 3:
+                continue
+            starts = [_minute_of_day(float(i["start"])) for i in items]
+            ends = [_minute_of_day(float(i["end"])) for i in items]
+            # Occurrences straddling midnight: shift the early-morning ones
+            # by a day so the spread is measured on one circle.
+            if max(starts) - min(starts) > 12 * 60:
+                starts = [m + 1440 if m < 720 else m for m in starts]
+                ends = [m + 1440 if m < 720 else m for m in ends]
+            if max(starts) - min(starts) > 90:
+                continue                # not the same time of day
+            start = (min(starts) - 15) % 1440
+            end = (max(ends) + 15) % 1440
+            length = (end - start) % 1440
+            if length == 0 or length > 6 * 60:
+                continue
+            weekdays = sorted({time.localtime(float(i["start"])).tm_wday for i in items})
+            out.append({
+                "node": node, "key": key, "culprit": culprit,
+                "title": str(items[-1].get("title") or key),
+                "occurrences": len(items), "days_seen": len(dates),
+                "start": f"{start // 60:02d}:{start % 60:02d}",
+                "end": f"{end // 60:02d}:{end % 60:02d}",
+                # Only a weekday pattern when there is enough evidence for
+                # one: each weekday in the set seen about twice, and not all
+                # seven. Three consecutive dates are "every day", not Tue-Thu.
+                "days": (weekdays if len(weekdays) <= 5
+                         and len(dates) >= 2 * len(weekdays) else []),
+                "last_seen": max(float(i["start"]) for i in items),
+            })
+        out.sort(key=lambda s: (-s["days_seen"], s["key"]))
+        return out
+
+    def _covered(self, node: str, key: str, culprit: str | None) -> bool:
+        for row in self._rows:
+            if row.get("key") != key or row.get("node") not in (node, "*"):
+                continue
+            if row.get("culprit") in (None, "", culprit):
+                return True
+        return False
+
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(r) for r in self._rows]
@@ -216,6 +276,11 @@ class Expectations:
 
 
 # ------------------------------------------------------------------ windows
+def _minute_of_day(ts: float) -> int:
+    local = time.localtime(ts)
+    return local.tm_hour * 60 + local.tm_min
+
+
 def _local(now: float) -> tuple[int, int]:
     """(weekday Mon=0, minutes since midnight) in the host's local time."""
     struct = time.localtime(now)

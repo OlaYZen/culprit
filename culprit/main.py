@@ -950,11 +950,39 @@ async def api_history_actions(
             "actions": history.actions(start, node=node, limit=limit)}
 
 
+@app.get("/api/history/record", summary="How past actions on a process went")
+async def api_history_record(
+    node: str = Query(..., min_length=1, max_length=64),
+    name: str | None = Query(None, max_length=256),
+    unit: str | None = Query(None, max_length=256),
+) -> dict[str, Any]:
+    """The verdicts of earlier terminate / priority / throttle actions on
+    the same process name (or unit) on this node, counted per outcome --
+    what the process dialog shows as a track record before offering the
+    same action again."""
+    if history is None:
+        raise HTTPException(503, "history is not initialised")
+    return history.action_record(node, name or None, unit or None)
+
+
 # ------------------------------------------------------------- expectations
 @app.get("/api/expectations", summary="Findings marked as expected")
 async def api_expectations() -> dict[str, Any]:
     assert expectations is not None
     return {"expectations": expectations.list()}
+
+
+@app.get("/api/expectations/suggested",
+         summary="Recurring findings that could be marked as expected")
+async def api_expectations_suggested(
+    node: str = Query(..., min_length=1, max_length=64),
+) -> dict[str, Any]:
+    """Findings that recurred at the same time of day on three or more
+    days, led by the same process, and are not already covered by an
+    expectation. Computed from stored incidents at read time; a person
+    still decides."""
+    assert expectations is not None
+    return {"suggestions": expectations.suggest(node)}
 
 
 @app.post("/api/expectations", summary="Mark a finding as expected")
