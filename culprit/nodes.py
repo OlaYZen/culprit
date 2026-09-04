@@ -40,6 +40,7 @@ DICT_SECTIONS = frozenset({
     "cpu", "memory", "psi", "pressures", "gpu", "disk", "network",
     "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
     "system", "volumes", "events", "errors", "timings", "sampler",
+    "cgroups", "kernel", "changes",
 })
 SCALAR_META = frozenset({"warm", "warmup_stage", "server_started_at", "now",
                          "ts", "elevated"})
@@ -256,6 +257,13 @@ class NodeRegistry:
             )
             if everything:
                 self.history.write_events(everything, node=name)
+        if self.history.ready and "changes" in snapshot:
+            # The agent's change log is a ring in memory; the host keeps
+            # what it sees so "what changed before this incident" survives
+            # an agent restart.
+            events = (snapshot.get("changes") or {}).get("events") or []
+            if isinstance(events, list) and events:
+                self.history.write_changes(events, node=name)
         reply: dict[str, Any] = {"known": known, "settings": settings}
         if dropped:
             reply["dropped"] = dropped[:20]
