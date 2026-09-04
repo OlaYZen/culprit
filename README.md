@@ -242,7 +242,7 @@ container host, the prebuilt image:
 ```bash
 # native
 git clone https://github.com/OlaYZen/culprit-agent.git
-cd culprit-agent && ./agent.sh https://<host>:8787 web-01.<secret>
+cd culprit-agent && sudo ./agent.sh      # asks for the host URL + token, then sets up the service
 
 # docker (monitors the host it runs on)
 docker run -d --name culprit-agent --restart unless-stopped --pull always \
