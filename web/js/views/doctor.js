@@ -17,7 +17,7 @@ import {
   emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
   skeletonStatus, switchControl,
 } from "../ui.js";
-import { changeList, containerPill, culpritRow, gaugeRow, offenderRow, pill, section, viewHead } from "./shared.js";
+import { changeList, containerPill, culpritRow, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -49,6 +49,9 @@ export function createDoctor() {
   const root = el("div.view", { dataset: { view: "doctor" } });
   const nodes = {};
   let built = false;
+  // Recurring findings the host suggests marking as expected, per node,
+  // refreshed at most once a minute; the card only consults this map.
+  const suggested = { node: null, at: 0, byKey: new Map() };
 
   const head = viewHead({
     title: "Lag Doctor",
@@ -62,6 +65,7 @@ export function createDoctor() {
   const skeleton = () => el("div.stack", {}, [
     skeletonStatus(), skeletonSection("Findings", 3),
     el("div.cols.cols--2", {}, [skeletonSection("Ranked offenders", 5), skeletonSection("Individual signals", 6)]),
+    el("div.cols.cols--2", {}, [skeletonSection("Ceilings", 3), skeletonSection("If memory runs out", 3)]),
   ]);
 
   function build() {
@@ -117,6 +121,28 @@ export function createDoctor() {
             + "(and the whole model on kernels without PSI).",
       }),
     ]));
+
+    // What breaks next: hard limits with their holder, and the OOM killer's
+    // own ranking. Facts, not pressure — a limit at 50% is a fact worth
+    // knowing before the next call fails.
+    nodes.ceilings = el("div");
+    nodes.ceilMeta = el("span");
+    nodes.oom = el("div");
+    nodes.oomMeta = el("span");
+    content.append(el("div.cols.cols--2", {}, [
+      section({
+        title: "Ceilings", meta: nodes.ceilMeta, body: nodes.ceilings,
+        foot: "Hard limits that fail outright when reached — file descriptors against a process's own "
+            + "nofile limit, system-wide file handles, threads, PIDs, connection tracking, inotify watches — "
+            + "with whoever holds them named. Shown from half-way to the limit; a finding fires at 80%.",
+      }),
+      section({
+        title: "If memory runs out", meta: nodes.oomMeta, body: nodes.oom,
+        foot: "The kernel's own oom_score ranking, read for every process: the first row is what the OOM "
+            + "killer takes if memory runs out right now. Information, not a problem — until the memory "
+            + "findings fire, which then carry this list.",
+      }),
+    ]));
   }
 
   function update(state) {
@@ -150,6 +176,7 @@ export function createDoctor() {
         value >= 90 ? "tone-crit" : value >= 70 ? "tone-warn" : value >= 40 ? "tone-info" : "tone-ok");
     }
 
+    refreshSuggestions();
     const findings = diagnosis.findings || [];
     const expected = findings.filter((f) => f.expected).length;
     const real = findings.length - expected;
@@ -172,6 +199,8 @@ export function createDoctor() {
       render(nodes.offenders, offenders.map((proc) => offenderRow(proc)));
     }
 
+    renderCeilings(state.ceilings);
+
     // Sub-signals. PSI rows disappear cleanly when the kernel has no PSI.
     const detail = pressures.detail || {};
     const signals = SUB_SIGNALS.filter(([key]) => !(key.startsWith("psi_") && (detail[key] === null || detail[key] === undefined)));
@@ -179,6 +208,91 @@ export function createDoctor() {
       const value = (detail[key] ?? 0) * 100;
       const tone = value >= 90 ? "crit" : value >= 60 ? "warn" : "ok";
       return gaugeRow(label, value, `${Math.round(value)}%`, tone);
+    }));
+  }
+
+  async function refreshSuggestions() {
+    const now = Date.now();
+    if (suggested.node === store.node && now - suggested.at < 60_000) return;
+    suggested.node = store.node;
+    suggested.at = now;
+    try {
+      const payload = await api(`/api/expectations/suggested?node=${encodeURIComponent(store.node)}`);
+      suggested.byKey = new Map((payload.suggestions || []).map((s) => [`${s.key}|${s.culprit || ""}`, s]));
+      if (root.isActive) update(store.state);
+    } catch {
+      suggested.byKey = new Map();
+    }
+  }
+
+  function suggestionFor(finding) {
+    if (finding.expected || suggested.node !== store.node) return null;
+    const lead = (finding.culprits || [])[0];
+    return suggested.byKey.get(`${finding.key}|${lead ? fmt.imageName(lead.name) : ""}`)
+      || suggested.byKey.get(`${finding.key}|${lead ? lead.name : ""}`)
+      || suggested.byKey.get(`${finding.key}|`) || null;
+  }
+
+  function renderCeilings(ceilings) {
+    if (!ceilings) {
+      patchText(nodes.ceilMeta, "");
+      patchText(nodes.oomMeta, "");
+      render(nodes.ceilings, emptyState("Waiting for the first slow pass", "Ceilings are read every 20 s."));
+      render(nodes.oom, emptyState("Waiting for the first slow pass", ""));
+      return;
+    }
+    if (ceilings.available === false) {
+      render(nodes.ceilings, emptyState("Not available", ceilings.reason || ""));
+      render(nodes.oom, emptyState("Not available", ceilings.reason || ""));
+      return;
+    }
+    const limits = ceilings.limits || [];
+    patchText(nodes.ceilMeta, `${limits.length} of ${fmt.count(ceilings.watched)} near`);
+    if (!limits.length) {
+      render(nodes.ceilings, emptyState("Nothing near a limit",
+        `${fmt.count(ceilings.watched)} ceilings watched; none is past half-way.`
+        + (ceilings.fds_note ? ` ${ceilings.fds_note}` : ""), icons.ok));
+    } else {
+      render(nodes.ceilings, limits.map((entry) => {
+        const tone = entry.pct >= 95 ? "crit" : entry.pct >= 80 ? "warn" : "info";
+        const holder = entry.holder;
+        const who = holder
+          ? el("button.linkbtn", { type: "button", title: "Open the holder", dataset: { pid: String(holder.pid) } },
+            [`${fmt.imageName(holder.name)} #${holder.pid}${entry.holder_share ? ` · ${fmt.count(entry.holder_share)} of them` : ""}`])
+          : el("span.faint", { text: "system-wide" });
+        if (holder) who.addEventListener("click", () => openProcessModal(holder.pid));
+        return el("div", { style: { padding: "6px 0" } }, [
+          el("div.row.row--between", {}, [
+            el("span", { text: entry.label }),
+            el("span.mono.small", { text: `${fmt.count(entry.current)} / ${fmt.count(entry.max)}${entry.partial ? " +" : ""}`,
+              title: entry.partial ? "At least this: some processes' descriptors are not readable." : "" }),
+          ]),
+          meter(entry.pct, { tone, thin: true }),
+          el("div.row.row--between.small", { style: { marginTop: "3px" } }, [who, el("span.faint", { text: `${fmt.pct(entry.pct, 0)} of the limit` })]),
+        ]);
+      }));
+      if (ceilings.fds_note) nodes.ceilings.append(el("div.faint.small", { style: { marginTop: "6px" }, text: ceilings.fds_note }));
+    }
+    const oom = ceilings.oom || {};
+    const victims = oom.next || [];
+    patchText(nodes.oomMeta, victims.length ? `${oom.protected ? `${oom.protected} protected · ` : ""}top ${victims.length}` : "");
+    if (!oom.available || !victims.length) {
+      render(nodes.oom, emptyState("No candidate", oom.reason || "No process has a non-zero oom_score."));
+      return;
+    }
+    render(nodes.oom, victims.map((victim, index) => {
+      const row = el("button.culprit", { type: "button", title: "Open details" });
+      row.append(el("span.culprit__rank", { text: String(index + 1) }));
+      row.append(el("span.culprit__name.trunc", { text: fmt.imageName(victim.name) }));
+      row.append(el("span.culprit__pid", { text: `#${victim.pid}` }));
+      const where = containerPill(victim.container);
+      if (where) row.append(where);
+      else if (victim.unit) row.append(pill(victim.unit));
+      row.append(el("span.culprit__share", {
+        text: `${fmt.isNum(victim.working_set) ? `${fmt.bytes(victim.working_set)} · ` : ""}score ${victim.oom_score}${victim.oom_score_adj ? ` (adj ${victim.oom_score_adj})` : ""}`,
+      }));
+      row.addEventListener("click", () => openProcessModal(victim.pid));
+      return row;
     }));
   }
 
@@ -250,6 +364,16 @@ export function createDoctor() {
       if (unit.manager === "user") row.append(document.createTextNode(" "), pill("user manager"));
       node.append(row);
     }
+    const victims = finding.next_victims || [];
+    if (victims.length) {
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", { text: "If memory runs out, the kernel kills first (its own oom_score)" }));
+      victims.forEach((victim, index) => {
+        const row = culpritRow({ ...victim, share: `score ${victim.oom_score}` }, index);
+        group.append(row);
+      });
+      node.append(group);
+    }
     const suffering = finding.suffering || [];
     if (suffering.length) {
       // The victims' side of a machine-wide stall, from each unit's own PSI.
@@ -262,6 +386,19 @@ export function createDoctor() {
         return chip;
       })));
       node.append(group);
+    }
+    const suggestion = suggestionFor(finding);
+    if (suggestion) {
+      // The host noticed this recurs at the same hour on several days; a
+      // person still decides, with the dialog pre-filled from the record.
+      const mark = el("button.btn.btn--sm", { type: "button" }, ["Mark as expected…"]);
+      mark.addEventListener("click", () => openExpectDialog(finding, suggestion));
+      node.append(el("div.finding__blame", {}, [
+        el("b", { text: "This recurs. " }),
+        document.createTextNode(`Seen on ${suggestion.days_seen} days around ${suggestion.start}–${suggestion.end}`
+          + `${suggestion.culprit ? `, led by ${suggestion.culprit}` : ""}. If it is a scheduled job, `),
+        mark,
+      ]));
     }
     const changes = finding.changes || [];
     if (changes.length) {
@@ -297,10 +434,14 @@ export function createDoctor() {
   }
 
   /** "This is normal": reason, scope, optional culprit, optional daily window. */
-  function openExpectDialog(finding) {
+  function openExpectDialog(finding, suggestion = null) {
     const lead = (finding.culprits || [])[0];
-    const leadName = lead ? fmt.imageName(lead.name) : null;
-    const state = { node: store.node, culprit: leadName, window: false, days: new Set(), start: "02:00", end: "03:00" };
+    const leadName = suggestion?.culprit || (lead ? fmt.imageName(lead.name) : null);
+    const state = {
+      node: store.node, culprit: leadName, window: Boolean(suggestion),
+      days: new Set(suggestion?.days || []),
+      start: suggestion?.start || "02:00", end: suggestion?.end || "03:00",
+    };
 
     const reason = el("input", { type: "text", id: "exp-reason", "data-autofocus": "", autocomplete: "off",
       placeholder: "e.g. nightly borg backup", "aria-describedby": "exp-reason-help" });
@@ -330,15 +471,20 @@ export function createDoctor() {
       });
       days.append(btn);
     });
-    const windowBody = el("div", { hidden: true, style: { marginTop: "8px" } }, [
+    DAY_NAMES.forEach((name, index) => {
+      const btn = days.children[index];
+      if (btn && state.days.has(index)) btn.setAttribute("aria-pressed", "true");
+    });
+    const windowBody = el("div", { hidden: !state.window, style: { marginTop: "8px" } }, [
       timeRow,
       el("div.faint.small", { style: { margin: "8px 0 4px" }, text: "On these days (none selected = every day). Times are the host's local clock." }),
       days,
     ]);
     const windowSwitch = switchControl({
-      label: "Only during a daily window", checked: false,
+      label: "Only during a daily window", checked: state.window,
       onChange: (v) => { state.window = v; windowBody.hidden = !v; },
     });
+    if (suggestion) reason.value = `Recurring: seen on ${suggestion.days_seen} days around ${suggestion.start}`;
 
     const body = el("div", {}, [
       el("p", {}, [
@@ -399,7 +545,7 @@ export function createDoctor() {
 
   root.mount = () => { if (!built) build(); update(store.state); };
   root.subscriptions = [
-    store.on(["diagnosis", "pressures", "node"], () => { if (root.isActive) update(store.state); }),
+    store.on(["diagnosis", "pressures", "ceilings", "node"], () => { if (root.isActive) update(store.state); }),
   ];
   return root;
 }

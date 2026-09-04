@@ -12,7 +12,7 @@ import * as fmt from "../util/format.js";
 import { createChart } from "../charts.js";
 import { store, api } from "../stream.js";
 import { emptyState, note, pendingSlot, readySlot, skeletonFigures, skeletonSection } from "../ui.js";
-import { figures, kv, kvs, legend, meter, pill, section, viewHead } from "./shared.js";
+import { containerPill, figures, kv, kvs, legend, meter, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 export function createStorage() {
   const root = el("div.view", { dataset: { view: "storage" } });
@@ -171,6 +171,8 @@ export function createStorage() {
             el("span", {}, [el("b", { class: tone === "disk" ? "" : `tone-${tone}`, text: fmt.bytes(volume.free) }), el("span.faint", { text: " free" })]),
             el("span.faint", { text: `${fmt.bytes(volume.used)} of ${fmt.bytes(volume.total)}` }),
           ]),
+          forecastLine(volume),
+          writersBlock(volume),
           freePct <= 10
             ? note("warn", "Nearly full. Free space here is what a <em>user</em> can write (f_bavail) — ext4 reserves "
               + "~5% on top for root. Full filesystems fail writes, break package upgrades, and journald starts dropping history.",
@@ -178,7 +180,11 @@ export function createStorage() {
             : null,
         ]));
       }
-      readySlot(volumeSlot, section({ title: "Volumes", meta: `${volumes.length} mounted`, body: grid }));
+      const foot = payload.writers_note
+        ? payload.writers_note
+        : "Growth is a least-squares slope over the last hour of samples; writers are the processes with open files under "
+          + "the mount and a non-zero write rate. Deleted-but-open files keep their space until the holder closes them.";
+      readySlot(volumeSlot, section({ title: "Volumes", meta: `${volumes.length} mounted`, body: grid, foot }));
     }
 
     if (media.length) {
@@ -211,6 +217,54 @@ export function createStorage() {
     } else {
       readySlot(driveRow, []);
     }
+  }
+
+  /** "Full in ~5 h at +12 MB/s", "growing 1.2 GB/day", "stable", or why not yet. */
+  function forecastLine(volume) {
+    const f = volume.forecast;
+    if (!f) return null;
+    if (f.available === false) {
+      return el("div.faint.small", { style: { marginTop: "6px" }, text: `Growth: ${f.reason}` });
+    }
+    const rate = `${f.bytes_per_day >= 0 ? "+" : "−"}${fmt.bytes(Math.abs(f.bytes_per_day))}/day`;
+    if (f.trend === "stable") return el("div.faint.small", { style: { marginTop: "6px" }, text: `Growth: stable (${rate} over the last ${Math.round(f.window_seconds / 60)} min)` });
+    if (f.trend === "shrinking") return el("div.faint.small", { style: { marginTop: "6px" }, text: `Growth: shrinking, ${rate}` });
+    const hours = fmt.isNum(f.seconds_to_full) ? f.seconds_to_full / 3600 : null;
+    const eta = hours === null ? "" : hours < 1 ? `${Math.round(hours * 60)} min` : hours < 48 ? `${hours.toFixed(1)} h` : `${(hours / 24).toFixed(1)} days`;
+    const tone = hours !== null && hours <= 1 ? "crit" : hours !== null && hours <= 6 ? "warn" : hours !== null && hours <= 24 ? "info" : null;
+    const rough = f.r2 < 0.9 ? " (uneven growth — rough)" : "";
+    return el("div.small", { style: { marginTop: "6px" } }, [
+      el("span.faint", { text: "Growth: " }),
+      el("span", { class: tone ? `tone-${tone}` : "", text: `${rate}` }),
+      eta ? el("span.faint", { text: ` · full in about ${eta}${rough}` }) : null,
+    ]);
+  }
+
+  /** Who is writing here now, and which deleted files still hold space. */
+  function writersBlock(volume) {
+    const writers = volume.writers || [];
+    const held = volume.held_deleted || [];
+    if (!writers.length && !held.length) return null;
+    const wrap = el("div", { style: { marginTop: "6px" } });
+    if (writers.length) {
+      wrap.append(el("div.pills", {}, writers.slice(0, 4).map((w) => {
+        const chip = el("button.copybtn", { type: "button",
+          title: (w.paths || []).map((p) => `${p.path}${p.deleted ? " (deleted)" : ""}`).join("\n") || (w.by_cwd ? "attributed by working directory only" : "") });
+        chip.append(document.createTextNode(`${fmt.imageName(w.name)} · ${fmt.rate(w.write_bytes_sec)}${w.by_cwd ? " (cwd)" : ""}`));
+        const where = containerPill(w.container);
+        if (where) chip.append(where);
+        chip.addEventListener("click", () => openProcessModal(w.pid));
+        return chip;
+      })));
+    }
+    for (const h of held.slice(0, 3)) {
+      wrap.append(el("div.small.tone-warn", { style: { marginTop: "4px" } }, [
+        el("b", { text: `${fmt.bytes(h.size)} held by a deleted file` }),
+        el("span.faint", { text: ` still open by ${fmt.imageName(h.name)} #${h.pid}: `, title: h.path }),
+        el("span.mono.trunc", { text: h.path, title: h.path, style: { maxWidth: "24ch", display: "inline-block", verticalAlign: "bottom" } }),
+      ]));
+    }
+    return wrap;
   }
 
   root.mount = () => { if (!built) build(); updateFast(store.state); updateSlow(store.state); };

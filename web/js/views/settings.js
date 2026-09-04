@@ -587,6 +587,7 @@ export function createSettings() {
       table.append(tbody);
       body.append(el("div.tblwrap", {}, [table]));
     }
+    body.append(await suggestedBlock());
     readySlot(expectSlot, section({
       title: "Expected findings", meta: list.length ? `${list.length} marked` : "none",
       body,
@@ -594,6 +595,50 @@ export function createSettings() {
           + "(severity info), never notified, and not written to history as an incident — and if it is still active after its "
           + "window ends, it comes back as a real finding.",
     }));
+  }
+
+  /** Recurring findings the host noticed; one click marks them, reversibly. */
+  async function suggestedBlock() {
+    const wrap = el("div", { style: { marginTop: "12px" } });
+    let payload;
+    try {
+      payload = await api(`/api/expectations/suggested?node=${encodeURIComponent(store.node)}`);
+    } catch (error) {
+      wrap.append(el("div.faint.small", { text: `Suggestions unavailable: ${error.message}` }));
+      return wrap;
+    }
+    const list = payload.suggestions || [];
+    wrap.append(el("div.subhead", { text: `Suggested for ${store.node}` }));
+    if (!list.length) {
+      wrap.append(el("div.faint.small", { text: "Nothing recurs at the same time of day on three or more days in the last two weeks." }));
+      return wrap;
+    }
+    for (const s of list) {
+      const mark = el("button.btn.btn--sm", { type: "button" }, ["Mark as expected"]);
+      const row = el("div.row.row--between", { style: { padding: "6px 0", borderBottom: "1px solid var(--line)" } }, [
+        el("span", {}, [
+          el("span", { text: s.title }),
+          el("span.faint.small", { text: ` · ${s.days_seen} days, ${s.start}–${s.end}${s.culprit ? `, led by ${s.culprit}` : ""}` }),
+        ]),
+        mark,
+      ]);
+      mark.addEventListener("click", async () => {
+        setBusy(mark, true, "Saving…");
+        try {
+          await api("/api/expectations", { method: "POST", body: JSON.stringify({
+            node: s.node, key: s.key, culprit: s.culprit,
+            reason: `Recurring: seen on ${s.days_seen} days around ${s.start}`,
+            days: s.days || [], start: s.start, end: s.end,
+          }) });
+          renderExpectations();
+        } catch (error) {
+          setBusy(mark, false, "Mark as expected");
+          mark.title = error.message;
+        }
+      });
+      wrap.append(row);
+    }
+    return wrap;
   }
 
   function fieldRow({ id, label, unit, input, help, error, area = false }) {
