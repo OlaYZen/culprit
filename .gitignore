@@ -1,39 +1,9 @@
-# Virtual environment — recreate with install.sh
-.venv/
-
-# Runtime state — never commit (these hold live config and credentials)
-config.json
-agent.json
-tools_auth.json
-
-# SQLite database (holds scrypt password hashes + agent token hashes) + sidecars
-data/
-# ...but the demo's recorded, scrubbed fixtures are meant to be committed
-!web/demo/data/
-*.db
-*.db-wal
-*.db-shm
-*.sqlite
-*.sqlite-*
-
-# TLS material for --ssl-certfile/--ssl-keyfile -- never commit
-*.pem
-*.key
-*.crt
-
-# Python
+# Python bytecode from the two tools
 __pycache__/
 *.py[cod]
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 
 # Editors / OS
 .vscode/
 .idea/
 *.swp
 .DS_Store
-
-# Static demo site (tools/build_demo.py output)
-dist/

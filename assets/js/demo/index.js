@@ -1,12 +1,13 @@
 /**
  * Demo mode: the dashboard with no host behind it.
  *
- * app.js imports this only when the page carries `data-demo="1"` on <html>
- * (the GitHub Pages build sets it) or is opened with `?demo`. It loads the
- * recorded fleet, then swaps the two things the frontend uses to reach a
- * host -- `fetch` for `/api/*` and `EventSource` for `/api/stream` -- for
- * the in-browser world. Every view, chart, dialog and action runs the code
- * it runs against a real host; only the answers come from here.
+ * The demo's index.html loads `boot.js` as a module *before* app.js, and
+ * this installs the stand-ins at once: `fetch` for `/api/*` and
+ * `EventSource` for `/api/stream` are replaced synchronously, and each call
+ * waits for the recorded fleet to finish loading before it is answered. That
+ * is what lets app.js stay byte-for-byte the file main serves -- it connects,
+ * polls and renders exactly as it does against a real host, and only the
+ * answers come from the browser.
  *
  * Anything that is not an `/api/` URL still goes to the network, which is
  * how the fixtures themselves and the static files load.
@@ -17,16 +18,32 @@ import { loadFixtures } from "./data.js";
 import { World } from "./world.js";
 import { createRouter } from "./routes.js";
 
-export async function installDemo() {
+export function installDemo() {
   const realFetch = window.fetch.bind(window);
-  const fixtures = await loadFixtures(realFetch);
-  const world = new World(fixtures);
-  const route = createRouter(world);
+  let world = null;
+  let route = null;
+
+  const ready = loadFixtures(realFetch).then((fixtures) => {
+    world = new World(fixtures);
+    route = createRouter(world);
+    world.start();
+    window.__culpritDemo = world;   // for the console and the headless checks
+    banner("demo",
+      "Demo — a recording of a real five-machine fleet, replayed in your browser. "
+      + "The incident on media repeats every few minutes; actions are simulated and nothing here is live.",
+      { sticky: true });
+    return world;
+  }).catch((error) => {
+    console.error("[Culprit] demo mode failed to start:", error);
+    banner("demo", `Demo could not start: ${error.message}`, { tone: "error", sticky: true });
+    throw error;
+  });
 
   window.fetch = async function demoFetch(input, init = {}) {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const parsed = new URL(url, location.href);
     if (!parsed.pathname.startsWith("/api/")) return realFetch(input, init);
+    await ready;
     const method = String(init.method || (typeof input === "object" && input.method) || "GET").toUpperCase();
     let body = {};
     if (typeof init.body === "string" && init.body) {
@@ -51,12 +68,17 @@ export async function installDemo() {
       super();
       this.url = String(url);
       this.readyState = DemoEventSource.CONNECTING;
-      this._boot = setTimeout(() => {
+      ready.then(() => {
+        if (this.readyState === DemoEventSource.CLOSED) return;
         this.readyState = DemoEventSource.OPEN;
         this.dispatchEvent(new Event("open"));
         this._send("snapshot", bootPayload(world));
         this._timer = setInterval(() => this._send("nodes", world.nodeList(Date.now() / 1000)), 5000);
-      }, 40);
+      }, () => {
+        // The fixtures did not load: behave like a host that is not there.
+        this.readyState = DemoEventSource.CLOSED;
+        this.dispatchEvent(new Event("error"));
+      });
     }
 
     _send(name, payload) {
@@ -65,21 +87,12 @@ export async function installDemo() {
     }
 
     close() {
-      clearTimeout(this._boot);
       clearInterval(this._timer);
       this.readyState = DemoEventSource.CLOSED;
     }
   }
   window.EventSource = DemoEventSource;
-
-  world.start();
-  window.__culpritDemo = world;   // for the console and the headless checks
-
-  banner("demo",
-    "Demo — a recording of a real five-machine fleet, replayed in your browser. "
-    + "The incident on media repeats every few minutes; actions are simulated and nothing here is live.",
-    { sticky: true });
-  return world;
+  return ready;
 }
 
 function bootPayload(world) {
