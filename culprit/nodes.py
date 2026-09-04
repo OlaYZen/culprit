@@ -40,7 +40,7 @@ DICT_SECTIONS = frozenset({
     "cpu", "memory", "psi", "pressures", "gpu", "disk", "network",
     "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
     "system", "volumes", "events", "errors", "timings", "sampler",
-    "cgroups", "kernel", "changes",
+    "cgroups", "kernel", "changes", "ceilings",
 })
 SCALAR_META = frozenset({"warm", "warmup_stage", "server_started_at", "now",
                          "ts", "elevated"})
