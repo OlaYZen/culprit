@@ -212,6 +212,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         ],
     },
     "ports": {
+        # Well-known names for port numbers (ports.json at the repo root).
+        "/api/portnames": ["tcp", "udp", "tcp.443.name", "tcp.443.desc", "udp.53.name"],
         "node:ports": [
             "available", "totals.ports", "totals.public", "totals.local",
             "totals.tcp", "totals.udp", "totals.connections",
