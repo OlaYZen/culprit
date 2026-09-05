@@ -110,6 +110,19 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
                           "oom.protected"],
         "/api/expectations": ["expectations"],
     },
+    "outage": {
+        "node:outage": [
+            "available", "status", "severity", "items", "count", "broken",
+            "items[].key", "items[].kind", "items[].severity", "items[].title",
+            "items[].detail", "items[].fix", "items[].since", "items[].evidence",
+            "items[].root", "items[].changes", "items[].since_start",
+            "checks.units.available", "checks.listeners.available",
+            "checks.tls.available", "checks.tls.certificates", "checks.time.available",
+            "checks.time.synchronized", "checks.dns.available", "checks.mounts.checked",
+            "checks.mounts.readonly", "checks.boot.separate", "checks.storage.errors_24h",
+            "checks.reboot.pending",
+        ],
+    },
     "processes": {
         "node:process_table": [
             "mode", "cores", "sample_ms", "by_state", "io_note",
