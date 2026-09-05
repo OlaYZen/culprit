@@ -41,6 +41,10 @@ DICT_SECTIONS = frozenset({
     "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
     "system", "volumes", "events", "errors", "timings", "sampler",
     "cgroups", "kernel", "changes", "ceilings",
+    # Delivered once after a death and stored, never kept in the snapshot
+    # (see NodeRegistry.ingest): a recorder's frames must not ride along
+    # in every snapshot poll.
+    "coroner",
 })
 SCALAR_META = frozenset({"warm", "warmup_stage", "server_started_at", "now",
                          "ts", "elevated"})
@@ -199,6 +203,7 @@ class NodeRegistry:
         self.expectations: Any = None    # culprit.expect.Expectations
         self.verifier: Any = None        # culprit.verdict.ActionVerifier
         self.notifier: Any = None        # culprit.notify.Notifier
+        self.coroner: Any = None         # culprit.coroner.Coroner
 
     # ----------------------------------------------------------------- ingest
     def ingest(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -216,6 +221,10 @@ class NodeRegistry:
         if dropped:
             log.warning("report from %s: dropped %s", name, "; ".join(dropped[:5]))
         now = time.time()
+        # A death report is stored, not merged: it is a few hundred KB of
+        # recorder frames that belong in the database, not in the snapshot
+        # every dashboard polls each second.
+        deaths = snapshot.pop("coroner", None)
         with self._lock:
             node = self._nodes.setdefault(name, _Node(name))
             known = bool(node.snapshot)
@@ -245,6 +254,11 @@ class NodeRegistry:
                         hook.observe(name, diagnosis, now)
                 except Exception:  # noqa: BLE001 -- an observer must never break ingest
                     log.exception("diagnosis observer failed for %s", name)
+        if deaths is not None and self.coroner is not None:
+            try:
+                self.coroner.record(name, deaths)
+            except Exception:  # noqa: BLE001 -- the coroner catches its own, but never trust that here
+                log.exception("coroner failed for %s", name)
         self._accumulate(node, merged, now)
         if self.history.ready and "events" in snapshot:
             # Only when the events section was actually in this report --
