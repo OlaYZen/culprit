@@ -70,6 +70,12 @@ async def _sweep_loop() -> None:
                 verifier.sweep()
             if notifier is not None:
                 notifier.sweep()
+            if registry is not None:
+                # A blocking GET (one fetch for the whole fleet, not one per
+                # agent) -- off the event loop thread. refresh_remote_version
+                # itself no-ops until REMOTE_VERSION_REFRESH_S has passed.
+                await asyncio.get_running_loop().run_in_executor(
+                    None, registry.refresh_remote_version)
             _maybe_auto_update()
         except Exception:  # noqa: BLE001 -- housekeeping must not die
             log.exception("sweep failed")

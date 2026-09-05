@@ -15,10 +15,13 @@ three intervals.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import threading
 import time
+import urllib.error
+import urllib.request
 from typing import Any
 
 from .db import History, aggregate_window
@@ -75,6 +78,37 @@ def _d(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+# ------------------------------------------------------------- agent updates
+# One fetch for the whole fleet (NodeRegistry.refresh_remote_version, called
+# from main.py's sweep loop), not each agent hitting GitHub on its own
+# cadence -- see AGENTS.md's "Agent self-update".
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/OlaYZen/culprit-agent/main/version.json"
+REMOTE_VERSION_REFRESH_S = 1800.0
+
+
+def _version_tuple(version: str | None) -> tuple[int, ...] | None:
+    """"0.18.1-b" -> (0, 18, 1); None for anything that does not parse as
+    dotted integers, so an unparsable version compares as "unknown", never
+    as older or newer."""
+    if not version:
+        return None
+    try:
+        return tuple(int(part) for part in version.split("-", 1)[0].split("."))
+    except ValueError:
+        return None
+
+
+def _is_newer(remote: str | None, local: str | None) -> bool | None:
+    """Whether `remote` is a strictly newer version than `local` -- a tuple
+    comparison, not string inequality, so a node already ahead of what is
+    published (e.g. an unpushed local commit) is never told to "update" to
+    something older. None when either side does not parse."""
+    remote_v, local_v = _version_tuple(remote), _version_tuple(local)
+    if remote_v is None or local_v is None:
+        return None
+    return remote_v > local_v
+
+
 def _scrub(root: Any) -> str | None:
     """Walk one section in place, iteratively (so the walk itself cannot be
     made to recurse): reject if nested deeper than MAX_DEPTH, replace ints
@@ -124,16 +158,17 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "interval_fast": _finite(meta.get("interval_fast"), *INTERVAL_RANGE),
         "version": _short(meta.get("version"), 64),
         "name_claim": _short(meta.get("name"), 64),
-        # Self-update: capable()/fetch_remote_version() on the agent side
-        # (culprit-agent/culprit/updater.py). Booleans are type-checked, not
-        # just truthy-coerced, so a malformed report degrades to "unknown"
-        # (None) rather than a false claim either way.
+        # Self-update capability: capability() on the agent side
+        # (culprit-agent/culprit/updater.py) -- only the agent can know its
+        # own filesystem/git/systemd state. Whether an update is *available*
+        # is computed here instead (NodeRegistry._remote_version), one fetch
+        # for the whole fleet rather than each agent hitting GitHub on its
+        # own cadence. Booleans are type-checked, not just truthy-coerced,
+        # so a malformed report degrades to "unknown" (None), never a false
+        # claim either way.
         "update_capable": meta.get("update_capable")
             if isinstance(meta.get("update_capable"), bool) else None,
-        "update_available": meta.get("update_available")
-            if isinstance(meta.get("update_available"), bool) else None,
         "update_reason": _short(meta.get("update_reason"), 200),
-        "remote_version": _short(meta.get("remote_version"), 64),
     }
     snapshot: dict[str, Any] = {}
     dropped: list[str] = []
@@ -173,12 +208,12 @@ class _Node:
         self.report_interval = 1.0
         self.interval_fast: float | None = None
         self.agent_version: str | None = None
-        # Self-update state, refreshed from the agent's own report meta --
-        # never guessed host-side. See sanitise_report()'s "update_*" keys.
+        # Self-update capability, refreshed from the agent's own report meta
+        # -- never guessed host-side. See sanitise_report()'s "update_*" keys.
+        # Availability is not stored per-node: NodeRegistry._meta() derives
+        # it from the fleet-wide NodeRegistry._remote_version.
         self.update_capable: bool | None = None
-        self.update_available: bool | None = None
         self.update_reason: str | None = None
-        self.remote_version: str | None = None
         # Desired setting overrides, handed back to the agent in the response
         # to its next report -- the push-only channel's one-way "downlink".
         # Deliberately in memory only: this mirrors the titlebar Refresh
@@ -220,6 +255,13 @@ class NodeRegistry:
         self.verifier: Any = None        # culprit.verdict.ActionVerifier
         self.notifier: Any = None        # culprit.notify.Notifier
         self.coroner: Any = None         # culprit.coroner.Coroner
+        # Fleet-wide, not per-node: the version.json GitHub publishes for the
+        # agent's main branch, refreshed at most every REMOTE_VERSION_REFRESH_S
+        # by main.py's sweep loop (a blocking call, so it runs off the event
+        # loop thread). Stays at its last known-good value on a fetch failure
+        # rather than flipping every node's badge off.
+        self._remote_version: str | None = None
+        self._remote_version_checked = 0.0
 
     # ----------------------------------------------------------------- ingest
     def ingest(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -255,9 +297,6 @@ class NodeRegistry:
             if meta["update_capable"] is not None:
                 node.update_capable = meta["update_capable"]
                 node.update_reason = meta["update_reason"]
-            if meta["update_available"] is not None:
-                node.update_available = meta["update_available"]
-                node.remote_version = meta["remote_version"]
             settings = dict(node.settings)
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
@@ -395,6 +434,22 @@ class NodeRegistry:
         out.sort(key=lambda n: str(n["name"]))
         return out
 
+    def refresh_remote_version(self) -> None:
+        """Fetch REMOTE_VERSION_URL if it has been more than
+        REMOTE_VERSION_REFRESH_S since the last attempt. Blocking (a plain
+        urllib GET) -- callers off the event loop thread (main.py runs this
+        via run_in_executor). Never raises."""
+        now = time.monotonic()
+        if now - self._remote_version_checked < REMOTE_VERSION_REFRESH_S:
+            return
+        self._remote_version_checked = now
+        try:
+            with urllib.request.urlopen(REMOTE_VERSION_URL, timeout=5) as response:
+                data = json.loads(response.read())
+            self._remote_version = str(data["version"])
+        except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
+            log.warning("could not check the agent's published version: %s", exc)
+
     def _meta(self, node: _Node) -> dict[str, Any]:
         system = _d(node.snapshot.get("system"))
         age = time.time() - node.last_seen if node.last_seen else None
@@ -408,9 +463,9 @@ class NodeRegistry:
             "interval_fast": node.interval_fast,
             "agent_version": node.agent_version,
             "update_capable": node.update_capable,
-            "update_available": node.update_available,
+            "update_available": _is_newer(self._remote_version, node.agent_version),
             "update_reason": node.update_reason,
-            "remote_version": node.remote_version,
+            "remote_version": self._remote_version,
             # Clamped: these travel in every node list and every SSE snapshot
             # frame, so a 2 MB "hostname" would be amplified to every viewer.
             "hostname": _short(system.get("hostname")),
