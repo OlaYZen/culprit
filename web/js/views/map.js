@@ -20,6 +20,7 @@ import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import { emptyState, icons, note, pendingSlot, readySlot, skeletonSection } from "../ui.js";
 import { pill, section, viewHead } from "./shared.js";
+import { loadPortNames, portLabel, portName } from "../portnames.js";
 
 const REFRESH_MS = 10000;
 const TONE = { critical: "crit", warn: "warn", info: "info", ok: "ok" };
@@ -175,8 +176,10 @@ export function createMap() {
       el("b", { text: edge.from }), document.createTextNode(` · ${edge.from_name || "?"}`),
       edge.from_unit ? el("span.faint.small", { text: ` ${edge.from_unit}` }) : null,
     ]);
+    const known = portName(edge.to_port);
     const to = el("span", {}, [
       el("b", { text: edge.to }), document.createTextNode(`:${edge.to_port}`),
+      known ? el("span.portname", { text: known }) : null,
       edge.to_name ? document.createTextNode(` · ${edge.to_name}`) : el("span.faint", { text: edge.listening ? "" : " · no listener attributed" }),
       edge.to_unit ? el("span.faint.small", { text: ` ${edge.to_unit}` }) : null,
     ]);
@@ -207,8 +210,8 @@ export function createMap() {
         const tone = TONE[(e.health || {}).severity] || null;
         wrap.append(el("div.row.row--between", { style: { padding: "4px 0", gap: "8px" } }, [
           el("span.trunc", {}, side === "out"
-            ? [el("span", { text: `${e.from_name} → ` }), el("b", { text: e.to }), el("span", { text: `:${e.to_port}${e.to_name ? ` (${e.to_name})` : ""}` })]
-            : [el("b", { text: e.from }), el("span", { text: `'s ${e.from_name} → :${e.to_port}${e.to_name ? ` (${e.to_name})` : ""}` })]),
+            ? [el("span", { text: `${e.from_name} → ` }), el("b", { text: e.to }), el("span", { text: `:${portLabel(e.to_port)}${e.to_name ? ` (${e.to_name})` : ""}` })]
+            : [el("b", { text: e.from }), el("span", { text: `'s ${e.from_name} → :${portLabel(e.to_port)}${e.to_name ? ` (${e.to_name})` : ""}` })]),
           el("span.row", { style: { gap: "6px", flex: "0 0 auto" } }, [
             el("span.mono.small", { text: `${fmt.count(e.connections)} conn` }),
             fmt.isNum(e.rtt_ms) ? el("span.mono.small.faint", { text: fmt.ms(e.rtt_ms) }) : null,
@@ -240,7 +243,7 @@ export function createMap() {
         el("td", { text: peer.node }),
         el("td", {}, [el("span", { text: peer.name || "?" }), peer.unit ? el("span.faint.small", { text: ` ${peer.unit}` }) : null]),
         el("td.mono", { text: peer.remote }),
-        el("td.mono.faint", { text: (peer.ports || []).join(", ") }),
+        el("td.mono.faint", { text: (peer.ports || []).map((port) => portLabel(port)).join(", ") }),
         el("td.n", { text: fmt.count(peer.connections) }),
         el("td.n", { text: fmt.isNum(peer.rtt_ms) ? fmt.ms(peer.rtt_ms) : fmt.dash }),
         el("td.n", { text: `↑ ${fmt.rate(peer.send_bytes_sec)} ↓ ${fmt.rate(peer.recv_bytes_sec)}` }),
@@ -371,7 +374,7 @@ export function createMap() {
     if (!edge) { nodes.tip.hidden = true; nodes.canvas.style.cursor = nodeAt(x, y) ? "pointer" : "default"; return; }
     const health = edge.health || {};
     nodes.tip.replaceChildren(
-      el("div.tip__when", { text: `${edge.from} · ${edge.from_name} → ${edge.to}:${edge.to_port}${edge.to_name ? ` (${edge.to_name})` : ""}` }),
+      el("div.tip__when", { text: `${edge.from} · ${edge.from_name} → ${edge.to}:${portLabel(edge.to_port)}${edge.to_name ? ` (${edge.to_name})` : ""}` }),
       el("div.tip__row", { text: `${fmt.count(edge.connections)} connection(s) · round trip ${fmt.isNum(edge.rtt_ms) ? fmt.ms(edge.rtt_ms) : "?"} · retrans ${fmt.isNum(edge.retrans_sec) ? `${fmt.fixed(edge.retrans_sec, 2)}/s` : "?"}` }),
       el("div.tip__row", { text: `↑ ${fmt.rate(edge.send_bytes_sec)} ↓ ${fmt.rate(edge.recv_bytes_sec)} · send queue ${fmt.bytes(edge.tx_queue || 0)}` }),
       ...(health.findings || []).map((f) => el("div.tip__row", { text: `target: ${f.title}${f.lead ? ` (led by ${f.lead})` : ""}` })),
@@ -398,6 +401,7 @@ export function createMap() {
 
   root.mount = () => {
     if (!built) build();
+    loadPortNames().then(() => { if (root.isActive && graph) renderAll(); });
     load();
     clearInterval(timer);
     timer = setInterval(() => { if (root.isActive) load(); }, REFRESH_MS);
