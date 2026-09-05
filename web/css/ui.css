@@ -768,3 +768,11 @@
 .changes__title { color: var(--fg-1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .changes__row[data-severity="warn"] .changes__title { color: var(--warn); }
 .finding__culprits .changes { margin-top: 2px; }
+
+/* ── Coroner: the scrubbable last ten minutes, evidence bullets ────────── */
+.scrubrow { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.scrub { flex: 1; accent-color: var(--accent); height: 18px; margin: 0; background: transparent; }
+.because { margin: 6px 0 0; padding-left: 18px; font-size: var(--fs-s); color: var(--fg-1); line-height: 1.55; }
+.because li + li { margin-top: 3px; }
+.because.faint { color: var(--fg-2); }
+.log__item.is-selected { background: var(--bg-3); box-shadow: -14px 0 0 var(--bg-3), 14px 0 0 var(--bg-3); }

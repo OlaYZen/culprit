@@ -21,6 +21,7 @@ import { createStorage } from "./views/storage.js";
 import { createNetwork } from "./views/network.js";
 import { createPorts } from "./views/ports.js";
 import { createEvents } from "./views/events.js";
+import { createCoroner } from "./views/coroner.js";
 import { createSessions } from "./views/sessions.js";
 import { createSync } from "./views/sync.js";
 import { createTrends } from "./views/trends.js";
@@ -37,6 +38,7 @@ const FACTORIES = {
   network: createNetwork,
   ports: createPorts,
   events: createEvents,
+  coroner: createCoroner,
   sessions: createSessions,
   sync: createSync,
   trends: createTrends,
@@ -47,7 +49,7 @@ const FACTORIES = {
 const TITLES = {
   overview: "Overview", doctor: "Lag Doctor", processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
-  ports: "Ports", events: "Events", sessions: "Sessions", sync: "Sync",
+  ports: "Ports", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
   trends: "Trends", nodes: "Nodes", settings: "Settings",
 };
 
@@ -225,6 +227,24 @@ function setBadge(name, value, severity) {
   patchAttr(node, "data-severity", severity);
 }
 
+/** The Coroner's badge: deaths of the selected node in the last week. A
+ *  death is rare and the list is host-side, so this is a slow poll, not a
+ *  stream. */
+let coronerBadgeNode = null;
+async function updateCoronerBadge() {
+  if (!store.node) { setBadge("badge-coroner", null, null); return; }
+  const node = store.node;
+  try {
+    const since = Date.now() / 1000 - 7 * 86400;
+    const payload = await api(`/api/deaths?node=${encodeURIComponent(node)}&since=${since}&limit=20`);
+    if (store.node !== node) return;
+    coronerBadgeNode = node;
+    const deaths = payload.deaths || [];
+    const worst = deaths.some((d) => d.severity === "critical") ? null : deaths.some((d) => d.severity === "warn") ? "warn" : "info";
+    setBadge("badge-coroner", deaths.length || null, worst);
+  } catch { /* the view itself reports errors */ }
+}
+
 function updateOverhead() {
   api("/api/status").then((status) => {
     const overhead = status.overhead || {};
@@ -372,6 +392,8 @@ function boot() {
 
   updateOverhead();
   setInterval(updateOverhead, 10000);
+  store.on("node", () => { if (store.node !== coronerBadgeNode) updateCoronerBadge(); });
+  setInterval(updateCoronerBadge, 60000);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
