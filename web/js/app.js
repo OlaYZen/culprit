@@ -15,6 +15,7 @@ import { api, store } from "./stream.js";
 import { banner, combobox, dismissBanner, initModal, initScrollTop, wireCopy } from "./ui.js";
 import { createOverview } from "./views/overview.js";
 import { createDoctor } from "./views/doctor.js";
+import { createOutage } from "./views/outage.js";
 import { createProcesses } from "./views/processes.js";
 import { createServices } from "./views/services.js";
 import { createStorage } from "./views/storage.js";
@@ -33,6 +34,7 @@ import { initMobile } from "./mobile.js";
 const FACTORIES = {
   overview: createOverview,
   doctor: createDoctor,
+  outage: createOutage,
   processes: createProcesses,
   services: createServices,
   storage: createStorage,
@@ -49,7 +51,7 @@ const FACTORIES = {
 };
 
 const TITLES = {
-  overview: "Overview", doctor: "Lag Doctor", processes: "Processes",
+  overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
   ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
   trends: "Trends", nodes: "Nodes", settings: "Settings",
@@ -196,6 +198,11 @@ function updateBadges(state) {
   ), null);
   setBadge("badge-doctor", findings.length || null,
     worst === "critical" ? null : worst === "warn" ? "warn" : "info");
+
+  const outage = state.outage || {};
+  const brokenItems = (outage.items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
+  setBadge("badge-outage", brokenItems.length || null,
+    brokenItems.some((i) => i.severity === "critical") ? null : "warn");
 
   const processes = state.process_table || {};
   patchText(bind["badge-processes"], processes.totals?.count ? String(processes.totals.count) : "");
@@ -358,7 +365,7 @@ function boot() {
   store.on(["snapshot", "node_meta", "node"], reflectInterval);
 
   store.on(["cpu", "memory", "gpu", "disk", "system", "diagnosis"], (state) => updateChrome(state));
-  store.on(["diagnosis", "process_table", "services", "ports", "events", "sync", "volumes", "nodes"],
+  store.on(["diagnosis", "outage", "process_table", "services", "ports", "events", "sync", "volumes", "nodes"],
     (state) => updateBadges(state));
 
   store.on("connection", (state) => {
