@@ -35,6 +35,7 @@ from .expect import Expectations
 from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
+from . import portnames
 from .notify import Notifier
 from .verdict import ActionVerifier
 from .sampler import LIVE_KEYS, Sampler
@@ -970,6 +971,14 @@ async def api_history_record(
     if history is None:
         raise HTTPException(503, "history is not initialised")
     return history.action_record(node, name or None, unit or None)
+
+
+# -------------------------------------------------------------- port names
+@app.get("/api/portnames", summary="Well-known port names (ports.json)")
+async def api_portnames() -> dict[str, Any]:
+    """The name a port number usually carries, for the Ports and Map views.
+    A hint about the number, never a claim about the process behind it."""
+    return portnames.load()
 
 
 # --------------------------------------------------------------------- map
