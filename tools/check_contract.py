@@ -229,6 +229,16 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         # "What changed" section: the agent's change log.
         "node:changes": ["available", "events", "count", "recording_since"],
     },
+    "coroner": {
+        # Deaths across the fleet (the view filters by node). The list carries
+        # the verdict without the recorder frames; /api/deaths/{id} has those.
+        "/api/deaths?since=0": [
+            "deaths", "deaths[].id", "deaths[].node", "deaths[].kind",
+            "deaths[].died_at", "deaths[].detected_at", "deaths[].class",
+            "deaths[].severity", "deaths[].title", "deaths[].verdict.summary",
+            "deaths[].verdict.confidence",
+        ],
+    },
     "sessions": {
         "node:events": [
             "sessions.source", "sessions.exact", "sessions.requires_elevation",
