@@ -326,6 +326,12 @@ def check_poisoning(ctx: Ctx, node: str, token: str) -> None:
         ("interval_fast garbage", dumps_lenient({"agent": {"interval_fast": [1]}, "snapshot": {}}), None),
         ("version 1MB", dumps_lenient({"agent": {"version": "v" * 1_000_000}, "snapshot": {}}), None),
         ("version non-string", dumps_lenient({"agent": {"version": {"a": [1]}}, "snapshot": {}}), None),
+        ("update_capable non-bool", dumps_lenient({"agent": {"update_capable": "yes"}, "snapshot": {}}), None),
+        ("update_capable as object", dumps_lenient({"agent": {"update_capable": {"a": 1}}, "snapshot": {}}), None),
+        ("update_available non-bool", dumps_lenient({"agent": {"update_available": 1}, "snapshot": {}}), None),
+        ("update_reason 1MB", dumps_lenient({"agent": {"update_reason": "x" * 1_000_000}, "snapshot": {}}), None),
+        ("update_reason non-string", dumps_lenient({"agent": {"update_reason": [1, 2]}, "snapshot": {}}), None),
+        ("remote_version non-string", dumps_lenient({"agent": {"remote_version": {"a": 1}}, "snapshot": {}}), None),
         ("command_results string", dumps_lenient({"snapshot": {}, "command_results": "x"}), None),
         ("command_results garbage", dumps_lenient({"snapshot": {}, "command_results": [
             None, 5, "x", [], {"id": None}, {"id": {"a": 1}}, {"id": "other:1", "ok": True},
