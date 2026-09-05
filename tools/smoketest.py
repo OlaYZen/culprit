@@ -438,6 +438,28 @@ def main() -> int:
         note(f"pending reboot: {payload['pending_reboot']['pending']} "
              f"{payload['pending_reboot']['reasons']}")
 
+    print("\n--- outage doctor (broken, not slow) " + "-" * 34)
+    from culprit.collectors import outage as outage_mod
+    outage_collector = outage_mod.OutageCollector()
+    out = timed("OutageCollector.sample (first: unit walks, TLS, clock)",
+                lambda: outage_collector.sample(svc, port_map, volumes, payload, net_detail,
+                                                info, changes=change_log), budget_ms=3000)
+    out = timed("OutageCollector.sample (warm)",
+                lambda: outage_collector.sample(svc, port_map, volumes, payload, net_detail,
+                                                info, changes=change_log), budget_ms=80) or out
+    if out:
+        note(f"status={out['status']} items={[(i['key'], i['severity']) for i in out['items'][:6]]}")
+        checks = out["checks"]
+        note("checks: " + "  ".join(
+            f"{name}={'ok' if c.get('available', True) else 'n/a'}" for name, c in checks.items()))
+        tls = checks.get("tls") or {}
+        note(f"tls: {tls.get('checked', 0)} listener(s) handshaken; "
+             + (tls.get("note") or ", ".join(f":{c['port']} {'cert' if c.get('tls') else c.get('reason')}"
+                                              for c in tls.get("certificates") or [])[:200]))
+        clock = checks.get("time") or {}
+        note(f"clock: synchronized={clock.get('synchronized')} daemon={clock.get('daemon')} "
+             f"offset={clock.get('offset_ms')} ms")
+
     print("\n--- coroner (flight recorder + previous-boot forensics) " + "-" * 14)
     import tempfile
     from culprit.collectors import forensics, recorder
