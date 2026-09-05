@@ -438,6 +438,58 @@ def main() -> int:
         note(f"pending reboot: {payload['pending_reboot']['pending']} "
              f"{payload['pending_reboot']['reasons']}")
 
+    print("\n--- coroner (flight recorder + previous-boot forensics) " + "-" * 14)
+    import tempfile
+    from culprit.collectors import forensics, recorder
+    with tempfile.TemporaryDirectory() as tmp:
+        flight = recorder.FlightRecorder(Path(tmp) / "flight.json.gz")
+        if sample:
+            fast = dict(sample)
+            fast["ts"] = time.time()
+            fast["pressures"] = {"cpu": 0.1, "memory": 0.1, "disk": 0.1}
+            fast["disk"] = disk_sample or {}
+            fast["network"] = net_sample or {}
+            fast["gpu"] = gpu_sample or {}
+            # Ten minutes of frames, so the flush cost is the real one.
+            for i in range(600):
+                frame = dict(fast)
+                frame["ts"] = fast["ts"] - 600 + i
+                flight.observe_fast(frame)
+        if result:
+            for i in range(300):
+                flight.observe_proc(result["processes"], {"severity": "ok", "findings": []})
+        timed("FlightRecorder.observe_fast", lambda: flight.observe_fast(fast if sample else {}),
+              budget_ms=1)
+        timed("FlightRecorder.flush (10 min of frames)", flight.flush, budget_ms=80)
+        size = (Path(tmp) / "flight.json.gz").stat().st_size
+        note(f"recording: {len(flight._fast)} fast + {len(flight._proc)} proc frames, "
+             f"{size / 1024:.0f} KB gzipped, rewritten every {recorder.FLUSH_SECONDS:.0f} s")
+        death = timed("recorder.detect_death", lambda: recorder.detect_death(
+            Path(tmp) / "flight.json.gz", "another-boot"), budget_ms=100)
+        if death:
+            note(f"would report: kind={death['kind']} gap={death['gap_seconds']}s "
+                 f"rows={len(death['recorder']['fast']['rows'])}")
+    boots = forensics._boots()
+    if len(boots) >= 2:
+        prev = boots[-2]
+        last = int(prev.get("last_entry") or 0) / 1e6
+        evidence = timed("forensics.investigate (previous boot)", lambda: forensics.investigate(
+            {"kind": "machine", "died_at": last, "prev_boot_id": prev.get("boot_id"),
+             "boot_id": recorder.boot_id(), "agent_pid": 0}), budget_ms=3000)
+        if evidence:
+            note(f"journal readable={evidence['journal']['readable']} "
+                 f"markers={[m['kind'] for m in evidence['markers'][:6]]} "
+                 f"tail={len(evidence['tail'])} entries pstore={evidence['pstore']['reason'] or 'readable'}")
+            for line in evidence["notes"]:
+                note(f"{YELLOW}{line}{RESET}")
+    else:
+        note(f"{YELLOW}only one boot in the journal: previous-boot forensics not exercised{RESET}")
+    evidence = timed("forensics.investigate (agent, this boot)", lambda: forensics.investigate(
+        {"kind": "agent", "died_at": time.time() - 60, "prev_boot_id": recorder.boot_id(),
+         "boot_id": recorder.boot_id(), "agent_pid": os.getpid()}), budget_ms=2000)
+    if evidence:
+        note(f"agent unit={evidence['agent']['unit']} note={evidence['agent']['note']}")
+
     print("\n" + "-" * 72)
     if failures:
         print(f"{RED}{len(failures)} collector(s) failed:{RESET}")

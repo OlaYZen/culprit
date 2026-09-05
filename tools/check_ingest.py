@@ -330,6 +330,22 @@ def check_poisoning(ctx: Ctx, node: str, token: str) -> None:
         ("command_results garbage", dumps_lenient({"snapshot": {}, "command_results": [
             None, 5, "x", [], {"id": None}, {"id": {"a": 1}}, {"id": "other:1", "ok": True},
             {"id": f"{node}:999999", "ok": True, "result": "spoof"}]}), None),
+        # The Coroner section: stored, never merged. Shapes that are not a
+        # death are dropped; frames past the caps are trimmed.
+        ("coroner as a string", snap(coroner="x"), None),
+        ("coroner deaths wrong types", snap(coroner={"deaths": [None, 5, "x", [], {"kind": "machine"},
+                                                                {"died_at": "soon"}]}), None),
+        ("coroner recorder garbage", snap(coroner={"deaths": [{"died_at": time.time(), "kind": "machine",
+                                                               "recorder": "x", "evidence": []}]}), None),
+        ("coroner frames wrong shapes", snap(coroner={"deaths": [{"died_at": time.time(), "kind": "agent",
+                                                                  "recorder": {"fast": {"columns": ["ts"], "rows": [[None], "x", [1, 2, 3]]},
+                                                                               "proc": [None, "x", {"ts": "abc"}, {"ts": 1, "top": "x"}]},
+                                                                  "evidence": {"markers": "x", "journal": 5, "boots": [],
+                                                                               "pstore": None, "agent": "x"}}]}), None),
+        ("coroner oversized", snap(coroner={"deaths": [{"died_at": time.time() - 1, "kind": "agent", "id": "big",
+                                                        "recorder": {"fast": {"columns": ["ts", "cpu"], "rows": [[1.0, 1.0]] * 20000},
+                                                                     "proc": [{"ts": 1, "top": [[1, "x" * 2000, 1, 1, 1, 1]] * 50}] * 3000},
+                                                        "evidence": {"markers": [{"kind": "k" * 5000, "message": "m" * 20000}] * 400}}]}), None),
         ("plain text content-type", snap(system={"hostname": "sectest"}), {"Content-Type": "text/plain"}),
         ("multipart content-type", snap(system={"hostname": "sectest"}),
          {"Content-Type": "multipart/form-data; boundary=x"}),
