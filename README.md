@@ -20,9 +20,17 @@
 
 ---
 
+> **Try it before you install anything:** **[olayzen.github.io/culprit](https://olayzen.github.io/culprit/)**
+> is the real dashboard running in your browser on a recording of a real five-machine
+> fleet -- no backend, nothing leaves the page. Every few minutes an ffmpeg transcode
+> saturates one node: watch the Lag Doctor name it, end it from the process dialog,
+> and read the verdict. Actions are simulated there, and the banner says so.
+
+---
+
 ## Contents
 
-- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Watch more machines](#watch-more-machines)
+- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Watch more machines](#watch-more-machines)
 - [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
@@ -223,6 +231,23 @@ systemctl --user status|restart|stop culprit
 To reach it from other machines, bind all interfaces: `CULPRIT_HOST=0.0.0.0
 ./culprit.sh`. On anything but a trusted LAN, put TLS in front of it (see
 [Security & privacy](#security--privacy)).
+
+### Try it without installing
+
+The **[live demo](https://olayzen.github.io/culprit/)** is this repository's own
+`web/` served as a static site from the [`demo`](https://github.com/OlaYZen/culprit/tree/demo)
+branch, with an in-browser stand-in for the host: the same views, charts and
+dialogs, answered from JSON recorded off a real fleet and scrubbed (hostnames,
+users, public addresses, MACs, machine ids). It adds the liveness a recording
+cannot hold -- numbers that wander around their recorded values, one scripted
+incident that repeats, an agent that went quiet -- and every action (end task,
+renice, throttle, expectations, settings) plays out in that in-browser world,
+with the verdict watch judging it the way the host would. Nothing there is
+live, and it never will be: it is for seeing what the product does before you
+run it on a machine of your own.
+
+The branch is never merged here; it is refreshed from `main` by its own
+`tools/build_demo.py`, and its README says how.
 
 ### Watch more machines
 
