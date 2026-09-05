@@ -157,6 +157,32 @@ export function createNodes() {
       actions.append(rotate);
 
       if (!revoked) {
+        const capable = node.update_capable === true;
+        const update = el("button.btn.btn--sm", {
+          type: "button", disabled: !capable,
+          title: capable
+            ? "git-pull the agent's latest commit, reinstall dependencies if they changed, and restart it"
+            : (node.update_reason || "update capability not yet reported"),
+        }, ["Update"]);
+        if (capable) {
+          update.addEventListener("click", () => confirmAction({
+            title: `Update ${node.name}?`,
+            message: node.update_available && node.remote_version
+              ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
+              : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
+            detail: "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
+                + "the checkout is rolled back automatically and the current process keeps running unchanged.",
+            confirmLabel: "Update", danger: false,
+            onConfirm: async () => {
+              const outcome = await api(`/api/nodes/${encodeURIComponent(node.name)}/update`, { method: "POST" });
+              return outcome && outcome.updated === false
+                ? `${node.name} was already up to date.`
+                : `${node.name} updated and restarting.`;
+            },
+          }));
+        }
+        actions.append(update);
+
         const revoke = el("button.btn.btn--sm", { type: "button", title: "Reject this node's reports immediately" }, ["Revoke"]);
         revoke.addEventListener("click", () => confirmAction({
           title: `Revoke ${node.name}?`,
@@ -188,7 +214,10 @@ export function createNodes() {
         el("td", {}, [el("div.row", { style: { gap: "6px" } }, [el("span.strong", { text: node.name }), isDocker ? pill("Docker", "info") : null])]),
         el("td", {}, [status]),
         el("td.faint", { text: node.hostname || fmt.dash }),
-        el("td.mono.faint", { text: node.agent_version ? `v${node.agent_version}` : fmt.dash }),
+        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [
+          el("span.mono.faint", { text: node.agent_version ? `v${node.agent_version}` : fmt.dash }),
+          node.update_available ? pill(`v${node.remote_version} available`, "info") : null,
+        ])]),
         el("td", { text: node.last_seen ? fmt.ago(node.last_seen) : "never", title: node.last_seen ? fmt.dateTime(node.last_seen) : "" }),
         el("td.mono.faint", { text: node.last_addr || fmt.dash }),
         el("td", {}, [actions]),
@@ -212,6 +241,7 @@ export function createNodes() {
         kv("Auth", "per-node bearer token, SHA-256-hashed at rest, constant-time checked, revocable here"),
         kv("Transport", "use https:// in the deploy command when crossing an untrusted network (self-signed: add --insecure)"),
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
+        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd; a schedule can also apply these automatically, see Settings"),
       ], { wide: true }),
     }));
   }

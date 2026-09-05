@@ -127,6 +127,7 @@ export function createSettings() {
   const accountSlot = el("div");
   const trustSlot = el("div");
   const deploySlot = el("div");
+  const autoUpdateSlot = el("div");
   const notifySlot = el("div");
   const expectSlot = el("div");
   const form = el("form", { novalidate: true });
@@ -144,7 +145,7 @@ export function createSettings() {
 
   const pages = {
     general: el("div.stack", {}, [figSlot, togglesSlot, infoRow]),
-    deployment: el("div.stack", {}, [deploySlot]),
+    deployment: el("div.stack", {}, [deploySlot, autoUpdateSlot]),
     sampling: el("div.stack", {}, [form]),
     account: el("div.stack", {}, [accountSlot]),
     network: el("div.stack", {}, [trustSlot, nodesSlot]),
@@ -171,6 +172,7 @@ export function createSettings() {
     pendingSlot(accountSlot, skeletonSection("Account", 4));
     pendingSlot(trustSlot, skeletonSection("Network trust", 5));
     pendingSlot(deploySlot, skeletonSection("Agent deployment", 4));
+    pendingSlot(autoUpdateSlot, skeletonSection("Automatic agent updates", 2));
     pendingSlot(notifySlot, skeletonSection("Notifications", 6));
     pendingSlot(expectSlot, skeletonSection("Expected findings", 3));
     if (!groupsSlot.childElementCount) {
@@ -191,6 +193,7 @@ export function createSettings() {
       renderAccount();
       renderTrust();
       renderDeploy();
+      renderAutoUpdate();
       renderNotify();
       renderExpectations();
       renderInfo();
@@ -199,7 +202,7 @@ export function createSettings() {
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
+      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, autoUpdateSlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
       readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
@@ -468,6 +471,55 @@ export function createSettings() {
         ]),
       ]),
       foot: "This is the copy-paste command the Nodes view shows when you enroll or rotate an agent. Changing it here does not affect agents already running.",
+    }));
+  }
+
+  /* ── Automatic agent updates ─────────────────────────────────────── */
+  function renderAutoUpdate() {
+    let enabled = !!config.auto_update_enabled;
+    const hourInput = el("input", {
+      type: "number", id: "set-auto_update_hour", min: 0, max: 23, step: 1,
+      value: String(config.auto_update_hour ?? 3), "aria-label": "Hour to run automatic updates",
+    });
+    const error = el("div.field__err", { id: "err-auto_update_hour", hidden: true });
+    const result = el("div.result");
+    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save"]);
+
+    save.addEventListener("click", async () => {
+      setBusy(save, true, "Saving…");
+      error.hidden = true;
+      hourInput.removeAttribute("aria-invalid");
+      try {
+        const payload = await api("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify({ auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value) }),
+        });
+        config = payload.config;
+        inlineResult(result, "Saved.", "ok");
+      } catch (err) {
+        const message = err.payload?.field_errors?.auto_update_hour;
+        if (message) {
+          error.textContent = message;
+          error.hidden = false;
+          hourInput.setAttribute("aria-invalid", "true");
+          hourInput.focus();
+        }
+        inlineResult(result, message || err.message, "error");
+      }
+      setBusy(save, false, "Save");
+    });
+
+    readySlot(autoUpdateSlot, section({
+      title: "Automatic agent updates",
+      body: el("div", {}, [
+        checkbox({ label: "Automatically update capable agents once a day", checked: enabled,
+          onChange: (v) => { enabled = v; } }),
+        fieldRow({ id: hourInput.id, label: "At hour", unit: "0-23, this host's local time", input: hourInput, error }),
+        el("div.formrow", { style: { marginTop: "10px" } }, [save, result]),
+      ]),
+      foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
+          + "agents that have reported themselves update-capable and behind the version GitHub publishes. "
+          + "The agent is never told a schedule — only ever told to update now.",
     }));
   }
 
