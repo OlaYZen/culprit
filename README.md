@@ -31,7 +31,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Watch more machines](#watch-more-machines)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -303,6 +303,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, a **fill forecast** per mount with the **processes writing there** and the space **held by deleted-but-open files**, SSD/HDD identity |
 | **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
 | **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, exposed-vs-loopback, live inbound-connection counts, each listener's **accept queue against its backlog** with the kernel's turned-away rate (`ListenOverflows`) so a service that is dropping clients is named, and a **one-click kill** with the same guards as End task |
+| **Map** | Who depends on whom across the fleet, from each node's own socket and port tables, and **who is waiting on whom**, from each client's own kernel: per-connection round trip, retransmits and a send queue that is not draining (`ss -ti`, read passively, nothing probed), the target's findings joined onto every edge, the **blast radius** of an action, and **who is using the network** per process |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
@@ -489,6 +490,50 @@ those sources agreed. The Coroner view has the last ten minutes as charts with a
 scrubber: any second shows the numbers at that moment and the processes
 recorded then, so "what was it doing at 03:11:40" is a drag, not a guess.
 Deaths are notified over the same channels as findings.
+
+---
+
+## The Map
+
+The Doctor works inside one box. The Map works between them, and it draws
+itself: every agent already reports its established sockets with the process
+and unit behind each, and its listening ports with the process and unit behind
+those. Joined on the host, a connection from `nginx` on `web-01` to an address
+that is `db-01`'s, on a port `db-01` listens on, is the edge
+*nginx@web-01 → postgres@db-01:5432*. Nobody draws a dependency graph; the
+socket tables are one.
+
+Everything on an edge is what the **client's own kernel** measured for its
+connections, read passively from `tcp_info` (`ss -ti`, no privilege, ~10 ms):
+the smoothed round-trip time against the connection's own minimum, the
+retransmit rate, the bytes per second, and the **send queue** -- bytes the
+client has written that the far side has not acknowledged. A send queue that
+is not draining is the client feeling a slow server, whatever the server's
+own numbers say. No probe is ever sent, so no peer logs a stray connection
+and no synthetic traffic is mistaken for load. Without `ss` the queues still
+come from `/proc/net/tcp` and the rest is honestly absent, and the page says
+so per node.
+
+The target node's findings are joined onto every edge into it: a finding that
+names the listener's process, its unit or its port, or a machine-wide stall.
+An edge into a service under a finding is a **chain**:
+
+> *web-01's nginx holds 12 connections into db-01:5432 (postgres), which is
+> under "Stalled on storage" led by pg_dump.*
+
+stated as **a dependency on a service under a finding**, and upgraded to
+**the client is feeling it** only when the client's own connections show the
+strain (a stuck send queue, retransmits, a round trip several times its own
+minimum). Correlation across machines is exactly where confident nonsense is
+easiest, so the two are kept apart in words.
+
+The same graph read backwards is the **blast radius**: the process dialog on
+`db-01` says *depended on by web-01's nginx (12 connections)* before End task
+or Throttle is offered, and what the process depends on in turn. Peers outside
+the fleet are listed by address, grouped by client process, and not resolved
+(a reverse lookup is a probe). Summed per process, the same data is **who is
+using the network** on the Network view -- upload, download, round trip,
+retransmits -- which no `/proc` counter gives directly.
 
 ---
 
