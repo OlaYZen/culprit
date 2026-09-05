@@ -61,7 +61,8 @@ fleetmap: FleetMap | None = None
 
 async def _sweep_loop() -> None:
     """Housekeeping the ingest path cannot do: verdicts whose node went quiet,
-    notifications for findings that resolved or nodes that stopped reporting."""
+    notifications for findings that resolved or nodes that stopped reporting,
+    the daily auto-update schedule."""
     while True:
         await asyncio.sleep(15.0)
         try:
@@ -69,8 +70,45 @@ async def _sweep_loop() -> None:
                 verifier.sweep()
             if notifier is not None:
                 notifier.sweep()
+            _maybe_auto_update()
         except Exception:  # noqa: BLE001 -- housekeeping must not die
             log.exception("sweep failed")
+
+
+def _maybe_auto_update() -> None:
+    """The entire schedule mechanism: the agent is never handed a schedule,
+    only ever the same "update" command the manual button sends, fired here
+    at a host-decided time. At most once a day per node (History.mark_auto_
+    updated claims the slot atomically), and only for a node that has told us
+    it is both update_capable and update_available -- no point restarting a
+    process that is already current."""
+    cfg = config_module.get()
+    if not cfg.auto_update_enabled or history is None or registry is None:
+        return
+    now = time.localtime()
+    if now.tm_hour != cfg.auto_update_hour:
+        return
+    today = time.strftime("%Y-%m-%d", now)
+    for meta in registry.status_list():
+        if not meta.get("enabled"):
+            continue
+        if meta.get("update_capable") is not True:
+            continue
+        if meta.get("update_available") is not True:
+            continue
+        if not history.mark_auto_updated(str(meta["name"]), today):
+            continue  # already updated today, or the claim lost a race
+        asyncio.get_running_loop().create_task(
+            _run_scheduled_update(str(meta["name"])))
+
+
+async def _run_scheduled_update(name: str) -> None:
+    try:
+        result = await _agent_command(name, "update", {},
+                                      timeout_override=UPDATE_TIMEOUT_S)
+        log.info("scheduled update on '%s' -> %s", name, result)
+    except HTTPException as exc:
+        log.warning("scheduled update on '%s' failed: %s", name, exc.detail)
 
 
 @asynccontextmanager
