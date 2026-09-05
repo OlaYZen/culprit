@@ -40,7 +40,7 @@ DICT_SECTIONS = frozenset({
     "cpu", "memory", "psi", "pressures", "gpu", "disk", "network",
     "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
     "system", "volumes", "events", "errors", "timings", "sampler",
-    "cgroups", "kernel", "changes", "ceilings",
+    "cgroups", "kernel", "changes", "ceilings", "outage",
     # Delivered once after a death and stored, never kept in the snapshot
     # (see NodeRegistry.ingest): a recorder's frames must not ride along
     # in every snapshot poll.
@@ -244,7 +244,7 @@ class NodeRegistry:
             # This report carried a fresh diagnosis (delta reports resend it
             # only when it changed). Annotate in place -- the snapshot is
             # host-owned after sanitise -- then let the observers see it.
-            for hook in (self.expectations, self.verifier, self.notifier):
+            for hook in (self.expectations, self.verifier):
                 if hook is None:
                     continue
                 try:
@@ -254,6 +254,15 @@ class NodeRegistry:
                         hook.observe(name, diagnosis, now)
                 except Exception:  # noqa: BLE001 -- an observer must never break ingest
                     log.exception("diagnosis observer failed for %s", name)
+        if self.notifier is not None and ("diagnosis" in snapshot or "outage" in snapshot):
+            # The notifier sees findings and outage items as one active set
+            # per node (outage keys are namespaced), so each is sent once
+            # while it holds and resolved when it clears, whichever section
+            # the report carried.
+            try:
+                self.notifier.observe(name, _notifiable(merged), now)
+            except Exception:  # noqa: BLE001
+                log.exception("notifier failed for %s", name)
         if deaths is not None and self.coroner is not None:
             try:
                 self.coroner.record(name, deaths)
@@ -518,6 +527,23 @@ class CommandBroker:
             queue[:] = [c for c in queue if c["id"] != cmd_id]
             if not queue:
                 self._pending.pop(node, None)
+
+
+def _notifiable(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The node's diagnosis findings plus its outage items in finding shape,
+    for the notifier: one list, keys namespaced so the two never collide."""
+    diagnosis = _d(snapshot.get("diagnosis"))
+    findings = [f for f in (diagnosis.get("findings") or []) if isinstance(f, dict)]
+    for item in _d(snapshot.get("outage")).get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        findings.append({
+            "key": f"outage:{item.get('key')}", "severity": item.get("severity"),
+            "title": item.get("title"), "detail": item.get("detail"),
+            "resource": item.get("kind"), "evidence": item.get("evidence"),
+            "culprits": [], "outage": True,
+        })
+    return {"findings": findings}
 
 
 def summarise_snapshot(meta: dict[str, Any],
