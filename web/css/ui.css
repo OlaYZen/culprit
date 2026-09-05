@@ -776,3 +776,9 @@
 .because li + li { margin-top: 3px; }
 .because.faint { color: var(--fg-2); }
 .log__item.is-selected { background: var(--bg-3); box-shadow: -14px 0 0 var(--bg-3), 14px 0 0 var(--bg-3); }
+
+/* ── Map: the fleet graph on a canvas ──────────────────────────────────── */
+.mapbox { position: relative; height: 360px; }
+.mapcanvas { display: block; width: 100%; height: 100%; }
+tr[data-tone="warn"] > td:first-child { box-shadow: inset 2px 0 0 var(--warn); }
+tr[data-tone="crit"] > td:first-child { box-shadow: inset 2px 0 0 var(--crit); }
