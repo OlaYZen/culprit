@@ -31,7 +31,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Watch more machines](#watch-more-machines)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -306,6 +306,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Map** | Who depends on whom across the fleet, from each node's own socket and port tables, and **who is waiting on whom**, from each client's own kernel: per-connection round trip, retransmits and a send queue that is not draining (`ss -ti`, read passively, nothing probed), the target's findings joined onto every edge, the **blast radius** of an action, and **who is using the network** per process |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
+| **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -534,6 +535,37 @@ the fleet are listed by address, grouped by client process, and not resolved
 (a reverse lookup is a probe). Summed per process, the same data is **who is
 using the network** on the Network view -- upload, download, round trip,
 retransmits -- which no `/proc` counter gives directly.
+
+---
+
+## The Outage Doctor
+
+Slow and broken are different questions. The Lag Doctor gates every verdict
+on pressure; the Outage Doctor looks at the things that stop a service
+working while every counter looks fine, and walks each one to its root:
+
+| Item | What it walks to |
+|---|---|
+| **A failed unit** | the dependency (`Requires=`, `Requisite=`, `BindsTo=`, `Wants=`) that failed first, two levels deep, and the **root unit's own last error line**, quoted: *postfix is down because mysql failed first (oom-kill): "FATAL: could not open /var/lib/mysql: Read-only file system"* |
+| **A crash loop** | the unit's last error line |
+| **A running unit that no longer listens** | a port a unit held for three slow samples and has not bound for two, while systemd still says *running*: clients get *connection refused* and every status light is green |
+| **A certificate** | one local TLS handshake an hour to each listener on a TLS port (443, 8443, 993, 636, 853, 6443 ...) or held by a TLS terminator (nginx, haproxy, caddy, traefik ...), the validity read from the DER by a forty-line ASN.1 walk (no library): **expired is critical**, seven days is a warning, thirty is information |
+| **The clock** | `timedatectl`: enabled but not synchronised (with the offset), or no time service at all |
+| **DNS** | the resolver failing the resolution probe twice in a row, with resolved's own timeout rate |
+| **A read-only remount** | a filesystem that was writable when the agent started and is `ro` now: the kernel does that after an error, and every write fails from that moment |
+| **`/boot`** | under 150 MB free: the next kernel will not fit and apt breaks half-way |
+| **Storage errors** · **a pending reboot** | the kernel's IO errors of the last day; a newer kernel or replaced libraries waiting for a restart (information, not an outage) |
+
+Every item names its unit, its root, its evidence and its **fix** (a copyable
+command), how long it has held, and what changed in the minutes before it
+began, from the same change log the Lag Doctor uses. Nothing fires from a
+threshold: a certificate with weeks left and a pending reboot are shown as
+information; an expired certificate on a live listener is the outage. Every
+check reports its own availability -- a journal that needs the group, a
+port map that could not be read -- rather than rendering as fine. A healthy
+box shows a page that says nothing is broken, and the checks strip says what
+was looked at. Outage items go out over the notification channels like
+findings, once while they hold and once when they clear.
 
 ---
 
