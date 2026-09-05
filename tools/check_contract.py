@@ -180,6 +180,18 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "network_detail.sockets.available", "network_detail.sockets.by_state",
             "network_detail.sockets.total", "network_detail.sockets.listeners",
             "network_detail.sockets.established",
+            # Per-connection tcp_info (read passively via `ss -ti`) and the
+            # per-process sums the Map and the Network view read.
+            "network_detail.sockets.tcp_info", "network_detail.sockets.tcp_info_reason",
+            "network_detail.sockets.established[].pid", "network_detail.sockets.established[].name",
+            "network_detail.sockets.established[].local", "network_detail.sockets.established[].remote",
+            "network_detail.sockets.established[].tx_queue", "network_detail.sockets.established[].rx_queue",
+            "network_detail.sockets.per_process", "network_detail.sockets.per_process[].pid",
+            "network_detail.sockets.per_process[].name", "network_detail.sockets.per_process[].connections",
+            "network_detail.sockets.per_process[].send_bytes_sec",
+            "network_detail.sockets.per_process[].recv_bytes_sec",
+            "network_detail.sockets.per_process[].rtt_ms", "network_detail.sockets.per_process[].retrans",
+            "network_detail.sockets.per_process[].peers",
             "network_detail.connectivity.checked_at",
             "network_detail.vpn.active", "network_detail.vpn.adapters",
             "network_detail.vpn.full_tunnel", "network_detail.vpn.via_exit_ip",
@@ -228,6 +240,28 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         ],
         # "What changed" section: the agent's change log.
         "node:changes": ["available", "events", "count", "recording_since"],
+    },
+    "map": {
+        # Built at read time from every node's socket and port tables; edges
+        # and chains are empty until two enrolled nodes talk to each other.
+        "/api/map": [
+            "ts", "nodes", "nodes[].name", "nodes[].online", "nodes[].severity",
+            "nodes[].addresses", "nodes[].listeners", "nodes[].edges_in",
+            "nodes[].edges_out",
+            "edges", "edges[].id", "edges[].from", "edges[].from_name",
+            "edges[].from_unit", "edges[].to", "edges[].to_port", "edges[].to_name",
+            "edges[].connections", "edges[].rtt_ms", "edges[].rtt_min_ms",
+            "edges[].retrans_sec", "edges[].tx_queue", "edges[].send_bytes_sec",
+            "edges[].recv_bytes_sec", "edges[].stalled", "edges[].listening",
+            "edges[].health.severity", "edges[].health.findings",
+            "edges[].health.signs", "edges[].health.turned_away",
+            "chains", "chains[].text", "chains[].verdict", "chains[].severity",
+            "chains[].from", "chains[].to", "chains[].to_port", "chains[].signs",
+            "external", "external[].node", "external[].name", "external[].remote",
+            "external[].ports", "external[].connections", "external[].rtt_ms",
+            "external[].send_bytes_sec", "external[].recv_bytes_sec",
+            "coverage.online", "coverage.unattributed", "coverage.notes",
+        ],
     },
     "coroner": {
         # Deaths across the fleet (the view filters by node). The list carries
