@@ -124,6 +124,16 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "interval_fast": _finite(meta.get("interval_fast"), *INTERVAL_RANGE),
         "version": _short(meta.get("version"), 64),
         "name_claim": _short(meta.get("name"), 64),
+        # Self-update: capable()/fetch_remote_version() on the agent side
+        # (culprit-agent/culprit/updater.py). Booleans are type-checked, not
+        # just truthy-coerced, so a malformed report degrades to "unknown"
+        # (None) rather than a false claim either way.
+        "update_capable": meta.get("update_capable")
+            if isinstance(meta.get("update_capable"), bool) else None,
+        "update_available": meta.get("update_available")
+            if isinstance(meta.get("update_available"), bool) else None,
+        "update_reason": _short(meta.get("update_reason"), 200),
+        "remote_version": _short(meta.get("remote_version"), 64),
     }
     snapshot: dict[str, Any] = {}
     dropped: list[str] = []
@@ -163,6 +173,12 @@ class _Node:
         self.report_interval = 1.0
         self.interval_fast: float | None = None
         self.agent_version: str | None = None
+        # Self-update state, refreshed from the agent's own report meta --
+        # never guessed host-side. See sanitise_report()'s "update_*" keys.
+        self.update_capable: bool | None = None
+        self.update_available: bool | None = None
+        self.update_reason: str | None = None
+        self.remote_version: str | None = None
         # Desired setting overrides, handed back to the agent in the response
         # to its next report -- the push-only channel's one-way "downlink".
         # Deliberately in memory only: this mirrors the titlebar Refresh
@@ -236,6 +252,12 @@ class NodeRegistry:
                 node.interval_fast = meta["interval_fast"]
             if meta["version"] is not None:
                 node.agent_version = meta["version"]
+            if meta["update_capable"] is not None:
+                node.update_capable = meta["update_capable"]
+                node.update_reason = meta["update_reason"]
+            if meta["update_available"] is not None:
+                node.update_available = meta["update_available"]
+                node.remote_version = meta["remote_version"]
             settings = dict(node.settings)
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
@@ -360,6 +382,8 @@ class NodeRegistry:
                 "name": name, "online": False, "last_seen": agent.get("last_seen"),
                 "report_interval": None, "agent_version": None,
                 "hostname": None, "os": None, "container": None,
+                "update_capable": None, "update_available": None,
+                "update_reason": None, "remote_version": None,
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -383,6 +407,10 @@ class NodeRegistry:
             "report_interval": node.report_interval,
             "interval_fast": node.interval_fast,
             "agent_version": node.agent_version,
+            "update_capable": node.update_capable,
+            "update_available": node.update_available,
+            "update_reason": node.update_reason,
+            "remote_version": node.remote_version,
             # Clamped: these travel in every node list and every SSE snapshot
             # frame, so a 2 MB "hostname" would be amplified to every viewer.
             "hostname": _short(system.get("hostname")),

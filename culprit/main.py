@@ -423,14 +423,16 @@ async def api_agent_report(request: Request) -> dict[str, Any]:
 
 # ------------------------------------------------- remote actions (via agent)
 async def _agent_command(name: str, action: str, payload: dict[str, Any],
-                         ) -> Any:
+                         timeout_override: float | None = None) -> Any:
     """Queue a command for an agent, wait for its result, and return it.
 
     The agent runs the command with the same collector code the host uses on
     itself, so remote process detail / End task / renice are the same
     operations -- just relayed. Latency is one report interval; the timeout is
     sized from the node's own cadence so a slow-reporting agent is not cut off
-    prematurely.
+    prematurely. `timeout_override` is for actions whose own duration has
+    nothing to do with report cadence (a git pull + pip install can run well
+    past the usual 45s dialog-wait cap -- see UPDATE_TIMEOUT_S).
     """
     assert history is not None and registry is not None and commands is not None
     agents = {a["name"]: a for a in history.list_agents()}
@@ -443,7 +445,8 @@ async def _agent_command(name: str, action: str, payload: dict[str, Any],
     # Sized from the node's cadence, but capped: the cadence is the agent's
     # own claim (already clamped to 60s on ingest), and a request must never
     # be parked for longer than a person will wait on a dialog.
-    timeout = min(45.0, max(8.0, float(interval) * 2 + 3.0))
+    timeout = (timeout_override if timeout_override is not None
+              else min(45.0, max(8.0, float(interval) * 2 + 3.0)))
 
     cmd_id, future = commands.submit(name, action, payload)
     try:
@@ -529,6 +532,31 @@ async def api_node_throttle(
         raise HTTPException(422, f"level must be one of {', '.join(_THROTTLE_LEVELS)}")
     return await _verified_action(request, name, "throttle",
                                   {"pid": pid, "level": level})
+
+
+# A git fetch + pip install can run well past a process action's usual
+# few-second budget -- fixed and independent of report cadence, unlike the
+# formula _agent_command falls back to.
+UPDATE_TIMEOUT_S = 120.0
+
+
+@app.post("/api/nodes/{name}/update",
+          summary="git-pull this agent's checkout and restart it")
+async def api_node_update(request: Request, name: str) -> dict[str, Any]:
+    """Not wrapped in _verified_action: that machinery is a before/after
+    diagnosis comparison for process actions, and does not apply here."""
+    assert registry is not None
+    meta = next((n for n in registry.status_list() if n["name"] == name), None)
+    if meta is None:
+        raise HTTPException(404, f"no agent named '{name}'")
+    if meta.get("update_capable") is not True:
+        raise HTTPException(409, meta.get("update_reason")
+                            or "this agent has not reported update capability yet")
+    result = await _agent_command(name, "update", {},
+                                  timeout_override=UPDATE_TIMEOUT_S)
+    log.info("update triggered on '%s' by %s -> %s", name,
+             getattr(request.state, "user", "?"), result)
+    return result
 
 
 @app.get("/api/nodes/{name}/actions/{action_id}",
