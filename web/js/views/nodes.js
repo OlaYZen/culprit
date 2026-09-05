@@ -216,7 +216,9 @@ export function createNodes() {
         el("td.faint", { text: node.hostname || fmt.dash }),
         el("td", {}, [el("div.row", { style: { gap: "6px" } }, [
           el("span.mono.faint", { text: node.agent_version ? `v${node.agent_version}` : fmt.dash }),
-          node.update_available ? pill(`v${node.remote_version} available`, "info") : null,
+          // Docker updates through the image, not this git-pull path — the
+          // badge would just be noise with no action behind it.
+          node.update_available && !isDocker ? pill(`v${node.remote_version} available`, "info") : null,
         ])]),
         el("td", { text: node.last_seen ? fmt.ago(node.last_seen) : "never", title: node.last_seen ? fmt.dateTime(node.last_seen) : "" }),
         el("td.mono.faint", { text: node.last_addr || fmt.dash }),
