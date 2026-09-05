@@ -31,7 +31,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Watch more machines](#watch-more-machines)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -312,6 +312,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Sessions** | Sign-in history from logind paired on session id, **current sessions with SSH logins named** (user + remote host), lock state, boots and shutdowns |
 | **Sync** | Syncthing, rclone, OneDrive, Nextcloud, Dropbox, plus an **inotify watch-exhaustion** panel: the failure that silently breaks sync while every status light stays green |
 | **Trends** | Everything above rolled up on disk, per node, so you can ask what was happening on `web-01` at 14:20 yesterday, with findings folded into **incidents** (start, end, peak, who led it for how many minutes, and every action taken with its verdict) |
+| **Deaths** | The **Coroner**: when a machine (or only its agent) stops without a clean shutdown, the agent's next start brings back its **flight recorder** (the last ten minutes, every second, kept on disk) and the previous boot's own journal, and the host says what happened: a clean reboot and who asked for it, a hang under memory pressure with the process that was growing, a kernel panic, or an honest *stopped without warning* |
 
 ---
 
@@ -439,6 +440,55 @@ window on chosen weekdays. It stays visible with its evidence, reads as
 *expected* (severity info, reason attached), is never notified or written to
 history as an incident, and comes back as a real finding, with a note on how far
 it overran, once its window has ended.
+
+---
+
+## The Coroner
+
+The Doctor answers "why is it slow now". The Coroner answers the question that
+used to have no answer anywhere: **what killed it at 03:12?**
+
+Every agent keeps a **flight recorder**: the last ten minutes at the sampler's
+own cadence (every second for CPU, memory, PSI, disk, network and thermal
+throttling; every process tick for the heaviest processes, the biggest by
+memory, anything stuck, and the active findings), rewritten atomically to
+`data/flight-recorder.json.gz` every five seconds. Roughly 40 KB gzipped, one
+small write; the whole cost. History on the host is rolled up per minute,
+which is precisely the resolution that hides how a machine died: the memory
+that drained over ninety seconds, the process that climbed for four minutes.
+
+When the agent starts and finds a recording without a clean stop, that is a
+**death**. The kernel's boot id says whether the *machine* rebooted or only the
+agent restarted (a stop the agent handled, SIGTERM, marks the file and is never
+counted). The agent then reads the previous boot's journal for the half hour
+before the record ends: the shutdown path (*Reached target Shutdown*, logind
+announcing a reboot, the `sudo ... reboot` line and who ran it, the power key,
+unattended-upgrades), the kernel's last words (OOM kills with their victim,
+panics, watchdog lockups, thermal trips, hung tasks, disk errors, machine
+checks), what survived in pstore, and the packages installed shortly before (a
+kernel upgrade is the usual honest reason for a reboot). When only the agent
+died, it reads what systemd recorded about the agent's own unit instead. All of
+it goes to the host **once**, and the host adds what it had already written
+down: the findings of the last quarter hour and the change log.
+
+The verdict is one of a few classes, each earned by evidence:
+
+| Verdict | Claimed only when |
+|---|---|
+| **Rebooted / powered off by `<who>`** | the shutdown path ran; named from the `sudo` line, logind's user, the power key or unattended-upgrades; *after a kernel upgrade* when one was installed shortly before |
+| **Ran out of memory, then stopped** | the recorder shows memory exhausted or PSI memory stalls in the last minute, or the kernel logged OOM kills; names the process that **grew most** over the window, with its rate |
+| **Kernel panic** · **Hardware error** · **Locked up** | the kernel left a note (a panic line, pstore output, a machine check, the watchdog) |
+| **Overheated** · **Storage stopped answering** | throttling or a thermal trip, or IO stalls / disk errors / hung tasks, in the last minute |
+| **Stopped without warning** | none of the above: the honest name for a power cut, a hypervisor reset and a hard lockup alike, because the record cannot tell them apart -- so neither does the verdict |
+| **The agent was OOM-killed / killed / crashed / stopped** | only the agent died: systemd's exit record or the kernel's OOM line naming the agent's pid |
+
+Every verdict shows its evidence line by line, its **confidence**, and what it
+**could not check** (a journal that needs the `systemd-journal` group, a pstore
+that needs root, an agent that is not a systemd service) rather than pretending
+those sources agreed. The Coroner view has the last ten minutes as charts with a
+scrubber: any second shows the numbers at that moment and the processes
+recorded then, so "what was it doing at 03:11:40" is a drag, not a guess.
+Deaths are notified over the same channels as findings.
 
 ---
 
