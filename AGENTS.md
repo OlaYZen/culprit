@@ -180,7 +180,7 @@ Every optional source degrades to an explicit `available: False` + `reason`, nev
 
 ## Gotchas
 
-- `config.json` and `agent.json` are runtime state (gitignored). `agent.json` holds the agent's token — chmod 600.
+- `config.json` is runtime state (gitignored). The agent writes nothing into its checkout: its `agent.json` (the token, chmod 600), venv and flight recorder live under the running user's `~/.config/culprit-agent/` and `~/.local/share/culprit-agent/` (root's own under sudo), so `git pull` keeps working there.
 - The dev/target machine is a headless KVM Ubuntu 24.04 guest: no GPU driver (GPU degrades to "unavailable"), no smartmontools, an NFS mount that must never be `statvfs`'d, cgroup v2, PSI enabled, systemd 255.
 - Commit charge is shown always but **alerted on only under strict overcommit** (`vm.overcommit_memory=2`) — under the default heuristic policy `Committed_AS` exceeding `CommitLimit` is normal.
 - Probe before building a new source: confirm the sysfs/proc path and *measure the cost* on the target, the way the existing collectors were built.
