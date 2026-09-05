@@ -109,6 +109,11 @@
           <span>Lag Doctor</span>
           <span class="nav__badge" data-bind="badge-doctor" hidden></span>
         </button>
+        <button class="nav__item" data-nav="outage">
+          <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H12z"/></svg>
+          <span>Outage Doctor</span>
+          <span class="nav__badge" data-bind="badge-outage" hidden></span>
+        </button>
         <button class="nav__item" data-nav="processes">
           <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
           <span>Processes</span>
@@ -293,6 +298,11 @@
     <div class="sheet__grab" aria-hidden="true"></div>
     <div class="sheet__label">Views</div>
     <div class="sheet__views">
+      <button class="sheet__view" data-nav="outage">
+        <svg viewBox="0 0 24 24"><path d="M13 2L4.5 13.5H11L10 22l8.5-11.5H12z"/></svg>
+        <span>Outage Doctor</span>
+        <span class="nav__badge" data-bind="badge-outage-m" hidden></span>
+      </button>
       <button class="sheet__view" data-nav="services">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
         <span>Services</span>

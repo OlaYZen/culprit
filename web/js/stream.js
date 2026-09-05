@@ -22,7 +22,7 @@
 const SECTIONS = [
   "system", "cpu", "memory", "psi", "gpu", "disk", "network", "pressures",
   "process_table", "diagnosis", "volumes", "services", "network_detail",
-  "ports", "sync", "events", "cgroups", "kernel", "changes", "ceilings", "config",
+  "ports", "sync", "events", "cgroups", "kernel", "changes", "ceilings", "outage", "config",
 ];
 
 class Store {
@@ -261,7 +261,7 @@ class Store {
       fast: ["cpu", "memory", "psi", "gpu", "disk", "network", "pressures"],
       proc: ["process_table"],
       diagnosis: ["diagnosis"],
-      slow: ["volumes", "services", "network_detail", "ports", "sync", "system"],
+      slow: ["volumes", "services", "network_detail", "ports", "sync", "system", "outage"],
       events: ["events"],
     })) {
       source.addEventListener(name, (event) => {

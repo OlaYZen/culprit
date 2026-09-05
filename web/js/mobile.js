@@ -42,7 +42,7 @@ export function initMobile() {
   place();
   MOBILE.addEventListener("change", () => { place(); if (!MOBILE.matches) close(); });
 
-  store.on(["diagnosis", "services", "events", "sync", "volumes", "nodes"], (state) => updateBadges(state));
+  store.on(["diagnosis", "outage", "services", "events", "sync", "volumes", "nodes"], (state) => updateBadges(state));
   updateBadges(store.state);
 }
 
@@ -110,6 +110,7 @@ function updateBadges(state) {
   dot("botnav-doctor-dot", doctorSev);
 
   const services = (state.services || {}).problems || [];
+  const broken = ((state.outage || {}).items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
   const crashes = ((state.events || {}).crashes || {}).events || [];
   const eventsCrit = crashes.filter((e) => e.severity === "critical").length;
   const offline = (state.nodes || []).filter((n) => !n.online && n.enabled !== false).length;
@@ -117,9 +118,10 @@ function updateBadges(state) {
   const lowSpace = (((state.volumes || {}).volumes) || []).filter((v) => (100 - v.percent) <= 10).length;
 
   badge("badge-services-m", services.length);
+  badge("badge-outage-m", broken.length);
   badge("badge-events-m", eventsCrit);
   badge("badge-nodes-m", offline);
-  dot("botnav-more-dot", (services.length || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
+  dot("botnav-more-dot", (services.length || broken.length || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
 }
 
 function dot(bind, severity) {
