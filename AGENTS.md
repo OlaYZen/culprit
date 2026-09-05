@@ -180,6 +180,7 @@ Every optional source degrades to an explicit `available: False` + `reason`, nev
 
 ## Gotchas
 
+- `ports.json` at the repo root is the one map from port numbers to well-known names (after IANA / Wikipedia's list; `tcp` plus the `udp` names that differ). `culprit/portnames.py` reads it once and `GET /api/portnames` serves it; `web/js/portnames.js` caches it and the Ports and Map views label numbers with it (`.portname`). A name is a hint about the number, never a claim about the process, which always comes from /proc. Add ports there, not in the views.
 - `config.json` is runtime state (gitignored). The agent writes nothing into its checkout: its `agent.json` (the token, chmod 600), venv and flight recorder live under the running user's `~/.config/culprit-agent/` and `~/.local/share/culprit-agent/` (root's own under sudo), so `git pull` keeps working there.
 - The dev/target machine is a headless KVM Ubuntu 24.04 guest: no GPU driver (GPU degrades to "unavailable"), no smartmontools, an NFS mount that must never be `statvfs`'d, cgroup v2, PSI enabled, systemd 255.
 - Commit charge is shown always but **alerted on only under strict overcommit** (`vm.overcommit_memory=2`) — under the default heuristic policy `Committed_AS` exceeding `CommitLimit` is normal.
