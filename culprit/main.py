@@ -32,6 +32,7 @@ from .auth import SESSION_COOKIE, Auth, ensure_default_user
 from .coroner import Coroner
 from .db import LOCAL_NODE, History
 from .expect import Expectations
+from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
 from .notify import Notifier
@@ -53,6 +54,7 @@ expectations: Expectations | None = None
 verifier: ActionVerifier | None = None
 notifier: Notifier | None = None
 coroner: Coroner | None = None
+fleetmap: FleetMap | None = None
 
 
 async def _sweep_loop() -> None:
@@ -71,7 +73,7 @@ async def _sweep_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global history, auth, registry, commands, expectations, verifier, notifier, coroner
+    global history, auth, registry, commands, expectations, verifier, notifier, coroner, fleetmap
     cfg = config_module.load()
     logging.basicConfig(
         level=logging.INFO,
@@ -101,6 +103,7 @@ async def lifespan(app: FastAPI):
     registry.verifier = verifier
     registry.notifier = notifier
     registry.coroner = coroner
+    fleetmap = FleetMap(registry)
     sweeper = asyncio.get_running_loop().create_task(_sweep_loop())
     # This host is an aggregator + dashboard only: it ingests external agents
     # and serves the UI, and no longer samples its own machine. So the local
@@ -967,6 +970,25 @@ async def api_history_record(
     if history is None:
         raise HTTPException(503, "history is not initialised")
     return history.action_record(node, name or None, unit or None)
+
+
+# --------------------------------------------------------------------- map
+@app.get("/api/map", summary="The fleet map: who depends on whom, and who is waiting")
+async def api_map() -> dict[str, Any]:
+    """Built at read time from the nodes' own socket and port tables: an
+    edge per (client process, node, listener), with the client kernel's RTT,
+    retransmits, queues and byte rate, and the target's findings joined on."""
+    assert fleetmap is not None
+    return fleetmap.build()
+
+
+@app.get("/api/map/radius", summary="Who would feel an action on this process")
+async def api_map_radius(
+    node: str = Query(..., min_length=1, max_length=64),
+    pid: int = Query(..., ge=1),
+) -> dict[str, Any]:
+    assert fleetmap is not None
+    return fleetmap.radius(node, pid)
 
 
 # ------------------------------------------------------------------ deaths
