@@ -20,6 +20,7 @@ import { createServices } from "./views/services.js";
 import { createStorage } from "./views/storage.js";
 import { createNetwork } from "./views/network.js";
 import { createPorts } from "./views/ports.js";
+import { createMap } from "./views/map.js";
 import { createEvents } from "./views/events.js";
 import { createCoroner } from "./views/coroner.js";
 import { createSessions } from "./views/sessions.js";
@@ -37,6 +38,7 @@ const FACTORIES = {
   storage: createStorage,
   network: createNetwork,
   ports: createPorts,
+  map: createMap,
   events: createEvents,
   coroner: createCoroner,
   sessions: createSessions,
@@ -49,7 +51,7 @@ const FACTORIES = {
 const TITLES = {
   overview: "Overview", doctor: "Lag Doctor", processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
-  ports: "Ports", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
+  ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
   trends: "Trends", nodes: "Nodes", settings: "Settings",
 };
 

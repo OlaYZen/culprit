@@ -334,8 +334,42 @@ export async function openProcessModal(pid) {
     + `&unit=${encodeURIComponent(detail.unit?.name || "")}`)
     .then((payload) => { const block = trackRecord(payload); if (block) recordSlot.replaceChildren(block); })
     .catch((error) => console.warn("track record unavailable:", error));
+  // The blast radius, from the fleet map: which other nodes hold connections
+  // into this process (or its unit), and what it depends on itself. Stated
+  // before End task or Throttle is offered, not after.
+  const radiusSlot = el("div");
+  body.append(radiusSlot);
+  api(`/api/map/radius?node=${encodeURIComponent(store.node)}&pid=${pid}`)
+    .then((payload) => { const block = blastRadius(payload); if (block) radiusSlot.replaceChildren(block); })
+    .catch((error) => console.warn("blast radius unavailable:", error));
   wireCopy(body);
   buildProcessFooter(handle.footer, detail);
+}
+
+/** "Depended on by web-01's nginx (12 connections) · depends on db-01:5432." */
+function blastRadius(payload) {
+  const inbound = payload?.depended_on_by || [];
+  const outbound = payload?.depends_on || [];
+  if (!inbound.length && !outbound.length) return null;
+  const chip = (e, side) => el("span.pill", { dataset: { tone: side === "in" ? "warn" : (VERDICT_TONE[e.severity] || null) },
+    title: `${fmt.count(e.connections)} connection(s)${e.unit ? ` · ${e.unit}` : ""}` },
+  [side === "in"
+    ? `${e.node}'s ${fmt.imageName(e.name || "?")} → :${e.port} · ${fmt.count(e.connections)} conn`
+    : `→ ${e.node}:${e.port}${e.name ? ` (${fmt.imageName(e.name)})` : ""} · ${fmt.count(e.connections)} conn`]);
+  const rows = [];
+  if (inbound.length) {
+    rows.push(kv(`Depended on by ${payload.nodes_in.length} node${payload.nodes_in.length === 1 ? "" : "s"}`,
+      el("span.pills", {}, inbound.slice(0, 8).map((e) => chip(e, "in")))));
+  }
+  if (outbound.length) rows.push(kv("Depends on", el("span.pills", {}, outbound.slice(0, 8).map((e) => chip(e, "out")))));
+  return el("div", { style: { marginTop: "10px" } }, [
+    subhead("Across the fleet"),
+    el("div.faint.small", { style: { margin: "2px 0 6px" },
+      text: inbound.length
+        ? `Ending or throttling this ${payload.unit ? "unit" : "process"} cuts ${fmt.count(payload.connections_in)} live connection(s) from other nodes.`
+        : "Nothing on another node holds a connection into this process." }),
+    kvs(rows),
+  ]);
 }
 
 function processDetailBody(detail) {
