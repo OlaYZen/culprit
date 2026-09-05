@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config as config_module
 from . import trust
 from .auth import SESSION_COOKIE, Auth, ensure_default_user
+from .coroner import Coroner
 from .db import LOCAL_NODE, History
 from .expect import Expectations
 from .expect import validate as validate_expectation
@@ -51,6 +52,7 @@ commands: CommandBroker | None = None
 expectations: Expectations | None = None
 verifier: ActionVerifier | None = None
 notifier: Notifier | None = None
+coroner: Coroner | None = None
 
 
 async def _sweep_loop() -> None:
@@ -69,7 +71,7 @@ async def _sweep_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global history, auth, registry, commands, expectations, verifier, notifier
+    global history, auth, registry, commands, expectations, verifier, notifier, coroner
     cfg = config_module.load()
     logging.basicConfig(
         level=logging.INFO,
@@ -94,9 +96,11 @@ async def lifespan(app: FastAPI):
     expectations = Expectations(history)
     verifier = ActionVerifier(history)
     notifier = Notifier()
+    coroner = Coroner(history, notifier)
     registry.expectations = expectations
     registry.verifier = verifier
     registry.notifier = notifier
+    registry.coroner = coroner
     sweeper = asyncio.get_running_loop().create_task(_sweep_loop())
     # This host is an aggregator + dashboard only: it ingests external agents
     # and serves the UI, and no longer samples its own machine. So the local
@@ -963,6 +967,32 @@ async def api_history_record(
     if history is None:
         raise HTTPException(503, "history is not initialised")
     return history.action_record(node, name or None, unit or None)
+
+
+# ------------------------------------------------------------------ deaths
+@app.get("/api/deaths", summary="How nodes died: the Coroner's verdicts")
+async def api_deaths(
+    node: str | None = Query(None, max_length=64),
+    since: float | None = Query(None, description="Epoch seconds; default 90 days ago"),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Every death the Coroner has recorded (newest first), without the
+    recorder frames -- those are read per death from /api/deaths/{id}."""
+    if history is None:
+        raise HTTPException(503, "history is not initialised")
+    start = since if since is not None else time.time() - 90 * 86400
+    return {"since": start, "node": node,
+            "deaths": history.deaths(node=node or None, since=start, limit=limit)}
+
+
+@app.get("/api/deaths/{death_id}", summary="One death: verdict, evidence and the recorder")
+async def api_death(death_id: int) -> dict[str, Any]:
+    if history is None:
+        raise HTTPException(503, "history is not initialised")
+    entry = history.death(death_id)
+    if entry is None:
+        raise HTTPException(404, "no such death")
+    return entry
 
 
 # ------------------------------------------------------------- expectations

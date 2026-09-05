@@ -160,6 +160,19 @@ class Notifier:
                               "stopped -- either way, its numbers are stale.",
                 }, cfg))
 
+    def announce(self, node: str, title: str, detail: str, severity: str,
+                 kind: str = "event") -> None:
+        """One message that is not a finding: the Coroner's verdict on a
+        death, or an outage. Sent once, subject to the same channels and
+        rate limit; nothing is tracked or resolved afterwards."""
+        cfg = config_module.get()
+        if not _channels(cfg):
+            return
+        if _RANK.get(severity, 0) < _RANK.get(cfg.notify_min_severity, 1):
+            return
+        self._enqueue(_message(kind, node, {"title": title, "detail": detail,
+                                            "severity": severity}, cfg))
+
     def forget_node(self, node: str) -> None:
         with self._lock:
             for key in [k for k in self._active if k[0] == node]:
