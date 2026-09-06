@@ -929,7 +929,7 @@ export function renderProcessTable(container, processes, { metaNode } = {}) {
   if (metaNode) patchText(metaNode, `${processes.length} images`);
 }
 
-const VERDICT_TONE = { helped: "ok", partial: "info", no_change: "warn" };
+// VERDICT_TONE is already declared above (watchVerdict/openVerdictModal's use).
 const ACTION_LABEL = { terminate: "End task", priority: "Lower priority", throttle: "Throttle" };
 
 /** Incidents log, as used by Trends and Compare. `onPeak(ts)` opens whatever
