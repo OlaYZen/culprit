@@ -172,6 +172,26 @@ def check_ingest_update_fields(history: History) -> None:
     check("a non-bool update_capable sanitises to 'no change', not a false claim",
           meta["update_capable"] is False)  # unchanged from the last real report
 
+    registry.ingest("update-test-node", {"agent": {"update_refs": True}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("update_refs is carried from the report", meta["update_refs"] is True)
+    registry.ingest("update-test-node", {"agent": {"version": "2.0.0"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("omitting update_refs later keeps the prior value", meta["update_refs"] is True)
+    registry.ingest("update-test-node", {"agent": {"update_refs": "yes"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("a non-bool update_refs is ignored, never a claim", meta["update_refs"] is True)
+    check("an unpinned agent reports no pin",
+          meta.get("pinned_version") is None and meta.get("pinned_ref") is None)
+    history.set_agent_pin("update-test-node", "1.5.0", "abc1234")
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("a pin set on the host shows in the node list",
+          meta["pinned_version"] == "1.5.0" and meta["pinned_ref"] == "abc1234")
+    history.set_agent_pin("update-test-node", None, None)
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("clearing the pin clears both fields", meta["pinned_version"] is None and meta["pinned_ref"] is None)
+    check("pinning an unknown agent reports no row", history.set_agent_pin("nope", "1.0", "x") is False)
+
     registry.ingest("brand-new-unlisted-node", {"agent": {"version": "9.9.9"}})
     check("an unenrolled node's report does not appear in status_list "
           "(only history.list_agents() is authoritative)",
@@ -273,6 +293,10 @@ def check_sweep_decision() -> None:
                       _FakeHistory(), enabled=True, hour=now_hour)
     check("a capable but already-current agent is skipped", fired == [])
 
+    fired = run_sweep(main_mod, _FakeRegistry([{**ready, "pinned_version": "0.18.2-b"}]),
+                      _FakeHistory(), enabled=True, hour=now_hour)
+    check("a pinned agent is never moved by the schedule", fired == [])
+
     hist = _FakeHistory()
     fired = run_sweep(main_mod, _FakeRegistry([ready]), hist,
                       enabled=True, hour=now_hour)
@@ -321,6 +345,9 @@ def check_update_targets() -> None:
           reason(update_available=None) == "update availability not yet known")
     check("Docker wins over offline in the reason (it never updates this way)",
           reason(container="docker", online=False).startswith("runs in docker"))
+    check("a pinned agent is skipped and the pin is named",
+          reason(pinned_version="0.18.2-b") == "pinned to v0.18.2-b")
+    check("an empty pin is no pin", reason(pinned_version=None) == "<targeted>")
 
     fleet = [ready, {**ready, "name": "dock", "container": "docker"},
              {**ready, "name": "old", "update_available": False},
