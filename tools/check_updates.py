@@ -160,6 +160,11 @@ def check_ingest_update_fields(history: History) -> None:
     meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
     check("capable + older than remote -> update available",
           meta["update_capable"] is True and meta["update_available"] is True)
+    check("update_self_broken rides the node meta (1.0.0 is past the fix)",
+          meta["update_self_broken"] is False)
+    registry.ingest("update-test-node", {"agent": {"version": "0.18.0-b"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("a 0.18.0-b agent is marked as unable to update itself", meta["update_self_broken"] is True)
 
     registry.ingest("update-test-node",
                     {"agent": {"version": "2.0.0", "update_capable": True}})
@@ -324,6 +329,10 @@ def check_sweep_decision() -> None:
                       _FakeHistory(), enabled=True, hour=now_hour)
     check("a pinned agent is never moved by the schedule", fired == [])
 
+    fired = run_sweep(main_mod, _FakeRegistry([{**ready, "update_self_broken": True}]),
+                      _FakeHistory(), enabled=True, hour=now_hour)
+    check("an agent whose updater never worked is not asked daily", fired == [])
+
     hist = _FakeHistory()
     fired = run_sweep(main_mod, _FakeRegistry([ready]), hist,
                       enabled=True, hour=now_hour)
@@ -374,6 +383,14 @@ def check_update_targets() -> None:
           reason(container="docker", online=False).startswith("runs in docker"))
     check("a pinned agent is skipped and the pin is named",
           reason(pinned_version="0.18.2-b") == "pinned to v0.18.2-b")
+    check("an agent below 0.18.1-b cannot update itself and says what to do",
+          reason(agent_version="0.18.0-b").startswith("agent v0.18.0-b cannot update itself")
+          and "agent.sh" in reason(agent_version="0.17.3-b"))
+    check("0.18.1-b and later are not held back by that rule",
+          reason(agent_version="0.18.1-b") == "<targeted>" and reason(agent_version="0.21.0-b") == "<targeted>")
+    check("self_update_broken: below, at, unknown",
+          nodes_mod.self_update_broken("0.18.0-b") is True and nodes_mod.self_update_broken("0.18.1-b") is False
+          and nodes_mod.self_update_broken(None) is None)
     check("an empty pin is no pin", reason(pinned_version=None) == "<targeted>")
 
     fleet = [ready, {**ready, "name": "dock", "container": "docker"},

@@ -351,7 +351,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].update_capable", "nodes[].update_available",
             "nodes[].update_reason", "nodes[].remote_version",
             "nodes[].update_refs", "nodes[].pinned_version", "nodes[].pinned_ref",
-            "nodes[].update_branch", "nodes[].remote_branch",
+            "nodes[].update_branch", "nodes[].remote_branch", "nodes[].update_self_broken",
         ],
     },
     "trends": {
