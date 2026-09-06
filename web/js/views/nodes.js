@@ -129,6 +129,14 @@ export function createNodes() {
   // Agents below v0.18.1-b shipped an updater that did not work (0.18.0-b
   // had the button, 0.18.1-b fixed the agent side): the host cannot move
   // them, someone has to re-run agent.sh on the machine once.
+  // Branch switching is the agent's doing and arrived in v0.21.0-b: an older
+  // agent ignores the branch in the command and pulls the branch its
+  // checkout is on, so a non-main setting never reaches it on its own.
+  const cannotSwitch = (n) => n.branch_switch_supported === false && n.remote_branch && n.remote_branch !== "main";
+  const SWITCH_NOTE = (names, branch) => `${names.join(", ")} run${names.length === 1 ? "s" : ""} a build older than v0.21.0-b, `
+    + `which cannot switch branch: Update pulls the branch ${names.length === 1 ? "its" : "each"} checkout is already on, `
+    + `not ${branch}. Either check ${branch} out in the agent's checkout once (git fetch && git checkout ${branch}, then restart `
+    + `the service), or get a v0.21.0-b build onto the branch it is on; from then on it follows this setting.`;
   const BROKEN_NOTE = (names) => `${names.join(", ")} run${names.length === 1 ? "s" : ""} v0.18.0-b or older, whose `
     + "updater does not work: the Update command will fail there. Re-run agent.sh (a git pull) on "
     + `${names.length === 1 ? "that machine" : "those machines"} once; from v0.18.1-b on they update from here.`;
@@ -141,12 +149,14 @@ export function createNodes() {
     const named = targets.map((n) => n.remote_version && n.agent_version
       ? `${n.name} (v${n.agent_version} → v${n.remote_version})` : n.name);
     const broken = (store.state.nodes || []).filter((n) => n.update_self_broken && n.online && n.enabled !== false).map((n) => n.name);
+    const stuck = targets.filter(cannotSwitch).map((n) => n.name);
     confirmAction({
       title: `Update ${many ? `${targets.length} agents` : targets[0].name}?`,
       message: `Updates ${named.join(", ")} and restarts ${many ? "them" : "it"}.`,
       detail: "Every agent updates at once and is offline for the few seconds its restart takes. Docker agents, "
           + "agents already up to date and offline agents are not touched. If a dependency reinstall fails on one, "
           + "that checkout is rolled back and its current process keeps running unchanged."
+          + (stuck.length ? ` Note: ${SWITCH_NOTE(stuck, targets[0].remote_branch)}` : "")
           + (broken.length ? ` Not included: ${BROKEN_NOTE(broken)}` : ""),
       confirmLabel: many ? `Update ${targets.length}` : "Update", danger: false,
       onConfirm: async () => {
@@ -305,6 +315,7 @@ export function createNodes() {
             ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
             : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
         detail: (node.update_self_broken ? `${BROKEN_NOTE([node.name])} ` : "")
+            + (cannotSwitch(node) ? `${SWITCH_NOTE([node.name], node.remote_branch)} ` : "")
             + "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
             + "the checkout is rolled back automatically and the current process keeps running unchanged.",
         confirmLabel: "Update", danger: false,
@@ -403,10 +414,14 @@ export function createNodes() {
     }
 
     const brokenFlag = !!node.update_self_broken && !isDocker;
-    if (entry.flags.broken !== brokenFlag) {
-      entry.flags.broken = brokenFlag;
-      entry.brokenBadge.replaceChildren(brokenFlag ? pill("cannot update itself", "warn") : "");
-      patchAttr(entry.brokenBadge, "title", brokenFlag ? BROKEN_NOTE([node.name]) : null);
+    const stuckFlag = !brokenFlag && !isDocker && cannotSwitch(node);
+    const brokenKey = brokenFlag ? "broken" : stuckFlag ? `stuck:${node.remote_branch}` : "";
+    if (entry.flags.broken !== brokenKey) {
+      entry.flags.broken = brokenKey;
+      entry.brokenBadge.replaceChildren(brokenFlag ? pill("cannot update itself", "warn")
+        : stuckFlag ? pill(`cannot switch to ${node.remote_branch}`, "warn") : "");
+      patchAttr(entry.brokenBadge, "title", brokenFlag ? BROKEN_NOTE([node.name])
+        : stuckFlag ? SWITCH_NOTE([node.name], node.remote_branch) : null);
     }
 
     const pinned = node.pinned_version || null;
@@ -438,6 +453,7 @@ export function createNodes() {
     if (!capable) updateTitle = node.update_reason || "update capability not yet reported";
     else if (node.update_available === false) updateTitle = "already up to date";
     else if (node.update_self_broken) updateTitle = BROKEN_NOTE([node.name]);
+    else if (cannotSwitch(node)) updateTitle = SWITCH_NOTE([node.name], node.remote_branch);
     else if (available && node.update_branch && node.remote_branch && node.update_branch !== node.remote_branch) {
       updateTitle = `switch the agent to the ${node.remote_branch} branch, pull its latest commit, reinstall dependencies if they changed, and restart it`;
     } else if (available) updateTitle = `git-pull the agent's latest commit on ${node.remote_branch || "its branch"}, reinstall dependencies if they changed, and restart it`;
@@ -538,7 +554,7 @@ export function createNodes() {
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
         kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings. Agents on v0.18.0-b or older cannot update themselves (that build's updater was broken; v0.18.1-b fixed it): re-run agent.sh on the machine once, after which they update from here. Update all and the schedule leave them out and the row says so"),
         kv("Versions", "Version… moves an agent to any version the agent repository has shipped, older ones included: the host resolves it to the commit that shipped it and the agent resets to that commit. Anything but the published version pins the node, so the schedule and Update all leave it alone until it is unpinned or updated again"),
-        kv("Branch", "Settings › Automatic agent updates names the branch of the agent repository agents follow (main by default). Every update moves an agent to that branch; one on another branch shows it here and counts as having an update. The repository is never chosen from here — an agent only pulls from its own origin"),
+        kv("Branch", "Settings › Automatic agent updates names the branch of the agent repository agents follow (main by default). Every update moves an agent to that branch; one on another branch shows it here and counts as having an update. Switching is the agent's doing and needs a v0.21.0-b build: an older agent pulls the branch its checkout is already on, and the row says so when the setting is not main. The repository is never chosen from here — an agent only pulls from its own origin"),
       ], { wide: true }),
     }));
   }
