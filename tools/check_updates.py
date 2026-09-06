@@ -292,12 +292,51 @@ def check_sweep_decision() -> None:
           fired == ["ready-node"])
 
 
+def check_update_targets() -> None:
+    print("\n--- update-all targets " + "-" * 48)
+    ready = {"name": "ready", "enabled": True, "online": True, "container": None,
+             "update_capable": True, "update_available": True}
+    targets, skipped = nodes_mod.update_targets([ready])
+    check("a ready agent is a target", targets == ["ready"] and skipped == [])
+
+    def reason(**over: object) -> str:
+        targets, skipped = nodes_mod.update_targets([{**ready, **over}])
+        return skipped[0]["reason"] if skipped and not targets else "<targeted>"
+
+    check("revoked is skipped", reason(enabled=False) == "revoked")
+    check("offline is skipped", reason(online=False) == "offline")
+    check("Docker is skipped even when it claims capability",
+          reason(container="docker").startswith("runs in docker"))
+    check("containerd / podman are skipped the same way",
+          reason(container="containerd").startswith("runs in containerd")
+          and reason(container="podman").startswith("runs in podman"))
+    check("a non-runtime container word (lxc) does not exclude on its own",
+          reason(container="lxc") == "<targeted>")
+    check("not capable carries the agent's own reason",
+          reason(update_capable=False, update_reason="no git checkout") == "no git checkout")
+    check("unknown capability is skipped, never assumed",
+          reason(update_capable=None) == "update capability not yet reported")
+    check("already current is skipped", reason(update_available=False) == "already up to date")
+    check("unknown availability is skipped",
+          reason(update_available=None) == "update availability not yet known")
+    check("Docker wins over offline in the reason (it never updates this way)",
+          reason(container="docker", online=False).startswith("runs in docker"))
+
+    fleet = [ready, {**ready, "name": "dock", "container": "docker"},
+             {**ready, "name": "old", "update_available": False},
+             {**ready, "name": "two"}, {"name": "", "enabled": True}]
+    targets, skipped = nodes_mod.update_targets(fleet)
+    check("a fleet yields its targets in order and names every skip",
+          targets == ["ready", "two"] and [s["name"] for s in skipped] == ["dock", "old"])
+
+
 def main() -> int:
     # The refetch-failure and malformed-response checks deliberately trigger
     # nodes.py's own warning log; that is the point, not noise worth printing.
     logging.disable(logging.CRITICAL)
     check_version_compare()
     check_remote_version_fetch()
+    check_update_targets()
     with tempfile.TemporaryDirectory(prefix="culprit-updates-") as tmp:
         history = History(Path(tmp) / "t.db", enabled=True)
         check_ingest_update_fields(history)
