@@ -116,6 +116,44 @@ export function createNodes() {
     revealSlot.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
+  // Update all: the per-node button fanned out over every agent the host
+  // would pick (nodes.update_targets): enabled, online, capable, an update
+  // available, never a containerised one. The same rule is applied here only
+  // to decide whether the button has anything to do and to list the targets
+  // in the confirmation; the host decides for real.
+  const CONTAINER_RUNTIMES = ["docker", "containerd", "podman", "cri-o"];
+  const updateTargets = (list) => list.filter((n) => n.enabled !== false && n.online
+    && n.update_capable === true && n.update_available === true
+    && !CONTAINER_RUNTIMES.includes(n.container));
+  const updateAll = el("button.btn.btn--sm", { type: "button" }, ["Update all"]);
+  const countNode = el("span");
+  updateAll.addEventListener("click", () => {
+    const targets = updateTargets(store.state.nodes || []);
+    if (!targets.length) return;
+    const many = targets.length > 1;
+    const named = targets.map((n) => n.remote_version && n.agent_version
+      ? `${n.name} (v${n.agent_version} → v${n.remote_version})` : n.name);
+    confirmAction({
+      title: `Update ${many ? `${targets.length} agents` : targets[0].name}?`,
+      message: `Updates ${named.join(", ")} and restarts ${many ? "them" : "it"}.`,
+      detail: "Every agent updates at once and is offline for the few seconds its restart takes. Docker agents, "
+          + "agents already up to date and offline agents are not touched. If a dependency reinstall fails on one, "
+          + "that checkout is rolled back and its current process keeps running unchanged.",
+      confirmLabel: many ? `Update ${targets.length}` : "Update", danger: false,
+      onConfirm: async () => {
+        const outcome = await api("/api/nodes/update-all", { method: "POST" });
+        const results = outcome.results || [];
+        const failed = results.filter((r) => !r.ok);
+        const done = results.length - failed.length;
+        if (!results.length) return "Nothing to update: no agent qualified by the time the host looked.";
+        if (failed.length) {
+          return `${done} of ${results.length} updated. Failed: ${failed.map((f) => `${f.name} (${f.error})`).join("; ")}.`;
+        }
+        return `${done} agent${done === 1 ? "" : "s"} updated and restarting.`;
+      },
+    });
+  });
+
   function repaint() {
     if (!built) return;
     if (!loaded) {
@@ -149,15 +187,23 @@ export function createNodes() {
       tbody = el("tbody");
       table.append(tbody);
       tableSection = section({
-        title: "Agents", meta: "",
+        title: "Agents",
+        meta: el("span", { style: { display: "inline-flex", alignItems: "center", gap: "10px" } }, [countNode, updateAll]),
         body: el("div.tblwrap", {}, [table]),
         foot: "Revoking rejects reports instantly but leaves the remote process running; rotating a token re-enables "
             + "a revoked node. Tokens are hashed at rest — none of them can be read back, only replaced.",
       });
       readySlot(tableSlot, tableSection);
     }
-    patchText(tableSection.metaNode, `${list.length} enrolled`);
+    patchText(countNode, `${list.length} enrolled`);
     reconcileRows(list);
+    const targets = updateTargets(list);
+    show(updateAll, canOperate());
+    updateAll.disabled = !targets.length;
+    patchText(updateAll, targets.length ? `Update all (${targets.length})` : "Update all");
+    patchAttr(updateAll, "title", targets.length
+      ? `Update ${targets.map((n) => n.name).join(", ")} and restart them`
+      : "No agent has an update available. Docker agents update through their image and are never included.");
   }
 
   function reconcileRows(list) {
