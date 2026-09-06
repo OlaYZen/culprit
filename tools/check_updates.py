@@ -165,6 +165,14 @@ def check_ingest_update_fields(history: History) -> None:
     registry.ingest("update-test-node", {"agent": {"version": "0.18.0-b"}})
     meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
     check("a 0.18.0-b agent is marked as unable to update itself", meta["update_self_broken"] is True)
+    check("a build below 0.21.0-b that has not said its branch cannot switch branch",
+          meta["branch_switch_supported"] is False)
+    registry.ingest("update-test-node", {"agent": {"version": "0.21.0-b"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("0.21.0-b can switch even before it has reported a branch", meta["branch_switch_supported"] is True)
+    check("branch_switch_supported: a reported branch settles it, unknown stays unknown",
+          nodes_mod.branch_switch_supported("0.1.0-b", "dev") is True
+          and nodes_mod.branch_switch_supported(None, None) is None)
 
     registry.ingest("update-test-node",
                     {"agent": {"version": "2.0.0", "update_capable": True}})
