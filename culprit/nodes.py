@@ -128,6 +128,24 @@ def self_update_broken(agent_version: str | None) -> bool | None:
     return _is_newer(MIN_SELF_UPDATE_VERSION, agent_version)
 
 
+# The first agent build that switches branch on the host's say-so. An older
+# agent ignores the command's `branch` and pulls whatever its checkout is
+# on, so a non-main branch setting cannot reach it until someone checks the
+# branch out on the machine once, or the switch-capable build reaches the
+# branch it is on.
+MIN_BRANCH_SWITCH_VERSION = "0.21.0-b"
+
+
+def branch_switch_supported(agent_version: str | None, agent_branch: str | None) -> bool | None:
+    """True when the agent reports its branch (only a switch-capable build
+    does) or its version is at or past the fix, False when its version
+    predates it, None when nothing is known."""
+    if agent_branch:
+        return True
+    newer = _is_newer(MIN_BRANCH_SWITCH_VERSION, agent_version)
+    return None if newer is None else not newer
+
+
 def _update_available(remote: str | None, local: str | None,
                       branch: str | None, agent_branch: str | None) -> bool | None:
     """_is_newer, plus: an agent that reports its branch and is not on the
@@ -475,7 +493,7 @@ class NodeRegistry:
                 "hostname": None, "os": None, "container": None,
                 "update_capable": None, "update_available": None,
                 "update_reason": None, "update_refs": None, "update_branch": None,
-                "update_self_broken": None,
+                "update_self_broken": None, "branch_switch_supported": None,
                 "remote_version": None, "remote_branch": getattr(self, "_remote_branch", "main"),
             }
             meta["enabled"] = bool(agent.get("enabled"))
@@ -535,6 +553,7 @@ class NodeRegistry:
             "update_refs": node.update_refs,
             "update_branch": node.update_branch,
             "update_self_broken": self_update_broken(node.agent_version),
+            "branch_switch_supported": branch_switch_supported(node.agent_version, node.update_branch),
             "remote_version": self._remote_version,
             "remote_branch": getattr(self, "_remote_branch", "main"),
             # Clamped: these travel in every node list and every SSE snapshot
