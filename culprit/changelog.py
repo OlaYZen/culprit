@@ -208,6 +208,15 @@ def branches(refresh: bool = False) -> dict[str, Any]:
 
 
 def _build_agent(branch: str) -> dict[str, Any]:
+    out = _build_agent_inner(branch)
+    # The version picker warns before a downgrade below the first build whose
+    # updater works: from there the host cannot bring the agent back.
+    from .nodes import MIN_SELF_UPDATE_VERSION
+    out["min_self_update_version"] = MIN_SELF_UPDATE_VERSION
+    return out
+
+
+def _build_agent_inner(branch: str) -> dict[str, Any]:
     problem = _sync_agent_mirror()
     if problem and not (AGENT_MIRROR / "HEAD").exists():
         return {"available": False, "reason": problem, "repo": "agent", "current": None,
