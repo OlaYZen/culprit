@@ -537,7 +537,6 @@ export function createNodes() {
         const marks = [];
         if (version === node.remote_version) marks.push("latest");
         if (version === node.agent_version) marks.push("current");
-        if (strands(version)) marks.push("no self-update");
         return { value: version, label: `v${version} · ${ts ? fmt.dayTime(ts) : ""}${marks.length ? ` · ${marks.join(", ")}` : ""}` };
       });
       if (!options.length) throw new Error("the mirror lists no versions");
