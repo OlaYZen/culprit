@@ -19,7 +19,7 @@
  * of dashboard that looks fine while the machine stutters.
  */
 
-import { el, patchAttr, patchText, render } from "../util/dom.js";
+import { el, patchAttr, patchStyle, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { createChart, drawGauge } from "../charts.js";
 import { store, api } from "../stream.js";
@@ -251,81 +251,154 @@ export function createOverview() {
     }
   }
 
+  // The fleet section, its grid and every card persist across refreshes and
+  // are patched in place. Replacing them every 3 s (the old way) had two
+  // visible costs: a press that began on one card element and ended on its
+  // replacement never became a click (the browser needs the same node under
+  // both halves), and :hover restarted with the new node, so the highlight
+  // flickered on every tick. Same rule as the process table: reconcile by
+  // key, never rebuild.
+  const fleetGrid = el("div.fleet");
+  const fleetCauses = el("div");
+  const fleetSec = section({ title: "Fleet", meta: "", body: el("div", {}, [fleetCauses, fleetGrid]) });
+  const fleetCards = new Map();
+  let fleetCausesKey = "";
+
   function renderFleet(list, shared) {
     const online = list.filter((n) => n.online).length;
+    patchText(fleetSec.metaNode, `${online} of ${list.length} online · click a node to view it`);
     // The same finding on several nodes in the same minute is one cause they
-    // share, not several culprits: say so above the cards.
-    const causes = shared.length ? el("div.shared", {}, shared.map((cause) => {
-      const body = el("span", {}, [
-        el("strong", { text: "Shared cause: " }),
-        document.createTextNode(`${cause.title} on ${cause.nodes.join(", ")} at the same time. `
-          + `This points at ${cause.hint} — not at a process on any of them.`),
-      ]);
-      return note(cause.severity === "critical" ? "crit" : "warn", body);
-    })) : null;
-    readySlot(fleetSlot, section({
-      title: "Fleet",
-      meta: `${online} of ${list.length} online · click a node to view it`,
-      body: el("div", {}, [causes, el("div.fleet", {}, list.map(fleetCard))]),
-    }));
+    // share, not several culprits: say so above the cards. Shared causes
+    // change rarely, so this block is rebuilt only when its content does.
+    const causesKey = JSON.stringify(shared.map((c) => [c.severity, c.title, c.nodes, c.hint]));
+    if (causesKey !== fleetCausesKey) {
+      fleetCausesKey = causesKey;
+      render(fleetCauses, shared.length ? el("div.shared", {}, shared.map((cause) => {
+        const body = el("span", {}, [
+          el("strong", { text: "Shared cause: " }),
+          document.createTextNode(`${cause.title} on ${cause.nodes.join(", ")} at the same time. `
+            + `This points at ${cause.hint} — not at a process on any of them.`),
+        ]);
+        return note(cause.severity === "critical" ? "crit" : "warn", body);
+      })) : null);
+    }
+    const seen = new Set();
+    list.forEach((node, i) => {
+      seen.add(node.name);
+      let card = fleetCards.get(node.name);
+      if (!card) {
+        card = newFleetCard(node.name);
+        fleetCards.set(node.name, card);
+      }
+      patchFleetCard(card, node);
+      // Keep the grid in the server's order, moving a card only when it is
+      // out of place, so a stable fleet never touches the DOM.
+      if (fleetGrid.children[i] !== card) fleetGrid.insertBefore(card, fleetGrid.children[i] || null);
+    });
+    for (const [name, card] of fleetCards) {
+      if (seen.has(name)) continue;
+      card.remove();
+      fleetCards.delete(name);
+    }
+    readySlot(fleetSlot, fleetSec);
   }
 
-  function fleetCard(node) {
-    const isCurrent = node.name === store.node;
-    const stale = node.online && node.age_seconds != null
-      && node.age_seconds > Math.max(15, (node.report_interval || 1) * 3);
-    const severity = node.online ? (node.severity || "ok") : null;
-    const card = el("button.node", {
-      type: "button",
-      dataset: { active: String(isCurrent), severity: severity || "offline" },
-      title: isCurrent ? "Currently shown" : `Show ${node.name} in every view`,
-    });
-    card.append(el("div.node__head", {}, [
-      el("span.node__name", { text: node.name }),
-      node.enabled === false ? pill("revoked", "crit")
-        : !node.online ? pill("offline", "crit")
-        : stale ? pill(`stale ${fmt.shortDuration(node.age_seconds)}`, "warn")
-        : pill({ healthy: "healthy", nominal: "nominal", strained: "strained", struggling: "struggling" }[node.status] || "online",
-          { critical: "crit", warn: "warn", info: "info" }[severity] || "ok"),
-    ]));
-    if (!node.online) {
-      card.append(el("div.node__dead", { text: node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported" }));
-      card.addEventListener("click", () => selectNode(node.name));
-      return card;
+  function newFleetCard(name) {
+    const card = el("button.node", { type: "button" });
+    card._pill = pill("", "ok");
+    card._mode = null;
+    card.append(el("div.node__head", {}, [el("span.node__name", { text: name }), card._pill]));
+    card.addEventListener("click", () => selectNode(name));
+    return card;
+  }
+
+  /** Swap the part of the card below its head; only when online-ness changes. */
+  function fleetCardBody(card, mode) {
+    if (card._mode === mode) return;
+    card._mode = mode;
+    while (card.childElementCount > 1) card.lastElementChild.remove();
+    if (mode === "offline") {
+      card._dead = el("div.node__dead");
+      card.append(card._dead);
+      return;
     }
-    for (const [label, value, warn, crit, tone] of [
-      ["CPU", node.cpu, 80, 92, "cpu"], ["RAM", node.memory, 82, 92, "mem"], ["Disk", node.disk_busy, 85, 96, "disk"],
-    ]) {
-      const band = fmt.band(value, warn, crit);
-      card.append(el("div.node__row", {}, [
-        el("span.label", { text: label }),
-        meter(value, { tone: band === "ok" || band === "none" ? tone : band, thin: true }),
-        el("span.num", { text: fmt.pct(value) }),
-      ]));
+    card._rows = {};
+    for (const [label, tone] of [["CPU", "cpu"], ["RAM", "mem"], ["Disk", "disk"]]) {
+      const bar = meter(0, { tone, thin: true });
+      const num = el("span.num");
+      card._rows[label] = { bar, fill: bar.firstElementChild, num };
+      card.append(el("div.node__row", {}, [el("span.label", { text: label }), bar, num]));
     }
-    const bits = [`↓ ${fmt.rate(node.net_down)}  ↑ ${fmt.rate(node.net_up)}`];
-    if (fmt.isNum(node.disk_latency_ms) && node.disk_latency_ms >= 10) bits.push(`disk ${fmt.ms(node.disk_latency_ms)}`);
+    card._net = el("span.node__net");
+    card._alert = null;
     // The footer is always exactly one line: network on the left, the leading
     // offender (when there is one) on the right. Appending the offender as its
     // own row made every card grow and shrink as processes crossed the score
     // threshold, which shifted the whole fleet grid around.
-    const foot = el("div.node__foot", {}, [el("span.node__net", { text: bits.join("  ·  ") })]);
+    card._foot = el("div.node__foot", {}, [card._net]);
+    card.append(card._foot);
+  }
+
+  function patchFleetCard(card, node) {
+    const isCurrent = node.name === store.node;
+    const stale = node.online && node.age_seconds != null
+      && node.age_seconds > Math.max(15, (node.report_interval || 1) * 3);
+    const severity = node.online ? (node.severity || "ok") : null;
+    patchAttr(card, "data-active", String(isCurrent));
+    patchAttr(card, "data-severity", severity || "offline");
+    patchAttr(card, "title", isCurrent ? "Currently shown" : `Show ${node.name} in every view`);
+    const [pillText, pillTone] = node.enabled === false ? ["revoked", "crit"]
+      : !node.online ? ["offline", "crit"]
+      : stale ? [`stale ${fmt.shortDuration(node.age_seconds)}`, "warn"]
+      : [{ healthy: "healthy", nominal: "nominal", strained: "strained", struggling: "struggling" }[node.status] || "online",
+        { critical: "crit", warn: "warn", info: "info" }[severity] || "ok"];
+    patchText(card._pill, pillText);
+    patchAttr(card._pill, "data-tone", pillTone);
+    if (!node.online) {
+      fleetCardBody(card, "offline");
+      patchText(card._dead, node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported");
+      return;
+    }
+    fleetCardBody(card, "online");
+    for (const [label, value, warn, crit, tone] of [
+      ["CPU", node.cpu, 80, 92, "cpu"], ["RAM", node.memory, 82, 92, "mem"], ["Disk", node.disk_busy, 85, 96, "disk"],
+    ]) {
+      const band = fmt.band(value, warn, crit);
+      const row = card._rows[label];
+      patchAttr(row.bar, "data-tone", band === "ok" || band === "none" ? tone : band);
+      patchStyle(row.fill, "width", `${Math.max(0, Math.min(100, fmt.isNum(value) ? value : 0))}%`);
+      patchText(row.num, fmt.pct(value));
+    }
+    const bits = [`↓ ${fmt.rate(node.net_down)}  ↑ ${fmt.rate(node.net_up)}`];
+    if (fmt.isNum(node.disk_latency_ms) && node.disk_latency_ms >= 10) bits.push(`disk ${fmt.ms(node.disk_latency_ms)}`);
+    patchText(card._net, bits.join("  ·  "));
+    // Compact: the network numbers keep their width and this side truncates,
+    // so it is short by construction; the tooltip carries the full sentence.
+    let alert = null;
     if (node.findings > 0 && node.offender) {
-      // Compact: the network numbers keep their width and this side truncates,
-      // so it is short by construction; the tooltip carries the full sentence.
-      foot.append(el("span.node__alert", {
+      alert = {
+        info: false,
         text: `${node.findings} finding${node.findings === 1 ? "" : "s"} · ${fmt.imageName(node.offender.name)}`,
         title: `${fmt.imageName(node.offender.name)} leads ${node.findings} finding${node.findings === 1 ? "" : "s"}`,
-      }));
+      };
     } else if (node.offender && (node.offender.lag_score || 0) >= 10) {
-      foot.append(el("span.node__alert.node__alert--info", {
+      alert = {
+        info: true,
         text: `top · ${fmt.imageName(node.offender.name)}`,
         title: `Top offender: ${fmt.imageName(node.offender.name)}, lag score ${node.offender.lag_score}`,
-      }));
+      };
     }
-    card.append(foot);
-    card.addEventListener("click", () => selectNode(node.name));
-    return card;
+    if (!alert) {
+      if (card._alert) { card._alert.remove(); card._alert = null; }
+      return;
+    }
+    if (!card._alert) {
+      card._alert = el("span.node__alert");
+      card._foot.append(card._alert);
+    }
+    card._alert.classList.toggle("node__alert--info", alert.info);
+    patchText(card._alert, alert.text);
+    patchAttr(card._alert, "title", alert.title);
   }
 
   function selectNode(name) {
