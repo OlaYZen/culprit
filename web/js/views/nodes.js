@@ -125,7 +125,13 @@ export function createNodes() {
   const CONTAINER_RUNTIMES = ["docker", "containerd", "podman", "cri-o"];
   const updateTargets = (list) => list.filter((n) => n.enabled !== false && n.online
     && n.update_capable === true && n.update_available === true && !n.pinned_version
-    && !CONTAINER_RUNTIMES.includes(n.container));
+    && !n.update_self_broken && !CONTAINER_RUNTIMES.includes(n.container));
+  // Agents below v0.18.1-b shipped an updater that did not work (0.18.0-b
+  // had the button, 0.18.1-b fixed the agent side): the host cannot move
+  // them, someone has to re-run agent.sh on the machine once.
+  const BROKEN_NOTE = (names) => `${names.join(", ")} run${names.length === 1 ? "s" : ""} v0.18.0-b or older, whose `
+    + "updater does not work: the Update command will fail there. Re-run agent.sh (a git pull) on "
+    + `${names.length === 1 ? "that machine" : "those machines"} once; from v0.18.1-b on they update from here.`;
   const updateAll = el("button.btn.btn--sm", { type: "button" }, ["Update all"]);
   const countNode = el("span");
   updateAll.addEventListener("click", () => {
@@ -134,12 +140,14 @@ export function createNodes() {
     const many = targets.length > 1;
     const named = targets.map((n) => n.remote_version && n.agent_version
       ? `${n.name} (v${n.agent_version} → v${n.remote_version})` : n.name);
+    const broken = (store.state.nodes || []).filter((n) => n.update_self_broken && n.online && n.enabled !== false).map((n) => n.name);
     confirmAction({
       title: `Update ${many ? `${targets.length} agents` : targets[0].name}?`,
       message: `Updates ${named.join(", ")} and restarts ${many ? "them" : "it"}.`,
       detail: "Every agent updates at once and is offline for the few seconds its restart takes. Docker agents, "
           + "agents already up to date and offline agents are not touched. If a dependency reinstall fails on one, "
-          + "that checkout is rolled back and its current process keeps running unchanged.",
+          + "that checkout is rolled back and its current process keeps running unchanged."
+          + (broken.length ? ` Not included: ${BROKEN_NOTE(broken)}` : ""),
       confirmLabel: many ? `Update ${targets.length}` : "Update", danger: false,
       onConfirm: async () => {
         const outcome = await api("/api/nodes/update-all", { method: "POST" });
@@ -242,6 +250,7 @@ export function createNodes() {
     const versionBadge = el("span");
 
     const pinBadge = el("span");
+    const brokenBadge = el("span");
     const lastCell = el("td");
     const addrCell = el("td.mono.faint");
 
@@ -257,13 +266,13 @@ export function createNodes() {
         el("td", {}, [el("div.row", { style: { gap: "6px" } }, [nameLabel, dockerBadge])]),
         statusCell,
         hostCell,
-        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [versionText, versionBadge, pinBadge])]),
+        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [versionText, versionBadge, pinBadge, brokenBadge])]),
         lastCell,
         addrCell,
         el("td", {}, [el("div.actions", {}, [rotate, update, version, unpin, revoke, remove])]),
       ]),
       nameLabel, dockerBadge, statusCell, hostCell, versionText, versionBadge, lastCell, addrCell,
-      rotate, update, version, unpin, revoke, remove, pinBadge, node: null, flags: {},
+      rotate, update, version, unpin, revoke, remove, pinBadge, brokenBadge, node: null, flags: {},
     };
 
     rotate.addEventListener("click", () => {
@@ -295,7 +304,8 @@ export function createNodes() {
           : node.update_available && node.remote_version
             ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
             : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
-        detail: "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
+        detail: (node.update_self_broken ? `${BROKEN_NOTE([node.name])} ` : "")
+            + "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
             + "the checkout is rolled back automatically and the current process keeps running unchanged.",
         confirmLabel: "Update", danger: false,
         onConfirm: async () => {
@@ -392,6 +402,13 @@ export function createNodes() {
         ? `This agent's checkout is on the ${node.update_branch} branch; Update moves it to ${node.remote_branch}` : null);
     }
 
+    const brokenFlag = !!node.update_self_broken && !isDocker;
+    if (entry.flags.broken !== brokenFlag) {
+      entry.flags.broken = brokenFlag;
+      entry.brokenBadge.replaceChildren(brokenFlag ? pill("cannot update itself", "warn") : "");
+      patchAttr(entry.brokenBadge, "title", brokenFlag ? BROKEN_NOTE([node.name]) : null);
+    }
+
     const pinned = node.pinned_version || null;
     if (entry.flags.pin !== pinned) {
       entry.flags.pin = pinned;
@@ -420,6 +437,7 @@ export function createNodes() {
     let updateTitle;
     if (!capable) updateTitle = node.update_reason || "update capability not yet reported";
     else if (node.update_available === false) updateTitle = "already up to date";
+    else if (node.update_self_broken) updateTitle = BROKEN_NOTE([node.name]);
     else if (available && node.update_branch && node.remote_branch && node.update_branch !== node.remote_branch) {
       updateTitle = `switch the agent to the ${node.remote_branch} branch, pull its latest commit, reinstall dependencies if they changed, and restart it`;
     } else if (available) updateTitle = `git-pull the agent's latest commit on ${node.remote_branch || "its branch"}, reinstall dependencies if they changed, and restart it`;
@@ -518,7 +536,7 @@ export function createNodes() {
         kv("Auth", "per-node bearer token, SHA-256-hashed at rest, constant-time checked, revocable here"),
         kv("Transport", "use https:// in the deploy command when crossing an untrusted network (self-signed: add --insecure)"),
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
-        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings"),
+        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings. Agents on v0.18.0-b or older cannot update themselves (that build's updater was broken; v0.18.1-b fixed it): re-run agent.sh on the machine once, after which they update from here. Update all and the schedule leave them out and the row says so"),
         kv("Versions", "Version… moves an agent to any version the agent repository has shipped, older ones included: the host resolves it to the commit that shipped it and the agent resets to that commit. Anything but the published version pins the node, so the schedule and Update all leave it alone until it is unpinned or updated again"),
         kv("Branch", "Settings › Automatic agent updates names the branch of the agent repository agents follow (main by default). Every update moves an agent to that branch; one on another branch shows it here and counts as having an update. The repository is never chosen from here — an agent only pulls from its own origin"),
       ], { wide: true }),
