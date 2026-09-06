@@ -286,11 +286,15 @@ export function createNodes() {
 
     update.addEventListener("click", () => {
       const node = entry.node;
+      const switching = node.update_branch && node.remote_branch && node.update_branch !== node.remote_branch;
       confirmAction({
         title: `Update ${node.name}?`,
-        message: node.update_available && node.remote_version
-          ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
-          : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
+        message: switching
+          ? `Switches ${node.name} from the ${node.update_branch} branch to ${node.remote_branch}`
+            + `${node.remote_version ? ` (v${node.remote_version})` : ""} and restarts it.`
+          : node.update_available && node.remote_version
+            ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
+            : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
         detail: "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
             + "the checkout is rolled back automatically and the current process keeps running unchanged.",
         confirmLabel: "Update", danger: false,
@@ -374,11 +378,18 @@ export function createNodes() {
 
     patchText(entry.versionText, node.agent_version ? `v${node.agent_version}` : fmt.dash);
     // Docker updates through the image, not this git-pull path — the badge
-    // would just be noise with no action behind it there.
-    const badgeVersion = available && !isDocker ? node.remote_version : null;
-    if (entry.flags.badge !== badgeVersion) {
-      entry.flags.badge = badgeVersion;
-      entry.versionBadge.replaceChildren(badgeVersion ? pill(`v${badgeVersion} available`, "info") : "");
+    // would just be noise with no action behind it there. An agent on
+    // another branch than the configured one is "available" too: the
+    // update is what moves it, so say that rather than a version number.
+    const wrongBranch = !!(node.update_branch && node.remote_branch && node.update_branch !== node.remote_branch);
+    const badge = isDocker ? null
+      : wrongBranch ? `on ${node.update_branch} · ${node.remote_branch} configured`
+      : available && node.remote_version ? `v${node.remote_version} available` : null;
+    if (entry.flags.badge !== badge) {
+      entry.flags.badge = badge;
+      entry.versionBadge.replaceChildren(badge ? pill(badge, wrongBranch ? "warn" : "info") : "");
+      patchAttr(entry.versionBadge, "title", wrongBranch
+        ? `This agent's checkout is on the ${node.update_branch} branch; Update moves it to ${node.remote_branch}` : null);
     }
 
     const pinned = node.pinned_version || null;
@@ -409,7 +420,9 @@ export function createNodes() {
     let updateTitle;
     if (!capable) updateTitle = node.update_reason || "update capability not yet reported";
     else if (node.update_available === false) updateTitle = "already up to date";
-    else if (available) updateTitle = "git-pull the agent's latest commit, reinstall dependencies if they changed, and restart it";
+    else if (available && node.update_branch && node.remote_branch && node.update_branch !== node.remote_branch) {
+      updateTitle = `switch the agent to the ${node.remote_branch} branch, pull its latest commit, reinstall dependencies if they changed, and restart it`;
+    } else if (available) updateTitle = `git-pull the agent's latest commit on ${node.remote_branch || "its branch"}, reinstall dependencies if they changed, and restart it`;
     else updateTitle = "update availability not yet known";
     patchAttr(entry.update, "title", updateTitle);
 
@@ -437,8 +450,9 @@ export function createNodes() {
     // couple of rows.
     const pickSlot = el("div", { style: { margin: "10px 0", minHeight: "350px" } });
     const body = el("div", {}, [
-      el("p", { text: `${node.name} runs v${node.agent_version || "?"}. Pick the version to move it to; the agent resets `
-          + "its checkout to the commit that shipped that version, reinstalls dependencies if they changed, and restarts." }),
+      el("p", { text: `${node.name} runs v${node.agent_version || "?"}${node.update_branch ? ` on ${node.update_branch}` : ""}. `
+          + `Pick the version to move it to, from the ${node.remote_branch || "configured"} branch; the agent resets its `
+          + "checkout to the commit that shipped that version, reinstalls dependencies if they changed, and restarts." }),
       pickSlot,
       note("warn", "Any version other than the published one pins the agent there: the daily schedule and Update all "
           + "leave it alone until you unpin it or update it again. An older agent may lack features this host relies on.",
@@ -506,6 +520,7 @@ export function createNodes() {
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
         kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings"),
         kv("Versions", "Version… moves an agent to any version the agent repository has shipped, older ones included: the host resolves it to the commit that shipped it and the agent resets to that commit. Anything but the published version pins the node, so the schedule and Update all leave it alone until it is unpinned or updated again"),
+        kv("Branch", "Settings › Automatic agent updates names the branch of the agent repository agents follow (main by default). Every update moves an agent to that branch; one on another branch shows it here and counts as having an update. The repository is never chosen from here — an agent only pulls from its own origin"),
       ], { wide: true }),
     }));
   }

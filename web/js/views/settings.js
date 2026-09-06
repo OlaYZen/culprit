@@ -601,29 +601,43 @@ export function createSettings() {
       value: String(config.auto_update_hour ?? 3), "aria-label": "Hour to run automatic updates",
     });
     const error = el("div.field__err", { id: "err-auto_update_hour", hidden: true });
+    const branchInput = el("input", {
+      type: "text", id: "set-agent_update_branch", spellcheck: "false", autocomplete: "off",
+      value: String(config.agent_update_branch || "main"), placeholder: "main",
+      "aria-label": "Branch of the agent repository agents update from",
+    });
+    const branchError = el("div.field__err", { id: "err-agent_update_branch", hidden: true });
     const result = el("div.result");
     const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save"]);
 
     save.addEventListener("click", async () => {
       setBusy(save, true, "Saving…");
       error.hidden = true;
+      branchError.hidden = true;
       hourInput.removeAttribute("aria-invalid");
+      branchInput.removeAttribute("aria-invalid");
       try {
         const payload = await api("/api/settings", {
           method: "PUT",
-          body: JSON.stringify({ auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value) }),
+          body: JSON.stringify({
+            auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value),
+            agent_update_branch: branchInput.value.trim() || "main",
+          }),
         });
         config = payload.config;
+        branchInput.value = config.agent_update_branch || "main";
         inlineResult(result, "Saved.", "ok");
       } catch (err) {
-        const message = err.payload?.field_errors?.auto_update_hour;
-        if (message) {
-          error.textContent = message;
-          error.hidden = false;
-          hourInput.setAttribute("aria-invalid", "true");
-          hourInput.focus();
+        const fieldErrors = err.payload?.field_errors || {};
+        for (const [input, node, key] of [[hourInput, error, "auto_update_hour"], [branchInput, branchError, "agent_update_branch"]]) {
+          if (!fieldErrors[key]) continue;
+          node.textContent = fieldErrors[key];
+          node.hidden = false;
+          input.setAttribute("aria-invalid", "true");
         }
-        inlineResult(result, message || err.message, "error");
+        const first = fieldErrors.auto_update_hour || fieldErrors.agent_update_branch;
+        if (first) (fieldErrors.auto_update_hour ? hourInput : branchInput).focus();
+        inlineResult(result, first || err.message, "error");
       }
       setBusy(save, false, "Save");
     });
@@ -634,11 +648,15 @@ export function createSettings() {
         checkbox({ label: "Automatically update capable agents once a day", checked: enabled,
           onChange: (v) => { enabled = v; } }),
         fieldRow({ id: hourInput.id, label: "At hour", unit: "0-23, this host's local time", input: hourInput, error }),
+        fieldRow({ id: branchInput.id, label: "Branch", unit: "of the agent repository; main is the release line, dev follows unreleased work",
+          input: branchInput, error: branchError }),
         el("div.formrow", { style: { marginTop: "10px" } }, [save, result]),
       ]),
       foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
-          + "agents that have reported themselves update-capable and behind the version GitHub publishes. "
-          + "The agent is never told a schedule — only ever told to update now.",
+          + "agents that have reported themselves update-capable and behind the version GitHub publishes for the "
+          + "chosen branch — or on a different branch than it. Every update, manual or scheduled, moves the agent to "
+          + "that branch; Patch notes and the version picker list it. The agent is never told a schedule — only ever "
+          + "told to update now — and never a repository: it only ever pulls from its own origin.",
     }));
   }
 
