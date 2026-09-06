@@ -343,7 +343,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
     },
     "settings": {
         "/api/settings": [
-            "config.interval_fast", "config.interval_proc", "config.interval_slow",
+            "config.version", "config.interval_fast", "config.interval_proc", "config.interval_slow",
             "config.interval_events", "config.persist_history",
             "config.retention_days", "config.history_top_processes",
             "config.live_window_seconds", "config.process_count",
