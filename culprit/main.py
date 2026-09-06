@@ -13,6 +13,7 @@ import asyncio
 import json as json_module
 import logging
 import os
+import re
 import threading
 import time
 import webbrowser
@@ -681,6 +682,76 @@ async def api_node_throttle(
         raise HTTPException(422, f"level must be one of {', '.join(_THROTTLE_LEVELS)}")
     return await _verified_action(request, name, "throttle",
                                   {"pid": pid, "level": level})
+
+
+@app.post("/api/nodes/{name}/processes/{pid}/truncate",
+          summary="Free the space a deleted-but-open file still holds",
+          dependencies=[Depends(require_role("operator"))])
+async def api_node_truncate(
+    request: Request, name: str, pid: int,
+    path: str = Body(..., embed=True, min_length=1, max_length=4096),
+    confirm: bool = Body(False, embed=True),
+) -> dict[str, Any]:
+    """Truncates the file through the holder's own descriptor
+    (/proc/<pid>/fd/<n>), the way `: > /proc/<pid>/fd/<n>` does; the agent
+    refuses unless the file is still deleted, regular, and the one named.
+    Verified like a process action: the storage finding should clear."""
+    if not confirm:
+        raise HTTPException(400, "confirm must be true for a truncate request")
+    if not path.startswith("/"):
+        raise HTTPException(422, "path must be absolute")
+    return await _verified_action(request, name, "truncate",
+                                  {"pid": pid, "path": path})
+
+
+# Unit actions: the Outage Doctor's verbs. A restart can legitimately take
+# as long as the unit's TimeoutStopSec, so the budget is fixed rather than
+# cadence-sized, like an update's.
+UNIT_VERBS = ("restart", "start", "reload-or-restart", "reset-failed")
+UNIT_TIMEOUT_S = 60.0
+_UNIT_NAME = re.compile(r"^[A-Za-z0-9:_.@\\-]{1,255}\.(service|socket|timer|mount|path|target)$")
+
+
+@app.post("/api/nodes/{name}/units/{unit}/{verb}",
+          summary="Restart / start / reload / reset a systemd unit on an agent",
+          dependencies=[Depends(require_role("operator"))])
+async def api_node_unit_action(
+    request: Request, name: str, unit: str, verb: str,
+    manager: str = Body("system", embed=True),
+    confirm: bool = Body(False, embed=True),
+) -> dict[str, Any]:
+    """Relayed to the agent, which runs `systemctl <verb> <unit>` with the
+    same guards the process actions have (never init, journald, logind,
+    udevd, dbus, or its own unit) and reports the unit's state before and
+    after. The host then watches the node's next outage samples and states
+    whether the items that named the unit cleared and stayed clear
+    (/api/nodes/{name}/actions/{verify_id}); the track record at
+    /api/history/record?unit= counts earlier tries."""
+    if verb not in UNIT_VERBS:
+        raise HTTPException(422, f"verb must be one of {', '.join(UNIT_VERBS)}")
+    if manager not in ("system", "user"):
+        raise HTTPException(422, "manager must be system or user")
+    if not _UNIT_NAME.match(unit):
+        raise HTTPException(422, "not a unit name")
+    if not confirm:
+        raise HTTPException(400, "confirm must be true for a unit action")
+    assert registry is not None and verifier is not None
+    baseline = (registry.get_snapshot(name) or {}).get("outage") or {}
+    result = await _agent_command(name, "unit_action",
+                                  {"unit": unit, "verb": verb, "manager": manager},
+                                  timeout_override=UNIT_TIMEOUT_S)
+    result = dict(result) if isinstance(result, dict) else {"result": result}
+    try:
+        verify_id = verifier.start_outage(name, verb, unit, result, baseline,
+                                          getattr(request.state, "user", None))
+    except Exception:  # noqa: BLE001 -- the action succeeded; say so regardless
+        log.exception("could not start outage verdict watch")
+        verify_id = None
+    result["verify_id"] = verify_id
+    log.info("unit %s %s on '%s' by %s -> %s", verb, unit, name,
+             getattr(request.state, "user", "?"),
+             "ok" if result.get("ok", True) else result.get("reason"))
+    return result
 
 
 # A git fetch + pip install can run well past a process action's usual

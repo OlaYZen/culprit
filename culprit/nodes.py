@@ -315,6 +315,14 @@ class NodeRegistry:
                         hook.observe(name, diagnosis, now)
                 except Exception:  # noqa: BLE001 -- an observer must never break ingest
                     log.exception("diagnosis observer failed for %s", name)
+        if "outage" in snapshot and self.verifier is not None:
+            # Unit-action verdicts follow the outage items, which arrive on
+            # the slow tick; the verifier keeps them apart from the
+            # diagnosis watches.
+            try:
+                self.verifier.observe_outage(name, merged.get("outage") or {}, now)
+            except Exception:  # noqa: BLE001
+                log.exception("outage observer failed for %s", name)
         if self.notifier is not None and ("diagnosis" in snapshot or "outage" in snapshot):
             # The notifier sees findings and outage items as one active set
             # per node (outage keys are namespaced), so each is sent once
