@@ -24,8 +24,12 @@ Safe mode never changes server state and spends at most five of the eight login
 failures the host allows per source address per five minutes, so a dashboard
 user on the same address is never locked out by a scan. `--active` adds the
 checks that do mutate: enrolling (and deleting) a throwaway agent to prove the
-token lifecycle end to end, and deliberately exhausting the login rate limit,
-which locks the scanner's own address out for five minutes.
+token lifecycle end to end, creating a throwaway operator through /api/users
+to prove that role can really complete an operator-only write (the refusal
+side of every role at every route is `tools/check_role_matrix.py`'s job, run
+separately -- this only proves access granted is access that works), and
+deliberately exhausting the login rate limit, which locks the scanner's own
+address out for five minutes.
 
 `--throwaway-user` creates a temporary dashboard user through the CLI (so the
 server must share this checkout's database), which also unlocks the one check
@@ -361,7 +365,9 @@ def check_auth_state(ctx: Ctx) -> None:
                        f"/api/auth answered {r.status}: {r.text[:120]!r}")
         return
     ctx.auth_enabled = bool(data.get("enabled"))
-    extra = set(data) - {"enabled", "username"}
+    # role is None whenever username is (no session, or auth off), so it
+    # never carries more than username already does.
+    extra = set(data) - {"enabled", "username", "role"}
     if extra:
         ctx.report.add("WARN", "auth-state",
                        f"/api/auth (public) exposes extra keys: {sorted(extra)}")
@@ -1679,6 +1685,64 @@ def check_agent_isolation(ctx: Ctx) -> None:
             ctx.http.req("DELETE", f"/api/agents/{name}", cookie=c)
 
 
+def check_role_gate(ctx: Ctx) -> None:
+    """--active: create a throwaway operator through /api/users (so this
+    exercises the very endpoint that creates them, not just the gate
+    elsewhere) and prove it can actually *complete* an operator-only write
+    end to end, not merely fail to be refused.
+
+    tools/check_role_matrix.py is the exhaustive version of the refusal
+    side of this -- every route, every role, every method, all safe to run
+    because a working gate never reaches the handler -- but it deliberately
+    never lets an already-cleared role finish a write (nothing to clean up
+    that way), so the one thing it cannot prove is that operator access is
+    real and not just "not a 403". That is the only thing left to check
+    here; testing the refusal side again on top of it would just be the
+    same assertion twice.
+    """
+    if not (ctx.args.active and ctx.cookie):
+        return
+    rep = ctx.report
+    admin_cookie = ctx.cookie
+    name = f"sectest-operator-{secrets.token_hex(3)}"
+    password = secrets.token_urlsafe(16)
+    created = False
+    try:
+        r = ctx.http.req("POST", "/api/users", cookie=admin_cookie,
+                         json_body={"username": name, "password": password, "role": "operator"})
+        if r.status != 200:
+            rep.add("HIGH", "role-gate", f"create operator user -> {r.status}: {r.text[:120]!r}")
+            return
+        created = True
+        r = login(ctx, name, password, count=False)
+        m = re.search(r"culprit_session=([^;]+)", r.header("set-cookie") or "")
+        if r.status != 200 or not m:
+            rep.add("HIGH", "role-gate", f"operator user could not sign in -> {r.status}")
+            return
+        cookie = m.group(1)
+
+        r = ctx.http.req("POST", "/api/expectations", cookie=cookie, json_body={
+            "node": "local", "key": "sectest", "reason": "sectest",
+            "days": [0], "start": "00:00", "end": "01:00",  # 0 = Monday
+        })
+        if r.status == 403:
+            rep.add("CRIT", "role-gate", "operator refused an operator-only route "
+                    "it should be able to complete")
+            return
+        if r.status != 200 or not (r.json() or {}).get("ok"):
+            rep.add("HIGH", "role-gate",
+                    f"operator's expectation write -> {r.status}: {r.text[:120]!r}")
+            return
+        new_id = (r.json() or {}).get("id")
+        if new_id:
+            ctx.http.req("DELETE", f"/api/expectations/{new_id}", cookie=admin_cookie)
+        rep.ok("role-gate", "a session created through /api/users as operator "
+               "completed a real operator-only write end to end")
+    finally:
+        if created:
+            ctx.http.req("DELETE", f"/api/users/{name}", cookie=admin_cookie)
+
+
 # ------------------------------------------------------------ throwaway user
 def create_throwaway_user(ctx: Ctx) -> tuple[str, str] | None:
     """Make a temporary dashboard user through the CLI (same machine, same
@@ -1850,6 +1914,7 @@ def main() -> int:
             if want("active"):
                 check_agent_lifecycle(ctx)
                 check_agent_isolation(ctx)
+                check_role_gate(ctx)
             check_logout(ctx)
         elif not ctx.cookie:
             print(f"\n{DIM}(pass --user/--password or --throwaway-user for the "

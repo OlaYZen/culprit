@@ -12,6 +12,9 @@ every property the security design promises:
 * passwords: scrypt with a fresh salt, wrong/unknown reject, timing parity
 * sessions: signature covers user and expiry; tamper, expiry, swap all fail;
   a password change (or removal, or rename) revokes existing cookies
+* roles: viewer/operator/admin validation, the migration default, the
+  last-admin guard on both demotion and removal, cache TTL/invalidate, and
+  the rank comparisons a role gate relies on
 * login limiter: locks the address after 8 failures even for the right
   password, other addresses unaffected, success clears the count
 * agent tokens: shape, revoke, rotate, delete, malformed inputs
@@ -182,12 +185,90 @@ def test_sessions(r: Runner, tmp: Path) -> None:
     r.check("cookie for the new name verifies",
             auth.verify_session(auth.issue_session("olai2")) == "olai2")
     cookie2 = auth.issue_session("olai2")
+    # A second admin so the removal below isn't the last-admin guard (that
+    # guard gets its own dedicated coverage in test_roles).
+    history.add_user("spare-admin", "another password 99")
     history.remove_user("olai2")
     auth.invalidate("olai2")
     r.check("removing the user kills the cookie", auth.verify_session(cookie2) is None)
     history.close()
     r.summary("sessions", "HMAC covers user+expiry; tamper/expiry/swap/"
               "password-change/rename/remove all revoke")
+
+
+def test_roles(r: Runner, tmp: Path) -> None:
+    from culprit.auth import ROLE_RANK, Auth
+    from culprit.db import ROLES
+    r.section("roles")
+    history = fresh_history(tmp, "roles.db")
+
+    history.add_user("root-admin", "correct horse 1")
+    r.check("add_user defaults to admin",
+            history.user_role("root-admin") == "admin")
+    history.add_user("viewer1", "correct horse 2", "viewer")
+    r.check("add_user honours an explicit role",
+            history.user_role("viewer1") == "viewer")
+    r.check("add_user rejects an unknown role",
+            _raises(history.add_user, "x", "correct horse 3", "superuser"))
+
+    r.check("set_role changes a non-admin freely",
+            history.set_role("viewer1", "operator")
+            and history.user_role("viewer1") == "operator")
+    r.check("set_role rejects an unknown role",
+            not history.set_role("viewer1", "superuser"))
+    r.check("set_role False for a user that does not exist",
+            not history.set_role("ghost", "admin"))
+
+    # Last-admin guard: root-admin is the only admin left (viewer1 is now
+    # operator), so neither demoting nor removing it is allowed.
+    r.check("count_admins reflects reality", history.count_admins() == 1)
+    r.check("set_role refuses to demote the last admin",
+            not history.set_role("root-admin", "viewer"))
+    r.check("remove_user refuses to remove the last admin",
+            not history.remove_user("root-admin"))
+    r.check("the last admin is still there and still admin",
+            history.user_role("root-admin") == "admin")
+
+    # A second admin lifts the guard.
+    history.add_user("spare-admin", "correct horse 4", "admin")
+    r.check("set_role allows demoting once another admin exists",
+            history.set_role("root-admin", "operator"))
+    # add_user's ON CONFLICT only refreshes the password, never the role, so
+    # restoring root-admin's role needs set_role, not another add_user call.
+    history.set_role("root-admin", "admin")
+    r.check("remove_user allows removing an admin once another exists",
+            history.remove_user("spare-admin"))
+
+    r.check("list_users reports every role",
+            {u["username"]: u["role"] for u in history.list_users()}
+            == {"root-admin": "admin", "viewer1": "operator"})
+
+    auth = Auth(history)
+    r.check("Auth.role_of reads the stored role",
+            auth.role_of("viewer1") == "operator")
+    r.check("Auth.role_of is None for a user that does not exist",
+            auth.role_of("ghost") is None)
+    history.set_role("viewer1", "admin")
+    r.check("role change is stale until invalidate (cache TTL)",
+            auth.role_of("viewer1") == "operator")
+    auth.invalidate("viewer1")
+    r.check("invalidate makes the new role visible immediately",
+            auth.role_of("viewer1") == "admin")
+
+    for role, minimum, expected in (
+        ("admin", "viewer", True), ("admin", "operator", True), ("admin", "admin", True),
+        ("operator", "viewer", True), ("operator", "operator", True), ("operator", "admin", False),
+        ("viewer", "viewer", True), ("viewer", "operator", False), ("viewer", "admin", False),
+        (None, "viewer", False),
+    ):
+        r.check(f"satisfies({role!r}, {minimum!r}) == {expected}",
+                auth.satisfies(role, minimum) is expected)
+
+    r.check("every real role is in the rank table",
+            all(role in ROLE_RANK for role in ROLES))
+    history.close()
+    r.summary("roles", "migration default, validation, the last-admin guard, "
+              "role-cache TTL/invalidate, and rank comparisons")
 
 
 def test_limiter(r: Runner, tmp: Path) -> None:
@@ -530,6 +611,7 @@ def main() -> int:
         os.environ["CULPRIT_NO_BROWSER"] = "1"
         test_passwords(r, tmp)
         test_sessions(r, tmp)
+        test_roles(r, tmp)
         test_limiter(r, tmp)
         test_agents(r, tmp)
         test_commands(r)
