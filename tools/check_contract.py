@@ -291,22 +291,38 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         # the version version.json held after it. `available` is False (with
         # `reason`) on a host without a checkout, so the commit fields are
         # listed under OPTIONAL -- the view renders the reason instead.
+        # `branch` / `running` / `running_branch` / `tip` / `fetched_at` /
+        # `stale_reason` let the view read any branch of the checkout and say
+        # which one is actually serving.
         "/api/changelog": [
             "available", "reason", "current", "commits", "repo",
             "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
             "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
             "commits[].body", "commits[].version", "commits[].bumped_to",
-            "branch", "limit",
+            "branch", "limit", "running", "running_branch", "tip", "fetched_at", "stale_reason",
+        ],
+        "/api/changelog?repo=host&branch=main": [
+            "available", "reason", "current", "commits", "repo", "branch", "running", "running_branch",
+            "tip", "fetched_at", "stale_reason",
         ],
         # The agent's notes: a bare mirror of the agent repository under
         # data/, fetched hourly. Same shape plus where it came from and when;
         # the commit fields are OPTIONAL here too (no network, no mirror).
-        # The branch picker in Settings: what the mirror has under refs/heads.
-        "/api/changelog/branches": ["available", "reason", "branches", "hidden", "fetched_at"],
+        # The branch pickers (Settings, Patch notes): what the mirror has under
+        # refs/heads, and the host checkout's own branches; `default` is the
+        # branch Patch notes opens on.
+        "/api/changelog/branches": ["available", "reason", "repo", "branches", "hidden", "fetched_at",
+                                    "default", "configured", "stale_reason"],
+        "/api/changelog/branches?repo=host": ["available", "reason", "repo", "branches", "hidden",
+                                             "fetched_at", "default", "running", "stale_reason"],
         "/api/changelog?repo=agent": [
             "available", "reason", "current", "commits", "repo",
             "commits[].sha", "commits[].summary", "commits[].body", "commits[].version",
             "branch", "limit", "source", "fetched_at", "stale_reason", "min_self_update_version",
+            "configured_branch", "tip",
+        ],
+        "/api/changelog?repo=agent&branch=dev": [
+            "available", "reason", "current", "commits", "repo", "branch", "configured_branch", "tip",
         ],
     },
     "coroner": {
@@ -421,7 +437,7 @@ OPTIONAL = {
     "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
     "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
     "commits[].body", "commits[].version", "commits[].bumped_to", "branch", "limit",
-    "source", "fetched_at", "stale_reason", "branches",
+    "source", "fetched_at", "stale_reason", "branches", "tip",
 }
 
 
