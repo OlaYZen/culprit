@@ -106,6 +106,8 @@ def _maybe_auto_update() -> None:
             continue
         if meta.get("pinned_version"):
             continue  # an operator put it there; only an explicit action moves it
+        if meta.get("update_self_broken"):
+            continue  # a build whose updater never worked; the command would fail daily
         if not history.mark_auto_updated(str(meta["name"]), today):
             continue  # already updated today, or the claim lost a race
         asyncio.get_running_loop().create_task(

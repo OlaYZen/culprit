@@ -114,6 +114,20 @@ def _is_newer(remote: str | None, local: str | None) -> bool | None:
     return remote_v > local_v
 
 
+# The first agent build whose remote update actually works: 0.18.0-b shipped
+# the Update button but the agent side was broken, 0.18.1-b fixed it. An
+# agent below this cannot be moved by the host at all -- someone has to
+# re-run agent.sh (a git pull) on the machine once -- so the host says so
+# instead of sending a command it knows will not work.
+MIN_SELF_UPDATE_VERSION = "0.18.1-b"
+
+
+def self_update_broken(agent_version: str | None) -> bool | None:
+    """True when the agent's build predates the working updater, False when
+    it is at or past it, None when the version does not parse."""
+    return _is_newer(MIN_SELF_UPDATE_VERSION, agent_version)
+
+
 def _update_available(remote: str | None, local: str | None,
                       branch: str | None, agent_branch: str | None) -> bool | None:
     """_is_newer, plus: an agent that reports its branch and is not on the
@@ -461,6 +475,7 @@ class NodeRegistry:
                 "hostname": None, "os": None, "container": None,
                 "update_capable": None, "update_available": None,
                 "update_reason": None, "update_refs": None, "update_branch": None,
+                "update_self_broken": None,
                 "remote_version": None, "remote_branch": getattr(self, "_remote_branch", "main"),
             }
             meta["enabled"] = bool(agent.get("enabled"))
@@ -519,6 +534,7 @@ class NodeRegistry:
             "update_reason": node.update_reason,
             "update_refs": node.update_refs,
             "update_branch": node.update_branch,
+            "update_self_broken": self_update_broken(node.agent_version),
             "remote_version": self._remote_version,
             "remote_branch": getattr(self, "_remote_branch", "main"),
             # Clamped: these travel in every node list and every SSE snapshot
@@ -713,6 +729,9 @@ def update_targets(metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[st
             reason = "offline"
         elif meta.get("update_capable") is not True:
             reason = str(meta.get("update_reason") or "update capability not yet reported")
+        elif self_update_broken(meta.get("agent_version")):
+            reason = (f"agent v{meta.get('agent_version')} cannot update itself (fixed in "
+                      f"v{MIN_SELF_UPDATE_VERSION}); re-run agent.sh on the machine once")
         elif meta.get("update_available") is False:
             reason = "already up to date"
         elif meta.get("update_available") is not True:
