@@ -49,7 +49,8 @@ cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL
                                            # enumeration + timing, agent-token rejection, headers,
                                            # CORS, injection, write validation. Safe by default;
                                            # --active adds a throwaway-agent lifecycle, an operator
-                                           # role completing a real write, and exhausts the login
+                                           # role completing a real write, a real agent's update
+                                           # request refused (404/409), and exhausts the login
                                            # limiter (locks that address out for 5 min)
 .venv/bin/python tools/scan_unauth.py      # live: hit every route (enumerated from app.routes) with
                                            # no cookie and no token; a gated route that answers with
@@ -91,6 +92,14 @@ cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL
                                            # handler), a role at or above it must not be wrongly
                                            # blocked on GET. Creates and deletes its own throwaway
                                            # viewer/operator accounts; needs an existing admin
+.venv/bin/python tools/check_updates.py     # offline (~1s): agent self-update -- version
+                                           # comparison (tuple, not string), the fleet-wide
+                                           # remote-version fetch (throttled, cached, never
+                                           # regresses on a failed fetch), a report's
+                                           # update_capable/update_reason folding into
+                                           # /api/nodes, the once-a-day atomic claim, and the
+                                           # sweep loop's fire/skip decision (hour, capability,
+                                           # availability, enabled, the claim race)
 .venv/bin/python -m pyflakes culprit tools # lint
 ```
 
