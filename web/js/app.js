@@ -385,7 +385,6 @@ function boot() {
   store.connect();
   navigate(location.hash.slice(1) || "overview", { push: false });
 
-  setInterval(updateOverhead, 10000);
   store.on("node", () => { if (store.node !== coronerBadgeNode) updateCoronerBadge(); });
   setInterval(updateCoronerBadge, 60000);
 }
