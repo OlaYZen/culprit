@@ -29,6 +29,7 @@ import { createSync } from "./views/sync.js";
 import { createTrends } from "./views/trends.js";
 import { createCompare } from "./views/compare.js";
 import { createNodes } from "./views/nodes.js";
+import { createChangelog } from "./views/changelog.js";
 import { createSettings } from "./views/settings.js";
 import { initMobile } from "./mobile.js";
 
@@ -49,6 +50,7 @@ const FACTORIES = {
   trends: createTrends,
   compare: createCompare,
   nodes: createNodes,
+  changelog: createChangelog,
   settings: createSettings,
 };
 
@@ -56,7 +58,7 @@ const TITLES = {
   overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
   ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
-  trends: "Trends", compare: "Compare", nodes: "Nodes", settings: "Settings",
+  trends: "Trends", compare: "Compare", nodes: "Nodes", changelog: "Patch notes", settings: "Settings",
 };
 
 const views = new Map();
