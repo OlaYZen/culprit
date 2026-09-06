@@ -256,6 +256,11 @@
   white-space: nowrap;
   transition: background var(--t) var(--ease), border-color var(--t) var(--ease), color var(--t) var(--ease);
 }
+/* `show()` toggles the hidden attribute; .btn sets its own display, which
+   would otherwise override the browser's [hidden] rule and leave a gated
+   button visible (a viewer would see Update, a node with no pin would
+   show Unpin). */
+.btn[hidden] { display: none; }
 .btn:hover { background: var(--bg-3); border-color: var(--fg-3); color: var(--fg-1); }
 .btn svg { width: 14px; height: 14px; }
 .btn--primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
