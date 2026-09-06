@@ -1343,6 +1343,16 @@ async def api_portnames() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------- patch notes
+@app.get("/api/changelog/branches", summary="Branches of the agent repository, for the branch setting")
+async def api_changelog_branches(
+    refresh: bool = Query(False, description="fetch the mirror first if it is older than a minute"),
+) -> dict[str, Any]:
+    """What the mirror of the agent repository has under refs/heads, the
+    demo branch left out. Unavailable with the reason on a host that has no
+    mirror; Settings then offers a typed name instead of an empty list."""
+    return await asyncio.to_thread(changelog.branches, refresh)
+
+
 @app.get("/api/changelog", summary="Patch notes: the host's or the agent's commit history")
 async def api_changelog(
     repo: str = Query("host", pattern="^(host|agent)$",

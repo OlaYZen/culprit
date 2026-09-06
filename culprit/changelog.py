@@ -45,6 +45,10 @@ _VERSION_LINE = re.compile(r'^([-+])\s*"version"\s*:\s*"([^"]+)"', re.M)
 AGENT_REPO_URL = "https://github.com/OlaYZen/culprit-agent.git"
 AGENT_MIRROR = ROOT / "data" / "culprit-agent.git"
 AGENT_REFRESH_S = 3600.0
+BRANCH_REFRESH_S = 60.0       # a Settings visit may fetch again this often
+# Branches of the agent repository that are not lines agents should follow
+# (the demo branch carries synthetic data for the public dashboard).
+HIDDEN_BRANCHES = ("demo",)
 REPOS = ("host", "agent")
 
 _cache: dict[str, dict[str, Any]] = {}
@@ -175,6 +179,32 @@ def _sync_agent_mirror() -> str:
     if out is None:
         return f"could not refresh the agent repository: {reason}"
     return ""
+
+
+def branches(refresh: bool = False) -> dict[str, Any]:
+    """The agent repository's branches from the mirror, HIDDEN_BRANCHES left
+    out, for the Settings picker. `refresh` fetches first when the mirror is
+    older than BRANCH_REFRESH_S, so a branch pushed a minute ago shows up
+    without waiting for the hourly sync. Unavailable (with the reason) when
+    there is no mirror; the picker then falls back to a typed name."""
+    global _agent_fetched_at
+    with _lock:
+        problem = _sync_agent_mirror()
+        if not (AGENT_MIRROR / "HEAD").exists():
+            return {"available": False, "reason": problem or "no mirror of the agent repository yet",
+                    "branches": [], "hidden": list(HIDDEN_BRANCHES), "fetched_at": None}
+        if refresh and not problem and time.time() - _agent_fetched_at >= BRANCH_REFRESH_S:
+            _agent_fetched_at = time.time()
+            out, reason = _git(["fetch", "--quiet", "--prune"], AGENT_MIRROR, timeout=60)
+            problem = "" if out is not None else f"could not refresh the agent repository: {reason}"
+        out, reason = _git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], AGENT_MIRROR)
+        if out is None:
+            return {"available": False, "reason": f"could not list branches: {reason}",
+                    "branches": [], "hidden": list(HIDDEN_BRANCHES), "fetched_at": _agent_fetched_at or None}
+        names = sorted({line.strip() for line in out.splitlines() if line.strip()} - set(HIDDEN_BRANCHES),
+                       key=lambda b: (b != "main", b != "dev", b))
+        return {"available": True, "reason": None, "branches": names, "hidden": list(HIDDEN_BRANCHES),
+                "fetched_at": _agent_fetched_at or None, "stale_reason": problem or None}
 
 
 def _build_agent(branch: str) -> dict[str, Any]:
