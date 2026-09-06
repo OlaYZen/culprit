@@ -95,6 +95,10 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "offenders[].pid", "offenders[].name", "offenders[].lag_score",
             "offenders[].lag_reasons", "offenders[].lag_breakdown",
             "offenders[].container", "offenders[].unit",
+            # The memory-fill forecast (memtrend): always a dict, with
+            # available=False + reason for the first ten minutes.
+            "memory_forecast.available", "memory_forecast.window_seconds",
+            "memory_forecast.samples",
         ],
         # Per-unit pressure/limits and the kernel's own state feed the
         # findings (unit_throttled / unit_memlimit / unit_stalled /
@@ -116,6 +120,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "items[].key", "items[].kind", "items[].severity", "items[].title",
             "items[].detail", "items[].fix", "items[].since", "items[].evidence",
             "items[].root", "items[].changes", "items[].since_start",
+            # Unit items only: the verbs the agent offers, and the manager.
+            "items[].actions", "items[].manager",
             "checks.units.available", "checks.listeners.available",
             "checks.tls.available", "checks.tls.certificates", "checks.time.available",
             "checks.time.synchronized", "checks.dns.available", "checks.mounts.checked",
@@ -166,6 +172,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             # Fill forecast + who writes there (+ deleted-but-held files).
             "volumes.volumes[].forecast.available", "volumes.volumes[].writers",
             "volumes.volumes[].held_deleted", "volumes.writers_gated",
+            # Per-file write rates (fdinfo offsets) and how they are measured.
+            "volumes.volumes[].files", "volumes.files_method",
             "volumes.media[].name", "volumes.media[].model",
             "volumes.media[].interface", "volumes.media[].media_type",
             "volumes.media[].size", "volumes.media[].firmware",
@@ -371,6 +379,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
 
 # Paths allowed to be absent because the machine legitimately may not have them.
 OPTIONAL = {
+    "items[].actions",                # only unit / listener items carry verbs
+    "items[].manager",
     "system.ubuntu_pro.available",    # only on Ubuntu
     "system.ubuntu_pro.attached",
     "system.ubuntu_pro.enabled",

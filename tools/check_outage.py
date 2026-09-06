@@ -105,6 +105,11 @@ def main() -> int:
     check("a crash loop is its own warn item with the last error line",
           items["unit_looping:looper.service"]["severity"] == "warn")
     check("enabled-but-stopped is a warn item", items["unit_stopped:off.service"]["severity"] == "warn")
+    check("unit items carry the verbs the agent offers, root first",
+          [a["unit"] for a in web["actions"]] == ["db.service", "web.service"]
+          and items["unit_stopped:off.service"]["actions"][0]["verb"] == "start"
+          and items["unit_looping:looper.service"]["actions"][0]["verb"] == "restart")
+    check("unit items name their manager", web["manager"] == "system")
     check("status is broken and the worst is critical", out["status"] == "broken" and out["severity"] == "critical")
     check("checks count them", out["checks"]["units"] == {"available": True, "failed": 2, "looping": 1,
                                                           "stopped": 1, "total": 100})
