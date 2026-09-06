@@ -235,13 +235,11 @@
   flex-direction: column;
   gap: 8px;
 }
-.sidebar__cost,
 .sidebar__version {
   font-size: 10.5px;
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
-.sidebar__cost { margin-top: 4px; }
 .sidebar__version:empty { display: none; }
 
 /* ── Main pane ─────────────────────────────────────────────────────────── */

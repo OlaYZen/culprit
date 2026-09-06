@@ -240,13 +240,6 @@ async function updateCoronerBadge() {
   } catch { /* the view itself reports errors */ }
 }
 
-function updateOverhead() {
-  api("/api/status").then((status) => {
-    const overhead = status.overhead || {};
-    patchText(bind.overhead, `Culprit ${fmt.pct(overhead.cpu_percent, 1)} cpu · ${fmt.bytes(overhead.working_set)}`);
-  }).catch(() => { /* a nicety, not worth surfacing failures */ });
-}
-
 /* ══ Theme ═════════════════════════════════════════════════════════════ */
 function initTheme() {
   $("#theme-toggle")?.addEventListener("click", () => {
@@ -392,7 +385,6 @@ function boot() {
   store.connect();
   navigate(location.hash.slice(1) || "overview", { push: false });
 
-  updateOverhead();
   setInterval(updateOverhead, 10000);
   store.on("node", () => { if (store.node !== coronerBadgeNode) updateCoronerBadge(); });
   setInterval(updateCoronerBadge, 60000);
