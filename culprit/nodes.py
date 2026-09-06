@@ -169,6 +169,11 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         "update_capable": meta.get("update_capable")
             if isinstance(meta.get("update_capable"), bool) else None,
         "update_reason": _short(meta.get("update_reason"), 200),
+        # Whether the agent's build honours a `ref` on the update command (a
+        # version change). Older agents never send it: None, and the host
+        # refuses to send them a ref they would ignore.
+        "update_refs": meta.get("update_refs")
+            if isinstance(meta.get("update_refs"), bool) else None,
     }
     snapshot: dict[str, Any] = {}
     dropped: list[str] = []
@@ -214,6 +219,7 @@ class _Node:
         # it from the fleet-wide NodeRegistry._remote_version.
         self.update_capable: bool | None = None
         self.update_reason: str | None = None
+        self.update_refs: bool | None = None
         # Desired setting overrides, handed back to the agent in the response
         # to its next report -- the push-only channel's one-way "downlink".
         # Deliberately in memory only: this mirrors the titlebar Refresh
@@ -297,6 +303,8 @@ class NodeRegistry:
             if meta["update_capable"] is not None:
                 node.update_capable = meta["update_capable"]
                 node.update_reason = meta["update_reason"]
+            if meta["update_refs"] is not None:
+                node.update_refs = meta["update_refs"]
             settings = dict(node.settings)
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
@@ -430,11 +438,13 @@ class NodeRegistry:
                 "report_interval": None, "agent_version": None,
                 "hostname": None, "os": None, "container": None,
                 "update_capable": None, "update_available": None,
-                "update_reason": None, "remote_version": None,
+                "update_reason": None, "update_refs": None, "remote_version": None,
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
             meta["last_addr"] = agent.get("last_addr")
+            meta["pinned_version"] = agent.get("pinned_version") or None
+            meta["pinned_ref"] = agent.get("pinned_ref") or None
             out.append(meta)
         # A node that reports with a valid token but was since deleted from
         # the agents table cannot happen (the token check consults the table),
@@ -473,6 +483,7 @@ class NodeRegistry:
             "update_capable": node.update_capable,
             "update_available": _is_newer(self._remote_version, node.agent_version),
             "update_reason": node.update_reason,
+            "update_refs": node.update_refs,
             "remote_version": self._remote_version,
             # Clamped: these travel in every node list and every SSE snapshot
             # frame, so a 2 MB "hostname" would be amplified to every viewer.
@@ -643,10 +654,12 @@ CONTAINER_RUNTIMES = ("docker", "containerd", "podman", "cri-o")
 def update_targets(metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, str]]]:
     """Which agents an "Update all" covers, and why each other one is left
     out. The rule is the daily sweep's (enabled, capable, an update
-    available) plus online -- a queued command to an absent agent would just
-    time out -- and never a containerised agent: those update through their
-    image, and the git-pull path does not exist inside one even when the
-    agent has not said so itself. Pure, so tools/check_updates.py pins it."""
+    available, not pinned) plus online -- a queued command to an absent
+    agent would just time out -- and never a containerised agent: those
+    update through their image, and the git-pull path does not exist inside
+    one even when the agent has not said so itself. A pinned agent was put
+    on its version by an operator; only an explicit action moves it. Pure,
+    so tools/check_updates.py pins it."""
     targets: list[str] = []
     skipped: list[dict[str, str]] = []
     for meta in metas:
@@ -658,6 +671,8 @@ def update_targets(metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[st
             reason = "revoked"
         elif container in CONTAINER_RUNTIMES:
             reason = f"runs in {container}: updates through its image, not git"
+        elif meta.get("pinned_version"):
+            reason = f"pinned to v{meta['pinned_version']}"
         elif not meta.get("online"):
             reason = "offline"
         elif meta.get("update_capable") is not True:

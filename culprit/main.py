@@ -104,6 +104,8 @@ def _maybe_auto_update() -> None:
             continue
         if meta.get("update_available") is not True:
             continue
+        if meta.get("pinned_version"):
+            continue  # an operator put it there; only an explicit action moves it
         if not history.mark_auto_updated(str(meta["name"]), today):
             continue  # already updated today, or the claim lost a race
         asyncio.get_running_loop().create_task(
@@ -776,9 +778,74 @@ async def api_node_update(request: Request, name: str) -> dict[str, Any]:
                             or "this agent has not reported update capability yet")
     result = await _agent_command(name, "update", {},
                                   timeout_override=UPDATE_TIMEOUT_S)
+    # An explicit update to the tip ends any pin: the operator chose latest.
+    if meta.get("pinned_version") and history is not None:
+        history.set_agent_pin(name, None, None)
     log.info("update triggered on '%s' by %s -> %s", name,
              getattr(request.state, "user", "?"), result)
     return result
+
+
+# The first agent build whose update command takes a ref; older ones report
+# no update_refs and are refused a version change rather than sent a ref
+# they would ignore (and update to the tip instead).
+AGENT_REFS_SINCE = "0.20.0-b"
+
+
+@app.post("/api/nodes/{name}/version",
+          summary="Move this agent to a chosen version (a downgrade, usually)",
+          dependencies=[Depends(require_role("operator"))])
+async def api_node_version(request: Request, name: str,
+                           body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Resolves the version to the newest commit that carried it in the
+    host's mirror of the agent repository (the same list Patch notes shows)
+    and sends the agent the same "update" command with that commit as
+    `ref`. Any version other than the published one pins the node, so the
+    daily sweep and Update all leave it alone; choosing the published
+    version clears the pin. Refused for an agent that cannot update, or
+    whose build predates ref support."""
+    assert registry is not None and history is not None
+    version = str(body.get("version") or "").strip()
+    if not version or len(version) > 64:
+        raise HTTPException(422, "version is required")
+    meta = next((n for n in registry.status_list() if n["name"] == name), None)
+    if meta is None:
+        raise HTTPException(404, f"no agent named '{name}'")
+    if meta.get("update_capable") is not True:
+        raise HTTPException(409, meta.get("update_reason")
+                            or "this agent has not reported update capability yet")
+    if meta.get("update_refs") is not True:
+        raise HTTPException(409, f"agent v{meta.get('agent_version') or '?'} cannot change "
+                                 f"to a chosen version; update it to v{AGENT_REFS_SINCE} "
+                                 "or newer first")
+    notes = await asyncio.to_thread(changelog.load, "agent")
+    if not notes.get("available"):
+        raise HTTPException(503, f"cannot list agent versions: {notes.get('reason')}")
+    commit = next((c for c in notes["commits"] if c.get("version") == version), None)
+    if commit is None:
+        raise HTTPException(404, f"no agent version '{version}' in the mirror")
+    if meta.get("agent_version") == version:
+        raise HTTPException(409, f"'{name}' is already on v{version}")
+    result = await _agent_command(name, "update", {"ref": commit["sha"]},
+                                  timeout_override=UPDATE_TIMEOUT_S)
+    latest = meta.get("remote_version")
+    pinned = version != latest
+    history.set_agent_pin(name, version if pinned else None, commit["sha"] if pinned else None)
+    log.info("version change on '%s' to v%s (%s) by %s -> %s", name, version,
+             commit["sha"][:12], getattr(request.state, "user", "?"), result)
+    return {"version": version, "sha": commit["sha"], "pinned": pinned, "result": result}
+
+
+@app.delete("/api/nodes/{name}/pin", summary="Let the schedule and Update all move this agent again",
+            dependencies=[Depends(require_role("operator"))])
+async def api_node_unpin(request: Request, name: str) -> dict[str, Any]:
+    """Clears the pin without touching the agent: it stays on its version
+    until the daily sweep, Update all, or its own Update button moves it."""
+    assert history is not None
+    if not history.set_agent_pin(name, None, None):
+        raise HTTPException(404, f"no agent named '{name}'")
+    log.info("pin cleared on '%s' by %s", name, getattr(request.state, "user", "?"))
+    return {"name": name, "pinned": False}
 
 
 @app.post("/api/nodes/update-all",
