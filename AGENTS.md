@@ -136,7 +136,7 @@ Commit messages carry **no attribution trailers, ever**: no `Co-Authored-By: Cla
 
 ## Versioning
 
-The version is a plain string in `version.json` at the repo root, e.g. `{"version": "0.17.3-b"}`. `culprit/__init__.py` reads it at import time and falls back to `"unknown"`; `main.py` hands the same value to FastAPI (it shows on `/api/docs`). Bump only `version.json`. The Dockerfile copies it into the image explicitly, so do not drop that `COPY` line. The host and the agent are versioned independently, each by its own `version.json`, under the same rules.
+The version is a plain string in `version.json` at the repo root, e.g. `{"version": "0.17.3-b"}`. `culprit/__init__.py` reads it at import time and falls back to `"unknown"`; `main.py` hands the same value to FastAPI (it shows on `/api/docs`) and publishes it as `config.version` in `_public_config` (every snapshot frame and `/api/settings`), which the sidebar footer and Settings › About this tool display. Bump only `version.json`. The Dockerfile copies it into the image explicitly, so do not drop that `COPY` line. The host and the agent are versioned independently, each by its own `version.json`, under the same rules.
 
 **Format: `X.Y.Z-b`.** The `-b` (beta) suffix is constant while the project is pre-1.0; do not drop it.
 
