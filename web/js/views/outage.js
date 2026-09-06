@@ -14,20 +14,32 @@
 
 import { el, patchAttr, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
-import { store } from "../stream.js";
-import { emptyState, icons, pendingSlot, readySlot, skeletonFacts, skeletonSection, skeletonStatus } from "../ui.js";
-import { changeList, codeRow, pill, section, viewHead } from "./shared.js";
+import { confirmAction, emptyState, icons, pendingSlot, readySlot, skeletonFacts, skeletonSection, skeletonStatus } from "../ui.js";
+import { api, store } from "../stream.js";
+import { canOperate, changeList, codeRow, kv, pill, section, viewHead, watchVerdict } from "./shared.js";
 
 const KIND_WORD = {
   unit: "unit", listener: "listener", certificate: "certificate", clock: "clock", dns: "DNS",
   mount: "filesystem", storage: "storage", reboot: "reboot",
 };
 const TONE = { critical: "crit", warn: "warn", info: "info" };
+const VERB_WORD = { restart: "Restart", start: "Start", "reload-or-restart": "Reload or restart", "reset-failed": "Reset failed state" };
+const VERB_CONSEQUENCE = {
+  restart: "Restarting stops the unit and starts it again: every connection it holds is dropped and its processes are replaced. "
+    + "If it fails again straight away, the cause is upstream of it and the verdict will say so.",
+  start: "Starting an enabled unit that is not running. If it stops again, its journal says why.",
+  "reload-or-restart": "Reloads the unit if it supports it (configuration re-read, connections kept), otherwise restarts it.",
+  "reset-failed": "Clears the failed state only; nothing is started or stopped.",
+};
+const RECORD_TTL_MS = 5 * 60_000;
+const OUTCOME_WORD = { fixed: "fixed", recurred: "came back", partial: "partly", no_change: "no change", moot: "nothing to verify", unknown: "unknown", pending: "watching" };
 
 export function createOutage() {
   const root = el("div.view", { dataset: { view: "outage" } });
   const nodes = {};
   let built = false;
+  // Track record per (node, unit): what earlier restarts here were judged.
+  const records = new Map();
 
   const head = viewHead({
     title: "Outage Doctor",
@@ -49,12 +61,17 @@ export function createOutage() {
     nodes.status.append(el("div.status__text", {}, [nodes.statusWord, nodes.statusLine]));
     nodes.items = el("div");
     nodes.itemsMeta = el("span");
+    // Actions taken from this page, with their live verdicts. Built once and
+    // appended to, never re-rendered: the item cards are rebuilt on every
+    // slow tick and the fixed item disappears from them -- which is exactly
+    // when the verdict arrives, so it needs a home that survives both.
+    nodes.recent = el("div.list", { hidden: true });
     nodes.checks = el("div.facts");
     nodes.checksMeta = el("span");
     nodes.certs = el("div");
     content.append(
       nodes.status,
-      section({ title: "Broken", meta: nodes.itemsMeta, body: nodes.items,
+      section({ title: "Broken", meta: nodes.itemsMeta, body: el("div", {}, [nodes.recent, nodes.items]),
         foot: "Nothing here fires from a threshold. A failed unit, a vanished listener, an expired certificate, a "
             + "read-only remount and a failing resolver are outages; a certificate with weeks left and a pending "
             + "reboot are information, shown as such." }),
@@ -144,9 +161,29 @@ export function createOutage() {
       node.append(el("div.finding__evidence.pills", {}, entries.map(([key, value]) =>
         pill(`${key.replace(/_/g, " ")}: ${formatEvidence(key, value)}`, null, { mono: true }))));
     }
+    const actions = (item.actions || []).filter((a) => a && a.verb && a.unit);
+    if (actions.length && canOperate()) {
+      // The verbs the agent offered for this item, run there with the same
+      // guards as the process actions; the host then watches the node's
+      // next outage samples and says whether the item cleared and stayed
+      // clear. Judgement of earlier tries on this unit sits underneath.
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", { text: "Act" }));
+      const row = el("div.row", { style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } });
+      actions.forEach((action, index) => {
+        const button = el(`button.btn.btn--sm${index === 0 ? ".btn--primary" : ""}`, { type: "button",
+          title: `systemctl${action.manager === "user" ? " --user" : ""} ${action.verb} ${action.unit}` }, [action.label || `${VERB_WORD[action.verb] || action.verb} ${action.unit}`]);
+        button.addEventListener("click", () => runUnitAction(item, action));
+        row.append(button);
+      });
+      group.append(row);
+      const record = trackRecordLine(item.unit);
+      if (record) group.append(record);
+      node.append(group);
+    }
     if (item.fix) {
       const group = el("div.finding__culprits");
-      group.append(el("span.label", { text: "Fix" }));
+      group.append(el("span.label", { text: actions.length ? "Or by hand" : "Fix" }));
       group.append(codeRow(item.fix, "Copy"));
       node.append(group);
     }
@@ -161,6 +198,86 @@ export function createOutage() {
       node.append(group);
     }
     return node;
+  }
+
+  function runUnitAction(item, action) {
+    const node = store.node;
+    const word = VERB_WORD[action.verb] || action.verb;
+    let outcome = null;
+    confirmAction({
+      title: `${word} ${action.unit}?`,
+      message: `This runs systemctl${action.manager === "user" ? " --user" : ""} ${action.verb} ${action.unit} on ${node}`
+        + `${action.unit !== item.unit ? ` — the root of "${item.title}"` : ""}.`,
+      detail: VERB_CONSEQUENCE[action.verb] || "",
+      confirmLabel: word,
+      danger: action.verb !== "reset-failed",
+      onConfirm: async () => {
+        outcome = await api(`/api/nodes/${encodeURIComponent(node)}/units/${encodeURIComponent(action.unit)}/${action.verb}`, {
+          method: "POST", body: JSON.stringify({ confirm: true, manager: action.manager || "system" }),
+        });
+        const before = outcome.before || {};
+        const after = outcome.after || {};
+        return `${action.unit}: ${before.active || "?"} → ${after.active || "?"}${after.sub ? ` (${after.sub})` : ""}${after.main_pid ? ` · pid ${after.main_pid}` : ""}.`;
+      },
+      onClosed: () => {
+        if (!outcome) return;
+        records.delete(`${node}|${action.unit}`);
+        addRecent(node, action, outcome);
+      },
+    });
+  }
+
+  function addRecent(node, action, outcome) {
+    const result = el("div.result", { dataset: { tone: "" } });
+    result.replaceChildren(el("span.btn__spin"), el("span", { text: "Watching the node's next outage samples…" }));
+    const entry = el("div", { style: { padding: "8px 0" } }, [
+      el("div.row.row--between", {}, [
+        el("span", {}, [
+          el("b", { text: `${VERB_WORD[action.verb] || action.verb} ${action.unit}` }),
+          el("span.faint.small", { text: ` on ${node} · ${fmt.clock(Date.now() / 1000)}` }),
+        ]),
+        outcome.note ? pill("see note", "warn") : null,
+      ]),
+      el("div.verdict", { style: { marginTop: "4px" } }, [result]),
+      outcome.note ? el("div.faint.small", { style: { marginTop: "4px" }, text: outcome.note }) : null,
+    ]);
+    nodes.recent.hidden = false;
+    nodes.recent.prepend(entry);
+    while (nodes.recent.children.length > 5) nodes.recent.lastChild.remove();
+    if (outcome.verify_id) {
+      watchVerdict(outcome.verify_id, result, { onDone: () => { records.delete(`${node}|${action.unit}`); } });
+    } else {
+      result.dataset.tone = "";
+      result.replaceChildren(el("span", { text: "Done; no verdict watch was started." }));
+    }
+  }
+
+  /** "Restart: fixed 2 of 3 · last 2 h ago" for this unit on this node, from
+   *  the stored verdicts; fetched once per unit and kept a few minutes. */
+  function trackRecordLine(unit) {
+    if (!unit) return null;
+    const key = `${store.node}|${unit}`;
+    const cached = records.get(key);
+    if (!cached) {
+      records.set(key, { at: Date.now(), payload: null });
+      api(`/api/history/record?node=${encodeURIComponent(store.node)}&unit=${encodeURIComponent(unit)}`)
+        .then((payload) => { records.set(key, { at: Date.now(), payload }); if (root.isActive) update(store.state); })
+        .catch(() => { records.set(key, { at: Date.now(), payload: { record: {} } }); });
+      return null;
+    }
+    if (Date.now() - cached.at > RECORD_TTL_MS) { records.delete(key); return trackRecordLine(unit); }
+    const record = (cached.payload || {}).record || {};
+    const rows = Object.entries(record).filter(([action]) => action.startsWith("unit_"));
+    if (!rows.length) return null;
+    return el("div", { style: { marginTop: "6px" } }, rows.map(([action, entry]) => {
+      const outcomes = Object.entries(entry.outcomes || {}).sort((a, b) => b[1] - a[1])
+        .map(([outcome, n]) => `${OUTCOME_WORD[outcome] || outcome} ${n}`).join(", ");
+      const tone = entry.last_outcome === "fixed" ? "ok" : ["no_change", "recurred"].includes(entry.last_outcome) ? "warn" : null;
+      return kv(`${VERB_WORD[action.slice(5)] || action} before`, el("span", {}, [
+        pill(outcomes, tone),
+        el("span.faint.small", { text: ` of ${entry.tries} · last ${fmt.ago(entry.last_ts)}`, title: entry.last_text || "" }),
+      ]));
+    }));
   }
 
   function renderChecks(checks) {

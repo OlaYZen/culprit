@@ -476,6 +476,9 @@
 .culprit__name { font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .culprit__pid { font-size: 10.5px; color: var(--fg-3); font-family: var(--mono); }
 .culprit__share { margin-left: auto; color: var(--fg); font-variant-numeric: tabular-nums; }
+.culprit:has(.culprit__file) { flex-wrap: wrap; row-gap: 0; }
+.culprit__file { flex: 1 1 100%; display: flex; gap: 4px; min-width: 0; padding-left: 20px; font-size: var(--fs-xs); color: var(--fg-2); }
+.culprit__file .mono { min-width: 0; }
 /* "in <container>" chip; the glyph marks it as a place, not a state. */
 .pill--where { gap: 4px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pill__glyph { font-size: 10px; opacity: 0.8; }

@@ -274,8 +274,43 @@ export function culpritRow(culprit, index) {
   const where = containerPill(culprit.container);
   if (where) node.append(where);
   node.append(el("span.culprit__share", { text: culprit.share || "" }));
+  if (culprit.file && culprit.file.path) {
+    // The file it is writing fastest: the name, not just the process. The
+    // rate is how far its descriptor's offset advanced per second.
+    const f = culprit.file;
+    node.append(el("span.culprit__file", {
+      title: `${f.path}${f.deleted ? " (deleted)" : ""} — offset advancing ${fmt.rate(f.rate_bytes_sec)}`,
+    }, [
+      el("span.mono.trunc", { text: `→ ${f.path}${f.deleted ? " (deleted)" : ""}` }),
+      el("span.faint", { text: ` ${fmt.rate(f.rate_bytes_sec)}` }),
+    ]));
+  }
   node.addEventListener("click", () => openProcessModal(culprit.pid));
   return node;
+}
+
+/* ══ Free a deleted-but-open file ══════════════════════════════════════
+ * The space a rotated log keeps until its holder closes it. The agent
+ * truncates the inode through the holder's own descriptor -- nothing is
+ * sent to the process -- and refuses a file that still has a name. */
+export function freeDeletedFile(entry) {
+  let outcome = null;
+  confirmAction({
+    title: `Free ${fmt.bytes(entry.size)}?`,
+    message: `This truncates the deleted file ${entry.path} through ${fmt.imageName(entry.name)}'s (PID ${entry.pid}) open descriptor, the way \`: > /proc/${entry.pid}/fd/N\` does.`,
+    detail: "The contents are gone for good — if this was a log you still wanted, copy it out of /proc/<pid>/fd first. "
+      + "The holder keeps its descriptor: if it keeps appending, the file grows again from zero until it is restarted.",
+    confirmLabel: "Free it",
+    onConfirm: async () => {
+      outcome = await api(`${procBase()}/${entry.pid}/truncate`, {
+        method: "POST", body: JSON.stringify({ confirm: true, path: entry.path }),
+      });
+      return `Freed ${fmt.bytes(outcome.freed_bytes)}.`;
+    },
+    onClosed: () => {
+      if (outcome?.verify_id) openVerdictModal(outcome.verify_id, `Freed ${fmt.bytes(outcome.freed_bytes)} · ${entry.path}`);
+    },
+  });
 }
 
 /* ══ Roles ═════════════════════════════════════════════════════════════
@@ -569,8 +604,14 @@ function processDetailBody(detail) {
   return wrap;
 }
 
-const ACTION_WORD = { terminate: "End task", priority: "Lower priority", throttle: "Throttle" };
-const OUTCOME_WORD = { helped: "helped", partial: "partly helped", no_change: "no change", moot: "nothing to verify", unknown: "unknown", pending: "still watching" };
+const ACTION_WORD = {
+  terminate: "End task", priority: "Lower priority", throttle: "Throttle", truncate: "Free deleted file",
+  unit_restart: "Restart", unit_start: "Start", "unit_reload-or-restart": "Reload or restart", "unit_reset-failed": "Reset failed state",
+};
+const OUTCOME_WORD = {
+  helped: "helped", partial: "partly helped", no_change: "no change", moot: "nothing to verify", unknown: "unknown",
+  pending: "still watching", fixed: "fixed", recurred: "came back",
+};
 
 /** "Throttle: helped 3 of 3, last 2 h ago · End task: no change 2 of 2." */
 function trackRecord(payload) {
@@ -581,7 +622,8 @@ function trackRecord(payload) {
     const entry = record[action];
     const outcomes = Object.entries(entry.outcomes || {}).sort((a, b) => b[1] - a[1])
       .map(([outcome, n]) => `${OUTCOME_WORD[outcome] || outcome} ${n}`).join(", ");
-    const tone = entry.last_outcome === "helped" ? "ok" : entry.last_outcome === "no_change" ? "warn" : null;
+    const tone = ["helped", "fixed"].includes(entry.last_outcome) ? "ok"
+      : ["no_change", "recurred"].includes(entry.last_outcome) ? "warn" : null;
     const value = el("span", {}, [
       pill(outcomes, tone),
       el("span.faint.small", { text: ` of ${entry.tries} · last ${fmt.ago(entry.last_ts)}`, title: entry.last_text || "" }),
@@ -715,9 +757,10 @@ function openThrottleDialog(detail) {
 }
 
 /* ══ Verdicts: did the action work? ═══════════════════════════════════ */
-const VERDICT_TONE = { helped: "ok", partial: "info", no_change: "warn", moot: null, unknown: null };
+const VERDICT_TONE = { helped: "ok", fixed: "ok", partial: "info", no_change: "warn", recurred: "warn", moot: null, unknown: null };
 const VERDICT_WORD = {
-  helped: "It worked", partial: "Partly", no_change: "No change", moot: "Nothing to verify", unknown: "Unknown",
+  helped: "It worked", fixed: "Fixed", partial: "Partly", no_change: "No change", recurred: "It came back",
+  moot: "Nothing to verify", unknown: "Unknown",
 };
 
 /**
@@ -930,7 +973,7 @@ export function renderProcessTable(container, processes, { metaNode } = {}) {
 }
 
 // VERDICT_TONE is already declared above (watchVerdict/openVerdictModal's use).
-const ACTION_LABEL = { terminate: "End task", priority: "Lower priority", throttle: "Throttle" };
+const ACTION_LABEL = ACTION_WORD;
 
 /** Incidents log, as used by Trends and Compare. `onPeak(ts)` opens whatever
  *  the caller shows for "the processes recorded at this incident's worst
