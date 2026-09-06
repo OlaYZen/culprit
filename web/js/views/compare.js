@@ -72,6 +72,7 @@ export function createCompare() {
   const incA = el("div"); const incB = el("div");
   const incMetaA = el("span"); const incMetaB = el("span");
   const labelA = el("span.strong"); const labelB = el("span.strong");
+  let bottomNodes = [];
 
   function build() {
     built = true;
@@ -85,10 +86,13 @@ export function createCompare() {
     chartsA = buildMetricCharts(gridA, { onPick: (ts) => inspectBucket(nodeA ?? single, ts) });
     chartsB = buildMetricCharts(gridB, { onPick: (ts) => inspectBucket(nodeB ?? single, ts) });
 
-    render(bottomRow, [
+    // Kept, not rebuilt: load() swaps a skeleton in for the tables while it
+    // fetches and hands these back once the tables are filled.
+    bottomNodes = [
       section({ title: "Heaviest processes", meta: topMetaA, body: topA }),
       section({ title: "Heaviest processes", meta: topMetaB, body: topB }),
-    ]);
+    ];
+    render(bottomRow, bottomNodes);
     render(incRow, [
       section({ title: "Incidents", meta: incMetaA, body: incA }),
       section({ title: "Incidents", meta: incMetaB, body: incB }),
@@ -193,6 +197,7 @@ export function createCompare() {
       if (b) feedMetricCharts(chartsB, b.series);
       renderProcessTable(topA, a?.processes || [], { metaNode: topMetaA });
       renderProcessTable(topB, b?.processes || [], { metaNode: topMetaB });
+      readySlot(bottomRow, bottomNodes);
       renderIncidentLog(incA, a?.incidents || [], { metaNode: incMetaA, onPeak: (ts) => inspectBucket(win.a.node, ts) });
       renderIncidentLog(incB, b?.incidents || [], { metaNode: incMetaB, onPeak: (ts) => inspectBucket(win.b.node, ts) });
       renderDeltas(a?.series, b?.series);
