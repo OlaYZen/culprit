@@ -1638,6 +1638,12 @@ def _public_config() -> dict[str, Any]:
     payload["history_enabled"] = bool(history and history.ready
                                       and history.recording)
     payload["history_error"] = history.error if history else None
+    # The host's own version (version.json), so the sidebar and the About
+    # panel can say which build is running. Config is the one section every
+    # frame carries -- the cold-start snapshot, the SSE snapshot frame and
+    # /api/settings -- and it reaches the store even while a remote node is
+    # being viewed, so it is the right carrier for a fact about the host.
+    payload["version"] = __version__
     return payload
 
 
