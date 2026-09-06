@@ -27,7 +27,9 @@ checks that do mutate: enrolling (and deleting) a throwaway agent to prove the
 token lifecycle end to end, creating a throwaway operator through /api/users
 to prove that role can really complete an operator-only write (the refusal
 side of every role at every route is `tools/check_role_matrix.py`'s job, run
-separately -- this only proves access granted is access that works), and
+separately -- this only proves access granted is access that works), a real
+agent's update request refused (404 unknown node, 409 not yet capable --
+`tools/check_updates.py` pins the rest of that logic offline), and
 deliberately exhausting the login rate limit, which locks the scanner's own
 address out for five minutes.
 
@@ -1246,6 +1248,61 @@ def check_agent_lifecycle(ctx: Ctx) -> None:
         ctx.http.req("DELETE", f"/api/agents/{name}", cookie=c)
 
 
+def check_update_guard(ctx: Ctx) -> None:
+    """--active: POST /api/nodes/{name}/update's two fast-fail guards --
+    unknown node (404) and a real, freshly-enrolled agent that has not (yet)
+    reported itself update-capable (409). Deliberately stops there: a
+    capable+available node would actually queue the update command, which
+    then blocks for up to UPDATE_TIMEOUT_S (120s) waiting for an agent that
+    is never going to poll for it -- far too slow for a routine scan, and
+    the decision logic behind whose version is newer and whether today's
+    slot is free is `tools/check_updates.py`'s job anyway, offline and in
+    milliseconds. Cleans up after itself."""
+    if not (ctx.args.active and ctx.cookie):
+        return
+    rep = ctx.report
+    c = ctx.cookie
+    r = ctx.http.req("POST", f"/api/nodes/sectest-nonexistent-{secrets.token_hex(3)}/update",
+                     cookie=c)
+    if r.status != 404:
+        rep.add("HIGH", "update-guard", f"unknown node -> {r.status} (expected 404)")
+    else:
+        rep.ok("update-guard", "an unknown node's update request is 404, not queued")
+
+    name = f"sectest-update-{secrets.token_hex(3)}"
+    r = ctx.http.req("POST", "/api/agents", json_body={"name": name}, cookie=c)
+    token = (r.json() or {}).get("token")
+    if not token:
+        rep.add("WARN", "update-guard", f"could not enrol {name}: {r.status}")
+        return
+    try:
+        r = ctx.http.req("POST", f"/api/nodes/{name}/update", cookie=c)
+        if r.status != 409:
+            rep.add("CRIT", "update-guard",
+                    f"a node that never reported update capability -> {r.status} "
+                    "(expected 409, not queued)")
+            return
+        body = json.dumps({"agent": {"report_interval": 1, "version": "sectest",
+                                     "update_capable": False,
+                                     "update_reason": "sectest: not capable"},
+                           "snapshot": {"system": {"hostname": "sectest"}}}).encode()
+        r = ctx.http.req("POST", "/api/agents/report", body=body,
+                         headers={"Content-Type": "application/json",
+                                  "Authorization": f"Bearer {token}"})
+        if r.status != 200:
+            rep.add("WARN", "update-guard", f"setup report -> {r.status}")
+            return
+        r = ctx.http.req("POST", f"/api/nodes/{name}/update", cookie=c)
+        if r.status != 409:
+            rep.add("CRIT", "update-guard",
+                    f"an explicitly not-capable node -> {r.status} (expected 409)")
+        else:
+            rep.ok("update-guard", "an incapable node's update request is 409 with its "
+                   "reported reason, never queued")
+    finally:
+        ctx.http.req("DELETE", f"/api/agents/{name}", cookie=c)
+
+
 def check_rate_limit(ctx: Ctx) -> None:
     """--active: burn the remaining budget and prove the lockout, including
     against the CORRECT password. Locks this address out for five minutes."""
@@ -1915,6 +1972,7 @@ def main() -> int:
                 check_agent_lifecycle(ctx)
                 check_agent_isolation(ctx)
                 check_role_gate(ctx)
+                check_update_guard(ctx)
             check_logout(ctx)
         elif not ctx.cookie:
             print(f"\n{DIM}(pass --user/--password or --throwaway-user for the "
