@@ -2,30 +2,38 @@
  * The demo's stand-in for the host API: every route `web/js` calls, answered
  * from the world in world.js. Request shapes and error texts follow main.py
  * so the views' own error handling gets exercised (a 400 for PID 1, a 422
- * with `field_errors` for a bad setting, a 404 for a vanished process).
+ * with `field_errors` for a bad setting, a 404 for a vanished process, a
+ * 409 for an agent that cannot update itself).
  */
 
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const reply = (status, payload) => ({ status, payload });
 const fail = (status, detail) => reply(status, { detail });
+const UNIT_VERBS = ["restart", "start", "reload-or-restart", "reset-failed"];
+const UNIT_NAME = /^[A-Za-z0-9:_.@\\-]{1,255}\.(service|socket|timer|mount|path|target)$/;
+const ROLES = ["viewer", "operator", "admin"];
 
 export function createRouter(world) {
   const routes = [];
   const on = (method, pattern, handler) => routes.push({ method, pattern, handler });
   const node = (name) => world.nodes.get(decodeURIComponent(name)) || null;
   const nowSec = () => Date.now() / 1000;
+  const outcome = (out) => (out.status === 200 ? reply(200, out.result) : fail(out.status, out.detail));
 
   on("GET", /^\/api\/health$/, () => reply(200, { ok: true, demo: true }));
+  on("GET", /^\/api\/healthz$/, () => reply(200, { ok: true, demo: true }));
   on("POST", /^\/api\/login$/, () => reply(200, { ok: true, auth: false }));
   on("POST", /^\/api\/logout$/, () => reply(200, { ok: true }));
+  on("GET", /^\/api\/auth$/, () => reply(200, { enabled: false, username: null, role: null }));
+  on("GET", /^\/api\/portnames$/, () => reply(200, structuredClone(world.portnames)));
 
   on("GET", /^\/api\/status$/, () => {
     const status = structuredClone(world.host.status);
     status.overhead.cpu_percent = Number(rand(0.1, 0.6).toFixed(1));
     status.overhead.working_set = Math.round(status.overhead.working_set * rand(0.99, 1.01));
     status.overhead.uptime_seconds = Number((nowSec() - world.t0 + 5241).toFixed(1));
-    status.config = world.config;
+    status.config = publicConfig(world);
     return reply(200, status);
   });
 
@@ -34,10 +42,7 @@ export function createRouter(world) {
   on("GET", /^\/api\/fleet$/, () => reply(200, world.fleet(nowSec())));
 
   // ---------------------------------------------------------------- agents
-  on("POST", /^\/api\/agents$/, (m, q, body) => {
-    const out = world.addAgent(String(body.name || "").trim());
-    return out.status === 200 ? reply(200, out.result) : fail(out.status, out.detail);
-  });
+  on("POST", /^\/api\/agents$/, (m, q, body) => outcome(world.addAgent(String(body.name || "").trim())));
   on("POST", /^\/api\/agents\/([^/]+)\/token$/, (m) => {
     const n = node(m[1]);
     if (!n) return fail(404, `no agent named '${decodeURIComponent(m[1])}'`);
@@ -89,15 +94,63 @@ export function createRouter(world) {
     const detail = n.detail(Number(m[2]), extras);
     return detail ? reply(200, detail) : fail(404, "process no longer exists");
   });
-  on("POST", /^\/api\/nodes\/([^/]+)\/processes\/(\d+)\/(terminate|priority|throttle)$/, (m, q, body) => {
+  on("POST", /^\/api\/nodes\/([^/]+)\/processes\/(\d+)\/(terminate|priority|throttle|truncate)$/, (m, q, body) => {
     if (m[3] === "terminate" && body.confirm !== true) return fail(400, "confirm must be true for a terminate request");
-    const out = world.act(decodeURIComponent(m[1]), m[3], Number(m[2]), body || {});
-    return out.status === 200 ? reply(200, out.result) : fail(out.status, out.detail);
+    if (m[3] === "truncate") {
+      if (body.confirm !== true) return fail(400, "confirm must be true for a truncate request");
+      if (!String(body.path || "").startsWith("/")) return fail(422, "path must be absolute");
+    }
+    return outcome(world.act(decodeURIComponent(m[1]), m[3], Number(m[2]), body || {}));
   });
+  on("POST", /^\/api\/nodes\/([^/]+)\/units\/([^/]+)\/([^/]+)$/, (m, q, body) => {
+    const unit = decodeURIComponent(m[2]);
+    const verb = m[3];
+    if (!UNIT_VERBS.includes(verb)) return fail(422, `verb must be one of ${UNIT_VERBS.join(", ")}`);
+    const manager = (body || {}).manager || "system";
+    if (!["system", "user"].includes(manager)) return fail(422, "manager must be system or user");
+    if (!UNIT_NAME.test(unit)) return fail(422, "not a unit name");
+    if ((body || {}).confirm !== true) return fail(400, "confirm must be true for a unit action");
+    return outcome(world.unitAction(decodeURIComponent(m[1]), unit, verb, manager));
+  });
+  on("POST", /^\/api\/nodes\/([^/]+)\/update$/, (m) => outcome(world.updateNode(decodeURIComponent(m[1]))));
   on("GET", /^\/api\/nodes\/([^/]+)\/actions\/(\d+)$/, (m) => {
     const watch = world.watch(Number(m[2]));
-    return watch ? reply(200, watch) : fail(404, "no such action being watched (verdicts are kept for an hour after they are reached)");
+    if (!watch || watch.node !== decodeURIComponent(m[1])) {
+      return fail(404, "no such action being watched (verdicts are kept for 15 minutes; older ones are in /api/history/actions)");
+    }
+    return reply(200, watch);
   });
+
+  // ------------------------------------------------------------------- map
+  on("GET", /^\/api\/map$/, () => reply(200, world.map(nowSec())));
+  on("GET", /^\/api\/map\/radius$/, (m, q) => {
+    const name = q.get("node") || "";
+    const pid = Number(q.get("pid"));
+    if (!name || !(pid >= 1)) return reply(422, { detail: "node and pid are required" });
+    return reply(200, world.radius(name, pid));
+  });
+
+  // ---------------------------------------------------------------- deaths
+  on("GET", /^\/api\/deaths$/, (m, q) => {
+    const since = q.get("since") !== null ? Number(q.get("since")) : nowSec() - 90 * 86400;
+    const limit = Math.min(200, Math.max(1, Number(q.get("limit")) || 50));
+    const name = q.get("node") || null;
+    return reply(200, { since, node: name, deaths: world.deathList(name, since, limit) });
+  });
+  on("GET", /^\/api\/deaths\/(\d+)$/, (m) => {
+    const entry = world.death(Number(m[1]));
+    return entry ? reply(200, entry) : fail(404, "no such death");
+  });
+
+  // ----------------------------------------------------------------- users
+  on("GET", /^\/api\/users$/, () => reply(200, { users: structuredClone(world.users) }));
+  on("POST", /^\/api\/users$/, (m, q, body) => outcome(world.addUser(body || {})));
+  on("PUT", /^\/api\/users\/([^/]+)\/role$/, (m, q, body) => {
+    const role = (body || {}).role;
+    if (!ROLES.includes(role)) return fail(422, `role must be one of ${ROLES.join(", ")}`);
+    return outcome(world.setRole(decodeURIComponent(m[1]), role));
+  });
+  on("DELETE", /^\/api\/users\/([^/]+)$/, (m) => outcome(world.removeUser(decodeURIComponent(m[1]))));
 
   // -------------------------------------------------------------- settings
   on("GET", /^\/api\/settings$/, () => reply(200, {
@@ -183,7 +236,8 @@ export function createRouter(world) {
     const n = node(q.get("node") || "");
     if (!n) return reply(200, { available: false, reason: "no such node", ts: [], series: {}, count: 0 });
     const since = Number(q.get("since")) || 0;
-    const out = n.seriesSince(since);
+    const until = q.get("until") !== null ? Number(q.get("until")) : null;
+    const out = n.seriesSince(since, Number.isFinite(until) ? until : null);
     const wanted = (q.get("columns") || "").split(",").filter(Boolean);
     if (wanted.length && out.series) {
       out.series = Object.fromEntries(wanted.map((c) => [c, out.series[c] || out.ts.map(() => null)]));
@@ -193,12 +247,13 @@ export function createRouter(world) {
   on("GET", /^\/api\/history\/top$/, (m, q) => {
     const n = node(q.get("node") || "");
     const since = Number(q.get("since")) || nowSec() - 3600;
-    if (!n) return reply(200, { since, until: nowSec(), node: q.get("node"), processes: [] });
-    const span = nowSec() - since;
+    const until = q.get("until") !== null ? Number(q.get("until")) : nowSec();
+    if (!n) return reply(200, { since, until, node: q.get("node"), processes: [] });
+    const span = until - since;
     const keys = Object.keys(n.tops || {}).map(Number).sort((a, b) => a - b);
     const pick = keys.find((k) => k >= span - 1) ?? keys[keys.length - 1];
     const top = pick ? structuredClone(n.tops[String(pick)]) : { processes: [] };
-    return reply(200, { ...top, since, until: nowSec(), node: n.name });
+    return reply(200, { ...top, since, until, node: n.name });
   });
   on("GET", /^\/api\/history\/incidents$/, (m, q) => {
     const n = node(q.get("node") || "");
@@ -235,8 +290,11 @@ export function createRouter(world) {
 
   return async function route(method, url, body) {
     const parsed = new URL(url, location.href);
-    // The host's own latency, so the loading states get their moment.
-    await sleep(parsed.pathname.endsWith("/snapshot") ? rand(8, 25) : rand(30, 120));
+    // The host's own latency, so the loading states get their moment. A
+    // unit action is relayed to the agent and waited for, like the host does.
+    const latency = parsed.pathname.endsWith("/snapshot") ? rand(8, 25)
+      : /\/units\/|\/update$/.test(parsed.pathname) ? rand(600, 1400) : rand(30, 120);
+    await sleep(latency);
     for (const entry of routes) {
       if (entry.method !== method) continue;
       const match = parsed.pathname.match(entry.pattern);
@@ -258,7 +316,7 @@ function bootSnapshot(world) {
   return {
     warm: true, warmup_stage: "Ready", server_started_at: world.t0 - 5241, now,
     errors: {}, timings: {}, config: publicConfig(world), elevated: false,
-    auth: { enabled: false, username: null }, nodes: world.nodeList(now),
+    auth: { enabled: false, username: null, role: null }, nodes: world.nodeList(now),
   };
 }
 

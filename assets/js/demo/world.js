@@ -14,18 +14,32 @@
  *    renices or throttles it first -- in which case the verdict watch judges
  *    the action the way the host would;
  *  - one agent that went silent forty minutes ago, so the stale chip and the
- *    offline fleet card are on show.
+ *    offline fleet card are on show;
+ *  - the slow tier's newer sections, which the recording predates: the
+ *    Outage Doctor (outage.js -- a failed unit walked to its root on edge, a
+ *    crash loop on arr, a certificate with weeks left on nas), the fleet map
+ *    and per-process socket sums (map.js), and the memory-fill forecast;
+ *  - the host's own memory: three deaths judged by the real Coroner
+ *    (tools/synth_deaths.py), the dashboard's users and their roles, the
+ *    agents' update state, and the verdict watch for unit restarts.
  *
  * The scoring and finding shapes copy `collectors/lag.py` closely enough that
  * every view renders them unchanged; the wording is the Doctor's own. Nothing
  * here is measured, and the banner says so.
  */
 
+import { OutageSim } from "./outage.js";
+import { buildMap, enrichSockets, radius as mapRadius } from "./map.js";
+
 const CORES_FALLBACK = 4;
 const SUSTAIN_TICKS = 5;            // lag.py: findings fire after N proc ticks
 const PSI_CPU_HIGH = 50;            // config.py psi_cpu_high (warn), x1.8 critical
 const VERDICT_SAMPLES = 20;         // verdict.py WINDOW_SAMPLES
 const VERDICT_MIN_SECONDS = 30;
+const OUTAGE_SAMPLES = 3;           // verdict.py OUTAGE_SAMPLES (slow-tier frames)
+const OUTAGE_MIN_SECONDS = 60;
+const OUTAGE_MAX_SECONDS = 240;
+const SLOW_TICK_S = 20;             // the slow tier's cadence
 
 const FFMPEG_PID = 3141592;
 const JELLYFIN_CONTAINER = {
@@ -33,6 +47,21 @@ const JELLYFIN_CONTAINER = {
   image: "jellyfin/jellyfin:10.10.7", service: "jellyfin", project: "media",
 };
 const JELLYFIN_UNIT = "docker-9f1c2d3e4a5b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d.scope";
+
+// What GitHub publishes for the agent, and where each node stands against
+// it. Version numbers gate visibility only; the apply step is git-sha-based.
+// The recording says which agents run in Docker (they update through the
+// image, and the Update button says so); arr is the native install with a
+// git checkout, the one node the button is live for.
+const REMOTE_AGENT_VERSION = "0.19.1-b";
+const AGENTS = {
+  media: { version: "0.19.1-b", capable: true, reason: null },
+  edge: { version: "0.19.1-b", capable: true, reason: null },
+  nas: { version: "0.19.0-b", capable: true, reason: null },
+  arr: { version: "0.18.2-b", capable: true, reason: null },
+  dev: { version: "0.17.4-b", capable: false, reason: "the checkout has local modifications (git status is not clean)" },
+};
+const DOCKER_REASON = "running in the Docker image; rebuild/pull the image instead";
 
 const rand = (lo, hi) => lo + Math.random() * (hi - lo);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -82,6 +111,26 @@ class NodeSim {
     this.nice = new Map();         // pid -> priority level set from the dashboard
     this.throttle = new Map();     // unit -> {cpu_quota_pct, io_weight, level}
     this.gone = new Set();         // pids ended from the dashboard
+    this.outage = new OutageSim(this, world.t0);
+    const isDocker = status.container === "docker" || status.container === "containerd";
+    const spec = AGENTS[this.name] || { version: status.agent_version, capable: true, reason: null };
+    this.agent = {
+      version: spec.version || status.agent_version || null,
+      capable: isDocker ? false : spec.capable,
+      reason: isDocker ? DOCKER_REASON : spec.reason,
+    };
+    this.updating = null;          // {until} while an update restarts the agent
+    if (this.snap.process_table) this.tickSlow(world.t0);
+  }
+
+  /** 0..1 while the scripted incident has this node saturated (map.js
+   *  reads it for the round trips of the edges into it). */
+  heat(now) {
+    const sc = this.world.scenario;
+    if (!sc || sc.node !== this.name || !sc.proc) return 0;
+    const level = sc.phase === "cool" ? sc.level : sc.proc.level;
+    const hot = clamp((now - sc.proc.started - 30) / 40, 0, 1);
+    return clamp(level * hot, 0, 1);
   }
 
   // ------------------------------------------------------------ fast tier
@@ -215,6 +264,26 @@ class NodeSim {
     this.diagnose(now);
   }
 
+  // ------------------------------------------------------------ slow tier
+  /** The sections the recording predates, rebuilt every twenty seconds the
+   *  way the agent's slow tier rebuilds them. */
+  tickSlow(now) {
+    const snap = this.snap;
+    snap.outage = this.outage.tick(now);
+    enrichSockets(this, now);
+    if (snap.volumes) {
+      snap.volumes.files_method = "the descriptor's offset between slow samples (/proc/<pid>/fdinfo pos)";
+      for (const volume of snap.volumes.volumes || []) {
+        if (!Array.isArray(volume.files)) volume.files = [];
+        for (const writer of volume.writers || []) {
+          for (const path of writer.paths || []) {
+            if (path.rate_bytes_sec === undefined) { path.rate_bytes_sec = null; path.mode = null; }
+          }
+        }
+      }
+    }
+  }
+
   ffmpegRow(proc, now) {
     const cap = this.capFor(proc);
     const cpu = round(clamp(proc.level * 86 * cap + rand(-2, 2), 0, 99));
@@ -305,7 +374,41 @@ class NodeSim {
     diag.offenders = table.processes.filter((p) => (p.lag_score || 0) > 0 && !p.is_kthread)
       .sort((a, b) => b.lag_score - a.lag_score).slice(0, 6).map((p) => clone(p));
     diag.pressure_mode = "psi";
+    diag.memory_forecast = this.memoryForecast(now);
     this.status.severity = worst;
+  }
+
+  /** Where MemAvailable is heading over the last hour, in memtrend's shape.
+   *  arr is the one node losing memory, to a process that is really in its
+   *  table; the rest are flat or gaining. */
+  memoryForecast(now) {
+    const mem = this.snap.memory || {};
+    const window = Math.min(3600, Math.max(600, (now - this.startedAt) + 3400));
+    const base = { ts: now, window_seconds: Math.round(window), samples: Math.round(window / 10), mem_available: mem.available };
+    if (this.name === "arr") {
+      const rows = this.snap.process_table?.processes || [];
+      const grower = ["Radarr", "Sonarr", "Prowlarr", "qbittorrent-nox"].map((n) => rows.find((p) => p.name === n)).find(Boolean);
+      const perHour = -Math.round(118 * 1048576 * rand(0.96, 1.04));
+      const growth = 96 * 1048576;
+      return {
+        ...base, available: true, trend: "shrinking", rate_bytes_sec: round(perHour / 3600, 1), bytes_per_hour: perHour,
+        seconds_to_exhaust: Math.round((mem.available || 4e9) / -perHour * 3600), r2: 0.934,
+        growers: grower ? [{
+          pid: grower.pid, name: grower.name, username: grower.username, container: grower.container || null,
+          unit: typeof grower.unit === "string" ? grower.unit : grower.unit?.name || null,
+          working_set: grower.working_set, growth_bytes: growth, rate_bytes_sec: round(growth / window, 1),
+          window_seconds: Math.round(window), r2: 0.91, share_of_loss: round(growth / (-perHour * window / 3600), 3),
+        }] : [],
+        newcomers: [],
+      };
+    }
+    if (this.name === "nas") {
+      return { ...base, available: true, trend: "growing", rate_bytes_sec: 2140.6, bytes_per_hour: 7706000,
+        seconds_to_exhaust: null, r2: 0.71, growers: [], newcomers: [] };
+    }
+    const perHour = Math.round(rand(-6, 6) * 1048576);
+    return { ...base, available: true, trend: "stable", rate_bytes_sec: round(perHour / 3600, 1), bytes_per_hour: perHour,
+      seconds_to_exhaust: null, r2: 0.12, growers: [], newcomers: [] };
   }
 
   closeIncident(now) {
@@ -369,13 +472,18 @@ class NodeSim {
     }
   }
 
-  seriesSince(since) {
+  seriesSince(since, until = null) {
     const s = this.series;
     if (!s?.available) return s;
     let start = s.ts.findIndex((t) => t >= since);
     if (start < 0) start = s.ts.length;
-    const out = { available: true, reason: null, node: this.name, ts: s.ts.slice(start), series: {} };
-    for (const [key, values] of Object.entries(s.series)) out.series[key] = values.slice(start);
+    let end = s.ts.length;
+    if (until !== null) {
+      end = s.ts.findIndex((t) => t > until);
+      if (end < 0) end = s.ts.length;
+    }
+    const out = { available: true, reason: null, node: this.name, ts: s.ts.slice(start, end), series: {} };
+    for (const [key, values] of Object.entries(s.series)) out.series[key] = values.slice(start, end);
     out.count = out.ts.length;
     return out;
   }
@@ -383,11 +491,16 @@ class NodeSim {
   // ------------------------------------------------------------- reads
   nodeMeta(now) {
     const age = this.online ? round(rand(0.1, 0.9), 1) : round(now - this.lastSeen, 1);
+    const agent = this.agent;
     return {
       name: this.name, online: this.online, last_seen: this.lastSeen, age_seconds: age,
       report_interval: this.reportInterval, interval_fast: this.reportInterval,
-      agent_version: this.status.agent_version, hostname: this.status.hostname,
+      agent_version: agent.version, hostname: this.status.hostname,
       os: this.status.os, container: this.status.container, severity: this.status.severity,
+      update_capable: this.online ? agent.capable : null,
+      update_available: agent.version ? isNewer(REMOTE_AGENT_VERSION, agent.version) : null,
+      update_reason: this.online ? agent.reason : null,
+      remote_version: REMOTE_AGENT_VERSION,
     };
   }
 
@@ -472,6 +585,35 @@ class NodeSim {
       extras_loaded: extras, cpu_avg: row.cpu_avg, cpu_peak: round((row.cpu_avg || 0) * 1.9), cpu_samples: 30, stuck: Boolean(row.stuck),
     };
   }
+
+  /** Free a deleted-but-open file through the holder's descriptor, with the
+   *  agent's refusals (processes.truncate_deleted). */
+  truncate(pid, path) {
+    const row = this.findProcess(pid);
+    if (!row) return { ok: false, reason: "process no longer exists" };
+    if (!path.startsWith("/")) return { ok: false, reason: "path must be the absolute path the holder shows" };
+    for (const volume of this.snap.volumes?.volumes || []) {
+      const held = volume.held_deleted || [];
+      const index = held.findIndex((h) => h.pid === pid && h.path === path);
+      if (index < 0) continue;
+      const [entry] = held.splice(index, 1);
+      volume.free = (volume.free || 0) + entry.size;
+      volume.used = Math.max(0, (volume.used || 0) - entry.size);
+      volume.percent = round(volume.used / Math.max(1, volume.total) * 100, 1);
+      return { ok: true, pid, name: row.name, path, freed_bytes: entry.size, size_after: 0 };
+    }
+    return { ok: false, reason: "that process no longer holds a deleted file at this path (it may have closed it, or the space is already free)" };
+  }
+}
+
+/** Version tuples, not strings: "0.10.0-b" is newer than "0.9.1-b". */
+function isNewer(remote, local) {
+  const parse = (v) => String(v || "").split("-")[0].split(".").map((n) => Number(n) || 0);
+  const a = parse(remote), b = parse(local);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  }
+  return false;
 }
 
 /** The incident's culprits from the tick ledger: most-led first, in the
@@ -509,6 +651,22 @@ export class World {
     this.t0 = Date.now() / 1000;
     this.host = fixtures.host;
     this.config = clone(fixtures.host.settings.config);
+    // What main has added to the config since the recording: the host's
+    // version and the auto-update schedule.
+    this.config.version = fixtures.version || this.config.version || null;
+    if (this.config.allow_remote_update === undefined) this.config.allow_remote_update = true;
+    if (this.config.auto_update_enabled === undefined) this.config.auto_update_enabled = false;
+    if (this.config.auto_update_hour === undefined) this.config.auto_update_hour = 3;
+    const settings = this.host.settings;
+    settings.editable = [...new Set([...(settings.editable || []), "auto_update_enabled", "auto_update_hour", "allow_remote_update"])];
+    settings.limits = { ...(settings.limits || {}), auto_update_hour: [0, 23] };
+    this.portnames = fixtures.portnames;
+    this.deaths = fixtures.deaths || [];
+    this.users = [
+      { username: "sam", role: "admin", created_at: this.t0 - 41 * 86400 },
+      { username: "kim", role: "operator", created_at: this.t0 - 12 * 86400 },
+      { username: "pat", role: "viewer", created_at: this.t0 - 3 * 86400 },
+    ];
     this.expectations = [];
     this.expectationSeq = 1;
     this.actions = [];             // every action taken, verdict filled in later
@@ -543,11 +701,14 @@ export class World {
     this.tickNo += 1;
     this.scenarioStep(now);
     for (const node of this.nodes.values()) {
+      if (node.updating && now >= node.updating.until) this.finishUpdate(node, now);
       if (!node.online) continue;
       node.tickFast(now);
       if (this.tickNo % 2 === 0) node.tickProc(now);
+      if (this.tickNo % SLOW_TICK_S === 0) node.tickSlow(now);
     }
     if (this.tickNo % 2 === 0) this.watchStep(now);
+    if (this.tickNo % SLOW_TICK_S === 0) this.outageWatchStep(now);
   }
 
   // ------------------------------------------------------------ scenario
@@ -691,6 +852,9 @@ export class World {
       const after = node.throttle.get(unit) || { cpu_quota_pct: null, io_weight: null };
       result = { ok: true, pid, name: row.name, unit, level, manager: "system", before, after: { name: unit, ...after },
         process_count: 1, runtime_only: true, note: null };
+    } else if (action === "truncate") {
+      result = node.truncate(pid, String(body.path || ""));
+      if (!result.ok) return { status: 409, detail: result.reason };
     } else {
       return { status: 404, detail: "unknown action" };
     }
@@ -705,10 +869,10 @@ export class World {
     const resources = [...new Set(targets.map((t) => t.resource))];
     const before = Object.fromEntries(resources.map((r) => [r, diag.pressures?.[r] ?? 0]));
     const started = Date.now() / 1000;
-    const record = { node: node.name, action, pid, name, ts: started, verdict: null };
+    const record = { node: node.name, action, pid, name, unit: null, ts: started, verdict: null };
     this.actions.push(record);
     this.watches.set(id, {
-      id, node: node.name, action, pid, name, started, done: false, verdict: null, record,
+      id, kind: "process", node: node.name, action, pid, name, started, done: false, verdict: null, record,
       samples: 0, targets, resources, before, clearedAt: {}, exited: action === "terminate",
     });
     return id;
@@ -716,7 +880,7 @@ export class World {
 
   watchStep(now) {
     for (const w of this.watches.values()) {
-      if (w.done) continue;
+      if (w.done || w.kind !== "process") continue;
       const node = this.nodes.get(w.node);
       const diag = node?.snap.diagnosis || {};
       w.samples += 1;
@@ -748,14 +912,101 @@ export class World {
     }
   }
 
+  // --------------------------------------------------------- unit actions
+  /** `systemctl <verb> <unit>` on an agent, then the outage verdict watch
+   *  (verdict._OutageWatch): the items that named the unit must clear and
+   *  stay clear over the node's next slow-tier samples. */
+  unitAction(nodeName, unit, verb, manager) {
+    const node = this.nodes.get(nodeName);
+    if (!node) return { status: 404, detail: `no agent named '${nodeName}'` };
+    if (!node.online) return { status: 504, detail: `'${nodeName}' did not answer within 60s -- it may be offline or reporting slowly` };
+    const now = Date.now() / 1000;
+    const baseline = node.snap.outage || {};
+    const result = node.outage.act(unit, verb, manager, now);
+    if (!result.ok) return { status: 502, detail: result.reason };
+    node.tickSlow(now);
+    const id = ++this.watchSeq;
+    const targets = (baseline.items || []).filter((i) => ["warn", "critical"].includes(i.severity)
+      && (i.unit === unit || i.root?.unit === unit)).map((i) => ({ key: i.key, title: i.title, kind: i.kind }));
+    const record = { node: nodeName, action: `unit_${verb}`, pid: null, name: unit, unit, ts: now, verdict: null };
+    this.actions.push(record);
+    this.watches.set(id, {
+      id, kind: "outage", node: nodeName, action: `unit_${verb}`, verb, pid: null, name: unit, unit, started: now,
+      done: false, verdict: null, record, samples: 0, targets, clearedAt: {}, recurred: new Set(), result,
+    });
+    result.verify_id = id;
+    return { status: 200, result };
+  }
+
+  outageWatchStep(now) {
+    for (const w of this.watches.values()) {
+      if (w.done || w.kind !== "outage") continue;
+      const node = this.nodes.get(w.node);
+      const outage = node?.snap.outage || {};
+      w.samples += 1;
+      const active = new Set((outage.items || []).filter((i) => ["warn", "critical"].includes(i.severity)).map((i) => i.key));
+      for (const t of w.targets) {
+        if (!active.has(t.key)) { if (!(t.key in w.clearedAt)) w.clearedAt[t.key] = now; }
+        else if (t.key in w.clearedAt) { delete w.clearedAt[t.key]; w.recurred.add(t.key); }
+      }
+      const elapsed = Math.round(now - w.started);
+      if ((w.samples >= OUTAGE_SAMPLES && elapsed >= OUTAGE_MIN_SECONDS) || elapsed >= OUTAGE_MAX_SECONDS) {
+        w.done = true;
+        w.verdict = this.judgeOutage(w, outage, now);
+        w.record.verdict = w.verdict;
+      }
+    }
+  }
+
+  judgeOutage(w, latest, now) {
+    const elapsed = Math.round(now - w.started);
+    const word = { restart: "Restart", start: "Start", "reload-or-restart": "Reload or restart", "reset-failed": "Reset failed state" }[w.verb] || w.verb;
+    const after = w.result.after || {};
+    const note = after.active && after.active !== "active"
+      ? `Right after the ${word.toLowerCase()}, systemd reported ${w.unit} ${after.active} (${after.sub}).` : null;
+    const titles = (list) => list.map((t) => `'${t.title}'`).join(", ");
+    if (!w.targets.length) {
+      return { outcome: "moot", elapsed, text: `No outage item named ${w.unit} when you acted, so there is nothing to verify the action against.`, note };
+    }
+    const cleared = w.targets.filter((t) => t.key in w.clearedAt);
+    const still = w.targets.filter((t) => !(t.key in w.clearedAt));
+    const recurred = w.targets.filter((t) => w.recurred.has(t.key));
+    if (recurred.length) {
+      return { outcome: "recurred", elapsed, cleared: cleared.map((t) => t.title), note,
+        text: `It came back: ${titles(recurred)} cleared after the ${word.toLowerCase()} and returned within ${elapsed} s. The unit starts and fails again, so the cause is upstream of it -- its journal has the reason.` };
+    }
+    if (cleared.length && !still.length) {
+      const when = Math.max(...cleared.map((t) => w.clearedAt[t.key] - w.started));
+      return { outcome: "fixed", elapsed, cleared: cleared.map((t) => t.title), note,
+        text: `Fixed: ${titles(cleared)} cleared in ${Math.round(when)} s and stayed clear for the rest of the ${elapsed} s watch.` };
+    }
+    if (cleared.length) {
+      return { outcome: "partial", elapsed, cleared: cleared.map((t) => t.title), note,
+        text: `Partly: ${titles(cleared)} cleared, but '${still[0].title}' is still there after ${elapsed} s.` };
+    }
+    const root = (latest.items || []).find((i) => i.key === still[0].key)?.root?.unit;
+    return { outcome: "no_change", elapsed, note,
+      text: `No change after ${elapsed} s: '${still[0].title}' is still active. The ${word.toLowerCase()} did not fix it`
+        + (root && root !== w.unit ? ` -- the root is ${root}, not ${w.unit}.` : ".") };
+  }
+
   watch(id) {
     const w = this.watches.get(id);
     if (!w) return null;
+    const elapsed = round(Date.now() / 1000 - w.started, 1);
+    if (w.kind === "outage") {
+      return {
+        id: w.id, node: w.node, action: w.action, pid: null, name: w.name, unit: w.unit, started: w.started,
+        done: w.done, verdict: w.verdict,
+        progress: { samples: w.samples, of: OUTAGE_SAMPLES, elapsed, pressures: {},
+          cleared: Object.keys(w.clearedAt).sort(), watching: w.targets.map((t) => t.title) },
+      };
+    }
     return {
       id: w.id, node: w.node, action: w.action, pid: w.pid, name: w.name, started: w.started,
       done: w.done, verdict: w.verdict,
       progress: {
-        samples: w.samples, of: VERDICT_SAMPLES, elapsed: round(Date.now() / 1000 - w.started, 1),
+        samples: w.samples, of: VERDICT_SAMPLES, elapsed,
         pressures: Object.fromEntries(w.resources.map((r) => [r, { before: round(w.before[r], 3), now: round(w.now?.[r] ?? w.before[r], 3) }])),
         cleared: Object.keys(w.clearedAt).sort(), watching: w.targets.map((t) => t.title),
       },
@@ -773,12 +1024,111 @@ export class World {
     for (const v of this.actions) {
       if (v.node !== nodeName || !v.verdict) continue;
       if (!(name && v.name === name) && !(unit && v.unit === unit)) continue;
-      const slot = record[v.action] || (record[v.action] = { tries: 0, outcomes: {} });
+      const slot = record[v.action] || (record[v.action] = { tries: 0, outcomes: {}, last_outcome: null, last_ts: null, last_text: null });
       slot.tries += 1;
       slot.outcomes[v.verdict.outcome] = (slot.outcomes[v.verdict.outcome] || 0) + 1;
+      if (!slot.last_ts || v.ts > slot.last_ts) {
+        slot.last_ts = v.ts;
+        slot.last_outcome = v.verdict.outcome;
+        slot.last_text = v.verdict.text;
+      }
       total += 1;
     }
     return { record, total };
+  }
+
+  // ------------------------------------------------------------- updates
+  /** The Update button: git pull + restart on the agent, when it said it
+   *  could. The node drops off for the seconds the restart takes and comes
+   *  back on the published version. */
+  updateNode(nodeName) {
+    const node = this.nodes.get(nodeName);
+    if (!node) return { status: 404, detail: `no agent named '${nodeName}'` };
+    if (node.agent.capable !== true || !node.online) {
+      return { status: 409, detail: node.agent.reason || "this agent has not reported update capability yet" };
+    }
+    if (!isNewer(REMOTE_AGENT_VERSION, node.agent.version)) {
+      return { status: 200, result: { updated: false, sha: shortSha(`${nodeName}:${node.agent.version}`), branch: "main" } };
+    }
+    const now = Date.now() / 1000;
+    node.updating = { until: now + 7, from: node.agent.version };
+    node.online = false;
+    node.lastSeen = now;
+    if (this.scenario.node === nodeName) this.endTranscode(now, "agent restarted");
+    return { status: 200, result: {
+      updated: true, branch: "main", from_sha: shortSha(`${nodeName}:${node.agent.version}`), to_sha: shortSha(`agent:${REMOTE_AGENT_VERSION}`),
+      from_version: node.agent.version, to_version: REMOTE_AGENT_VERSION, pip: "requirements unchanged",
+      restart: "the agent restarts itself once this result is posted",
+    } };
+  }
+
+  finishUpdate(node, now) {
+    node.updating = null;
+    node.online = true;
+    node.startedAt = now;
+    node.base.uptime = node.snap.system?.uptime_seconds || node.base.uptime;
+    node.agent.version = REMOTE_AGENT_VERSION;
+    node.tickSlow(now);
+  }
+
+  // --------------------------------------------------------------- users
+  addUser(body) {
+    const username = String(body.username || "").trim();
+    const { password, role } = body;
+    if (!(username.length >= 1 && username.length <= 48) || !/^[A-Za-z0-9._-]+$/.test(username)) {
+      return { status: 422, detail: "username must be 1-48 characters: letters, digits, '-', '_' and '.' only" };
+    }
+    if (!["viewer", "operator", "admin"].includes(role)) return { status: 422, detail: "role must be one of viewer, operator, admin" };
+    if (String(password || "").length < 8) return { status: 422, detail: "password must be at least 8 characters" };
+    if (this.users.some((u) => u.username === username)) return { status: 409, detail: `a user named '${username}' already exists` };
+    this.users.push({ username, role, created_at: Date.now() / 1000 });
+    this.users.sort((a, b) => a.username.localeCompare(b.username));
+    return { status: 200, result: { ok: true, username, role } };
+  }
+
+  setRole(name, role) {
+    if (!["viewer", "operator", "admin"].includes(role)) return { status: 422, detail: "role must be one of viewer, operator, admin" };
+    const user = this.users.find((u) => u.username === name);
+    if (!user) return { status: 404, detail: `no such user '${name}'` };
+    if (user.role === "admin" && role !== "admin" && this.users.filter((u) => u.role === "admin").length <= 1) {
+      return { status: 409, detail: "refusing: this would leave no admin account" };
+    }
+    user.role = role;
+    return { status: 200, result: { ok: true, username: name, role } };
+  }
+
+  removeUser(name) {
+    const user = this.users.find((u) => u.username === name);
+    if (!user) return { status: 404, detail: `no such user '${name}'` };
+    if (user.role === "admin" && this.users.filter((u) => u.role === "admin").length <= 1) {
+      return { status: 409, detail: "refusing: this would leave no admin account" };
+    }
+    this.users = this.users.filter((u) => u !== user);
+    return { status: 200, result: { ok: true, username: name } };
+  }
+
+  // -------------------------------------------------------------- deaths
+  deathList(node, since, limit) {
+    return this.deaths
+      .filter((d) => (!node || d.node === node) && (!since || d.died_at >= since))
+      .sort((a, b) => b.died_at - a.died_at).slice(0, limit)
+      .map((d) => this.deathRow(d, false));
+  }
+
+  death(id) {
+    const entry = this.deaths.find((d) => d.id === id);
+    return entry ? this.deathRow(entry, true) : null;
+  }
+
+  deathRow(entry, full) {
+    const clock = clockText(entry.died_at);
+    const fill = (text) => (typeof text === "string" ? text.replaceAll("{{clock}}", clock) : text);
+    const verdict = { ...entry.verdict, title: fill(entry.verdict.title), summary: fill(entry.verdict.summary),
+      because: (entry.verdict.because || []).map(fill) };
+    const row = { id: entry.id, node: entry.node, uid: entry.uid, kind: entry.kind, died_at: entry.died_at,
+      detected_at: entry.detected_at, class: entry.class, severity: entry.severity, title: fill(entry.title), verdict };
+    if (full) { row.evidence = clone(entry.evidence); row.recorder = clone(entry.recorder); }
+    return row;
   }
 
   // ------------------------------------------------------------- agents
@@ -791,6 +1141,7 @@ export class World {
     node.online = false;
     node.lastSeen = null;
     node.never = true;
+    node.agent = { version: null, capable: null, reason: null };
     this.nodes.set(name, node);
     return { status: 200, result: this.tokenReply(name, "this token is shown once; only its hash is stored") };
   }
@@ -811,7 +1162,7 @@ export class World {
   nodeList(now) {
     return [...this.nodes.values()].map((n) => {
       const row = n.statusRow(now);
-      if (n.never) Object.assign(row, { last_seen: null, age_seconds: null, online: false });
+      if (n.never) Object.assign(row, { last_seen: null, age_seconds: null, online: false, update_capable: null, update_available: null, update_reason: null });
       return row;
     });
   }
@@ -819,6 +1170,28 @@ export class World {
   fleet(now) {
     return { nodes: [...this.nodes.values()].filter((n) => !n.never).map((n) => n.fleetRow(now)), shared: [], ts: now };
   }
+
+  map(now) {
+    return buildMap(this, now);
+  }
+
+  radius(nodeName, pid) {
+    return mapRadius(this, nodeName, pid);
+  }
+}
+
+function shortSha(seed) {
+  let h = 2166136261;
+  for (const ch of seed) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619) >>> 0; }
+  return (h.toString(16).padStart(8, "0") + Math.imul(h, 2654435761).toString(16).padStart(8, "0")).slice(0, 12);
+}
+
+/** The judge's "%H:%M:%S on %b %d", in the viewer's clock. */
+function clockText(ts) {
+  const d = new Date(ts * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} on ${month} ${pad(d.getDate())}`;
 }
 
 // ------------------------------------------------------- window helpers

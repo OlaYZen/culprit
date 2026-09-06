@@ -30,7 +30,8 @@ export function installDemo() {
     window.__culpritDemo = world;   // for the console and the headless checks
     banner("demo",
       "Demo — a recording of a real five-machine fleet, replayed in your browser. "
-      + "The incident on media repeats every few minutes; actions are simulated and nothing here is live.",
+      + "The incident on media repeats every few minutes, edge has a unit to fix, and the Coroner has three deaths to explain; "
+      + "actions are simulated and nothing here is live.",
       { sticky: true });
     return world;
   }).catch((error) => {
@@ -100,6 +101,6 @@ function bootPayload(world) {
   return {
     warm: true, warmup_stage: "Ready", server_started_at: world.t0 - 5241, now,
     errors: {}, timings: {}, config: structuredClone(world.config), elevated: false,
-    auth: { enabled: false, username: null }, nodes: world.nodeList(now),
+    auth: { enabled: false, username: null, role: null }, nodes: world.nodeList(now),
   };
 }
