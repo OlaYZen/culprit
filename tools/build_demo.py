@@ -7,8 +7,10 @@ that exist only here -- the in-browser stand-in for the host
 (`assets/js/demo/`) and the recorded, scrubbed fleet (`assets/demo/data/`).
 
 Running this pulls `web/` out of a git ref (main by default), replaces every
-copied file under `assets/` while keeping the demo module and its data, and
-writes the root `index.html` with the two edits a host-less page needs:
+copied file under `assets/` while keeping the demo module and its data, copies
+the two root files the stand-in serves as API answers (`ports.json` behind
+/api/portnames, `version.json` behind config.version), and writes the root
+`index.html` with the two edits a host-less page needs:
 root-absolute asset paths made relative (so the page works under a Pages
 project sub-path), and the demo module loaded before app.js. It refuses to
 run without the fixtures, because a demo with no data is a page of skeletons.
@@ -36,10 +38,15 @@ KEEP = ("js/demo", "demo")   # what this branch owns under assets/
 DEMO_SCRIPT = '<script type="module" src="./assets/js/demo/boot.js"></script>\n'
 
 
+# Root files of main the stand-in answers from: the port-name table behind
+# /api/portnames and the host version behind config.version.
+ROOT_FILES = {"ports.json": "portnames.json", "version.json": "version.json"}
+
+
 def extract_web(ref: str, into: Path) -> Path:
     archive = into / "web.tar"
     with archive.open("wb") as handle:
-        subprocess.run(["git", "archive", ref, "web"], cwd=ROOT, check=True, stdout=handle)
+        subprocess.run(["git", "archive", ref, "web", *ROOT_FILES], cwd=ROOT, check=True, stdout=handle)
     with tarfile.open(archive) as tar:
         tar.extractall(into, filter="data")
     web = into / "web"
@@ -78,6 +85,10 @@ def build(ref: str) -> int:
             target = ASSETS / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+            copied += 1
+
+        for source_name, target_name in ROOT_FILES.items():
+            shutil.copy2(web.parent / source_name, ASSETS / target_name)
             copied += 1
 
         index = (web / "index.html").read_text(encoding="utf-8")
