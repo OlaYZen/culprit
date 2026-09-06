@@ -471,6 +471,18 @@ export function createNodes() {
       : "Move this agent to any published version, older ones included, and pin it there");
   }
 
+  /** "0.18.1-b" -> [0, 18, 1]; null when it does not parse. */
+  const versionTuple = (v) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v || ""));
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+  };
+  const versionBelow = (a, b) => {
+    const x = versionTuple(a); const y = versionTuple(b);
+    if (!x || !y) return false;
+    for (let i = 0; i < 3; i += 1) if (x[i] !== y[i]) return x[i] < y[i];
+    return false;
+  };
+
   /** The picker: every version the agent repository has shipped, from the
    * host's mirror (the same list Patch notes shows), newest first. */
   async function openVersionDialog(node) {
@@ -482,12 +494,27 @@ export function createNodes() {
     // area, so the slot reserves the room the open list takes (search row
     // plus the list's max height); otherwise the modal body clips it to a
     // couple of rows.
-    const pickSlot = el("div", { style: { margin: "10px 0", minHeight: "350px" } });
+    // Below the first build whose updater works, the host cannot bring the
+    // agent back: the warning shows the moment such a version is picked,
+    // not after the fact.
+    const strandWarning = el("div", { hidden: true });
+    const pickSlot = el("div", { style: { margin: "10px 0" } });
+    // While the list is open the slot reserves the room it takes (search
+    // row plus the list's max height) so the modal body does not clip it;
+    // closed, the slot is just the button.
+    const reserveWhileOpen = (picker) => {
+      const pop = picker.querySelector(".combo__pop");
+      if (!pop) return;
+      const apply = () => { pickSlot.style.minHeight = pop.hidden ? "" : "350px"; };
+      new MutationObserver(apply).observe(pop, { attributes: true, attributeFilter: ["hidden"] });
+      apply();
+    };
     const body = el("div", {}, [
       el("p", { text: `${node.name} runs v${node.agent_version || "?"}${node.update_branch ? ` on ${node.update_branch}` : ""}. `
           + `Pick the version to move it to, from the ${node.remote_branch || "configured"} branch; the agent resets its `
           + "checkout to the commit that shipped that version, reinstalls dependencies if they changed, and restarts." }),
       pickSlot,
+      strandWarning,
       note("warn", "Any version other than the published one pins the agent there: the daily schedule and Update all "
           + "leave it alone until you unpin it or update it again. An older agent may lack features this host relies on.",
         { margin: true }),
@@ -504,10 +531,13 @@ export function createNodes() {
         if (!commit.version || seen.has(commit.version)) continue;
         seen.set(commit.version, commit.ts);
       }
+      const floor = notes.min_self_update_version || null;
+      const strands = (version) => floor && versionBelow(version, floor);
       const options = [...seen].map(([version, ts]) => {
         const marks = [];
         if (version === node.remote_version) marks.push("latest");
         if (version === node.agent_version) marks.push("current");
+        if (strands(version)) marks.push("no self-update");
         return { value: version, label: `v${version} · ${ts ? fmt.dayTime(ts) : ""}${marks.length ? ` · ${marks.join(", ")}` : ""}` };
       });
       if (!options.length) throw new Error("the mirror lists no versions");
@@ -517,10 +547,21 @@ export function createNodes() {
         onChange: (value) => {
           chosen = value;
           confirm.disabled = !chosen || chosen === node.agent_version;
-          patchText(confirm, chosen && chosen !== node.remote_version ? "Change and pin" : "Change version");
+          const stranding = !!chosen && strands(chosen);
+          strandWarning.hidden = !stranding;
+          if (stranding) {
+            strandWarning.replaceChildren(note("crit", `v${chosen} predates the working updater (fixed in v${floor}). `
+              + `Once ${node.name} is on it, this dashboard cannot update, move or bring it back: the Update button and the `
+              + "schedule will not work for it, and its row will say so. To return, someone must re-run agent.sh "
+              + "(a git pull) on that machine.", { margin: true }));
+          }
+          confirm.classList.toggle("btn--danger-solid", stranding);
+          confirm.classList.toggle("btn--primary", !stranding);
+          patchText(confirm, stranding ? "Downgrade anyway" : chosen && chosen !== node.remote_version ? "Change and pin" : "Change version");
         },
       });
       pickSlot.replaceChildren(picker);
+      reserveWhileOpen(picker);
     } catch (error) {
       pickSlot.replaceChildren();
       inlineResult(result, error.message, "error");
