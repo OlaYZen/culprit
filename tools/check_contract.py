@@ -292,11 +292,19 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         # `reason`) on a host without a checkout, so the commit fields are
         # listed under OPTIONAL -- the view renders the reason instead.
         "/api/changelog": [
-            "available", "reason", "current", "commits",
+            "available", "reason", "current", "commits", "repo",
             "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
             "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
             "commits[].body", "commits[].version", "commits[].bumped_to",
             "branch", "limit",
+        ],
+        # The agent's notes: a bare mirror of the agent repository under
+        # data/, fetched hourly. Same shape plus where it came from and when;
+        # the commit fields are OPTIONAL here too (no network, no mirror).
+        "/api/changelog?repo=agent": [
+            "available", "reason", "current", "commits", "repo",
+            "commits[].sha", "commits[].summary", "commits[].body", "commits[].version",
+            "branch", "limit", "source", "fetched_at", "stale_reason",
         ],
     },
     "coroner": {
@@ -408,6 +416,7 @@ OPTIONAL = {
     "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
     "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
     "commits[].body", "commits[].version", "commits[].bumped_to", "branch", "limit",
+    "source", "fetched_at", "stale_reason",
 }
 
 
