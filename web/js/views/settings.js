@@ -926,6 +926,7 @@ export function createSettings() {
       section({
         title: "About this tool",
         body: kvs([
+          kv("Version", config.version ? `v${config.version}` : fmt.dash, { mono: true }),
           kv("Configuration file", "config.json", { mono: true }),
           kv("History database", config.history_enabled ? "data/culprit.db" : "disabled", { mono: true }),
           kv("History error", config.history_error || "none", { tone: config.history_error ? "crit" : "ok" }),

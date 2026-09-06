@@ -307,6 +307,13 @@ function boot() {
     window.location.href = "/login";
   });
   store.on(["auth", "snapshot"], (state) => { if (logout) logout.hidden = !state.auth?.enabled; });
+  // The host's own version rides the config section, which every frame
+  // carries (even while a remote node is being viewed), so it is right
+  // after the first snapshot and stays right across a host upgrade.
+  store.on(["config", "snapshot"], (state) => {
+    const version = state.config?.version;
+    patchText(bind.version, version ? `Culprit v${version}` : "");
+  });
 
   for (const item of $$("[data-nav]")) {
     item.addEventListener("click", () => navigate(item.dataset.nav));
