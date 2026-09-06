@@ -127,6 +127,22 @@ def check_remote_version_fetch() -> None:
         registry.refresh_remote_version()
         check("a response with no 'version' key also keeps the last good value",
               registry._remote_version == "3.2.1")
+
+        seen: list[str] = []
+
+        def branch_urlopen(url, timeout=5):  # type: ignore[no-untyped-def]
+            seen.append(url)
+            return _FakeResponse(b'{"version": "4.0.0"}')
+
+        nodes_mod.urllib.request.urlopen = branch_urlopen
+        registry._remote_version_checked = time.monotonic()  # window not elapsed
+        registry.refresh_remote_version("dev")
+        check("a changed branch refetches at once, inside the window",
+              len(seen) == 1 and "/dev/version.json" in seen[0])
+        check("the fetched value now describes the new branch",
+              registry._remote_version == "4.0.0" and registry._remote_branch == "dev")
+        check("the url names the branch",
+              nodes_mod.remote_version_url("main").endswith("/main/version.json"))
     finally:
         nodes_mod.urllib.request.urlopen = real_urlopen
 
@@ -137,6 +153,7 @@ def check_ingest_update_fields(history: History) -> None:
     history.add_agent("update-test-node")
     registry = nodes_mod.NodeRegistry(history)
     registry._remote_version = "2.0.0"
+    registry._remote_branch = "main"
 
     registry.ingest("update-test-node",
                     {"agent": {"version": "1.0.0", "update_capable": True}})
@@ -171,6 +188,16 @@ def check_ingest_update_fields(history: History) -> None:
     meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
     check("a non-bool update_capable sanitises to 'no change', not a false claim",
           meta["update_capable"] is False)  # unchanged from the last real report
+
+    registry.ingest("update-test-node", {"agent": {"version": "2.0.0", "update_branch": "main"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("on the configured branch and current -> no update",
+          meta["update_available"] is False and meta["update_branch"] == "main")
+    registry.ingest("update-test-node", {"agent": {"update_branch": "dev"}})
+    meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")
+    check("on another branch than the configured one -> update available whatever the numbers",
+          meta["update_available"] is True and meta["remote_branch"] == "main")
+    registry.ingest("update-test-node", {"agent": {"update_branch": "main"}})
 
     registry.ingest("update-test-node", {"agent": {"update_refs": True}})
     meta = next(n for n in registry.status_list() if n["name"] == "update-test-node")

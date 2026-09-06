@@ -351,6 +351,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].update_capable", "nodes[].update_available",
             "nodes[].update_reason", "nodes[].remote_version",
             "nodes[].update_refs", "nodes[].pinned_version", "nodes[].pinned_ref",
+            "nodes[].update_branch", "nodes[].remote_branch",
         ],
     },
     "trends": {
@@ -373,7 +374,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.open_browser", "config.rollup_seconds",
             "config.deploy_host", "config.agent_command",
             "config.allow_remote_update", "config.auto_update_enabled",
-            "config.auto_update_hour",
+            "config.auto_update_hour", "config.agent_update_branch",
             "config.trusted_proxies", "config.trusted_hosts",
             "config.notify_ntfy_url", "config.notify_webhook_url",
             "config.notify_smtp_host", "config.notify_smtp_port",
