@@ -301,6 +301,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         # The agent's notes: a bare mirror of the agent repository under
         # data/, fetched hourly. Same shape plus where it came from and when;
         # the commit fields are OPTIONAL here too (no network, no mirror).
+        # The branch picker in Settings: what the mirror has under refs/heads.
+        "/api/changelog/branches": ["available", "reason", "branches", "hidden", "fetched_at"],
         "/api/changelog?repo=agent": [
             "available", "reason", "current", "commits", "repo",
             "commits[].sha", "commits[].summary", "commits[].body", "commits[].version",
@@ -418,7 +420,7 @@ OPTIONAL = {
     "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
     "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
     "commits[].body", "commits[].version", "commits[].bumped_to", "branch", "limit",
-    "source", "fetched_at", "stale_reason",
+    "source", "fetched_at", "stale_reason", "branches",
 }
 
 
