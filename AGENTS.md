@@ -48,8 +48,9 @@ cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL
                                            # session, path/header bypasses, forged cookies, login
                                            # enumeration + timing, agent-token rejection, headers,
                                            # CORS, injection, write validation. Safe by default;
-                                           # --active adds a throwaway-agent lifecycle and exhausts
-                                           # the login limiter (locks that address out for 5 min)
+                                           # --active adds a throwaway-agent lifecycle, an operator
+                                           # role completing a real write, and exhausts the login
+                                           # limiter (locks that address out for 5 min)
 .venv/bin/python tools/scan_unauth.py      # live: hit every route (enumerated from app.routes) with
                                            # no cookie and no token; a gated route that answers with
                                            # anything but 401 / a 303 to /login is the finding. The
@@ -82,10 +83,18 @@ cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL
 .venv/bin/python tools/check_coroner.py     # offline (~1s): the Coroner's verdict classes against
                                            # synthetic deaths, the ingest caps and hostile shapes,
                                            # then the real forensics on this machine's previous boot
+.venv/bin/python tools/check_role_matrix.py --user <name> --password <pw>   # live: every
+                                           # route x every role (viewer/operator/admin), read
+                                           # straight off app.routes' require_role dependencies --
+                                           # a role below a route's minimum must get 403 on every
+                                           # method (safe: a working gate never reaches the
+                                           # handler), a role at or above it must not be wrongly
+                                           # blocked on GET. Creates and deletes its own throwaway
+                                           # viewer/operator accounts; needs an existing admin
 .venv/bin/python -m pyflakes culprit tools # lint
 ```
 
-The four live tools (`check_contract`, `check_security`, `check_ingest`, `scan_unauth`) share `tools/_auth.py`: pass `--save-auth` once with the URL / `--user` / `--password` (and `--token --node` for the ingest check) and they are written to **`tools_auth.json`** at the repo root (mode 600, gitignored, pinned by the audit like `agent.json`); after that the tools run with **no arguments**, print one dim line saying what they took from the file, and anything on the command line still wins for that run. `--no-auth-file` ignores it. There is one such file per checkout, so a scratch host on another port gets its own.
+The five live tools (`check_contract`, `check_security`, `check_ingest`, `scan_unauth`, `check_role_matrix`) share `tools/_auth.py`: pass `--save-auth` once with the URL / `--user` / `--password` (and `--token --node` for the ingest check) and they are written to **`tools_auth.json`** at the repo root (mode 600, gitignored, pinned by the audit like `agent.json`); after that the tools run with **no arguments**, print one dim line saying what they took from the file, and anything on the command line still wins for that run. `--no-auth-file` ignores it. There is one such file per checkout, so a scratch host on another port gets its own.
 
 Nobody-at-fault findings (`lag.py`): `cpu_steal`, `thermal_throttle` (from `cpu.thermal`, sysfs throttle counters), `swap_slow` (swap activity while `memory.swap_rotational`), `stuck_procs` when every wchan is an NFS/SMB/FUSE/Ceph wait, and the kernel-side ones from `kernel.py` — `raid_sync:<md>` / `raid_degraded:<md>` (mdstat), `softirq_core:<n>` (ksoftirqd ≥30% of its core, the IRQ device named from `/proc/interrupts`), `scsi_recovery` — carry `external: True` + `blame`; external findings list no culprits (the D-state victims are the one exception, flagged `victims`). `dmcrypt_cpu` is *not* external: the processes doing the encrypted IO are ranked under it. Keep that rule: ranking processes under a cause they did not create is invention.
 
@@ -169,7 +178,8 @@ Every optional source degrades to an explicit `available: False` + `reason`, nev
 ### Auth (`auth.py`)
 
 - **Users**: scrypt-hashed passwords in SQLite, HMAC-signed session cookies (per-install secret in `meta`), per-IP login rate limit. One middleware gates everything; only login/health/agent-ingest are open.
-- **Agents**: bearer tokens `<name>.<secret>`, only the SHA-256 is stored (token shown once at enrollment), constant-time verified, revocable individually. Token management is in the web Nodes view (`/api/agents` endpoints, session-gated); the CLI is the bootstrap fallback.
+- **Roles** (schema v6, `users.role`): `viewer` < `operator` < `admin` (`auth.ROLE_RANK`). `Auth._entry` caches `(signing key, role)` per user from one query, so `Auth.invalidate(user)` (already called on password change/rename) makes a role change visible exactly as fast — `db.set_role`/`remove_user` call it themselves. `main.require_role(minimum)` is a route dependency, not an imperative call: it is declared as `dependencies=[Depends(require_role("operator"))]` on the route itself and tagged `.minimum_role` (no-op when auth is off, matching the pre-roles "everyone here already has full access" state) — a route's access level is therefore a property of the route, readable straight off `app.routes` by anything that walks them, `tools/check_role_matrix.py` included, rather than a hand-maintained expectation list or (worse) a check a handler could forget to make. It maps to `main.py`'s three tiers: **operator** for process actions (terminate/priority/throttle, agent update) and expectations add/remove; **admin** for `/api/users*`, `/api/agents*`, and `PUT /api/settings` unconditionally (real configuration, full stop). A route with no `require_role` dependency defaults to `viewer` (any session), the same default every gated route had before roles existed. `PUT /api/nodes/{name}/settings` looks identical to `/api/settings` but is a different thing and carries no such dependency: it is only ever the title-bar Refresh control's live `interval_fast` nudge to a remote agent, never configuration, and needs no more than a session — there is no equivalent host-side nudge to protect, since the host is never itself a node (`store.isLocal()` is always false; see `stream.js`). `db.count_admins`/`set_role`/`remove_user` refuse whatever would leave zero admins; a user can never remove their own account (`main.api_user_delete`). CLI `users add <name> [--role ...]` defaults to `admin` (matches every account's access before roles existed); `users role <name> <role>` changes an existing one. The web Users panel (Settings, admin-only content, not admin-only *visibility* — the tab renders for everyone and says why it's empty) is the non-CLI path.
+- **Agents**: bearer tokens `<name>.<secret>`, only the SHA-256 is stored (token shown once at enrollment), constant-time verified, revocable individually. Token management is in the web Nodes view (`/api/agents` endpoints, session-gated, admin role required); the CLI is the bootstrap fallback.
 - **Safety invariant**: the host **refuses to bind a non-loopback address while zero users exist** (`refuse_exposed_without_users`) — an unauthenticated dashboard with a kill button must never be network-reachable by accident. `db.py` chmods the database 600 (it holds credential hashes).
 
 ## Deployment artifacts

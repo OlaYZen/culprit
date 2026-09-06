@@ -579,6 +579,12 @@ account and no telemetry.
   (HttpOnly, SameSite=Lax), per-source login rate limiting. Every API route and
   the live stream sit behind the session gate; only login, health and agent
   ingest are open.
+- **Roles:** every account is `viewer`, `operator` or `admin` — read-only,
+  read plus process actions and marking findings expected, or full control
+  (users, agents, Settings). `python -m culprit users add <name> --role
+  operator` sets one from the CLI (default `admin`, matching the single tier
+  every account had before roles existed); **Settings › Users** manages roles
+  for everyone else. Culprit always keeps at least one admin.
 - **Agents:** per-node bearer tokens, SHA-256-hashed at rest, constant-time
   verified, individually revocable. Reports are size-capped and strictly
   sanitised before they touch host state.
