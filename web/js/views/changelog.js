@@ -118,6 +118,13 @@ export function createChangelog() {
     return out;
   }
 
+  let renderedRunningKey = null;
+
+  /** A stable fingerprint of who runs which version. */
+  function runningKey() {
+    return [...runningBy()].map(([version, names]) => `${version}:${names.join(",")}`).sort().join("|");
+  }
+
   /** Enrolled agents by the version they last reported, for the agent side. */
   function runningBy() {
     const map = new Map();
@@ -153,6 +160,7 @@ export function createChangelog() {
       return;
     }
     const running = repo === "agent" ? runningBy() : null;
+    renderedRunningKey = running ? runningKey() : null;
     const behind = running ? [...running.keys()].filter((v) => !(payload.commits || []).some((c) => c.version === v)) : [];
     const sections = groups(shown).map((group, index) => {
       const newest = group.commits[0];
@@ -214,8 +222,15 @@ export function createChangelog() {
     if (base === "changelog") root.setPage(page || "host");
   });
   root.subscriptions = [
-    // The agent side annotates versions with who runs them.
-    store.on("nodes", () => { if (root.isActive && repo === "agent" && payloads.agent) renderAll(); }),
+    // The agent side annotates versions with who runs them. The node list
+    // arrives with every agent report (once a second), but the annotation
+    // only changes when an agent's version does, so re-render only then:
+    // rebuilding the entries each second replaced the text under a
+    // selection and made the notes impossible to copy.
+    store.on("nodes", () => {
+      if (!root.isActive || repo !== "agent" || !payloads.agent) return;
+      if (runningKey() !== renderedRunningKey) renderAll();
+    }),
   ];
   return root;
 }
