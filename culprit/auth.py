@@ -40,6 +40,12 @@ log = logging.getLogger("culprit.auth")
 SESSION_COOKIE = "culprit_session"
 SESSION_HOURS = 24 * 7
 
+# viewer: read-only. operator: viewer + process actions (terminate/priority/
+# throttle, agent update) and expected-finding markers. admin: operator +
+# user/agent management and Settings. Rank is what a minimum-role check
+# compares against -- "at least operator" is `RANK[role] >= RANK["operator"]`.
+ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
+
 # Paths reachable without a session. Everything else under / is gated when
 # auth is enabled. The agent report endpoint has its own bearer check.
 PUBLIC_PATHS = frozenset({
@@ -58,7 +64,7 @@ class Auth:
         self.history = history
         self._secret: bytes | None = None
         self._attempts: dict[str, list[float]] = {}
-        self._keys: dict[str, tuple[float, bytes]] = {}
+        self._keys: dict[str, tuple[float, bytes, str]] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ state
@@ -84,28 +90,42 @@ class Auth:
     # --------------------------------------------------------------- sessions
     _KEY_TTL = 5.0
 
-    def _key(self, username: str) -> bytes | None:
-        """Per-user signing key: the install secret mixed with the user's
-        stored password hash, or None when no such user exists -- a cookie
-        can never verify for a name that is not in the table. Cached briefly
-        (this runs per request) and only for users that exist, so a flood of
-        forged cookies for made-up names cannot grow the cache -- their
-        lookup is one indexed SELECT."""
+    def _entry(self, username: str) -> tuple[bytes, str] | None:
+        """(signing key, role) for a user, or None when no such user exists --
+        a cookie can never verify for a name that is not in the table. Cached
+        briefly (this runs per request) and only for users that exist, so a
+        flood of forged cookies for made-up names cannot grow the cache --
+        their lookup is one indexed SELECT. One query backs both the session
+        key and the role, so a role change is visible exactly as fast as a
+        password change (same cache, same `invalidate`)."""
         now = time.monotonic()
         cached = self._keys.get(username)
         if cached and now - cached[0] < self._KEY_TTL:
-            return cached[1]
-        stored = self.history.password_hash(username)
-        if not stored:
+            return cached[1], cached[2]
+        creds = self.history.user_credentials(username)
+        if not creds:
             return None
+        stored, role = creds
         key = hmac.new(self.secret(), stored.encode(), "sha256").digest()
         with self._lock:
-            self._keys[username] = (now, key)
-        return key
+            self._keys[username] = (now, key, role)
+        return key, role
+
+    def _key(self, username: str) -> bytes | None:
+        entry = self._entry(username)
+        return entry[0] if entry else None
+
+    def role_of(self, username: str) -> str | None:
+        entry = self._entry(username)
+        return entry[1] if entry else None
+
+    def satisfies(self, role: str | None, minimum: str) -> bool:
+        return ROLE_RANK.get(role, -1) >= ROLE_RANK[minimum]
 
     def invalidate(self, username: str) -> None:
-        """Forget the cached key after a password change or rename, so the
-        very next request sees the new hash rather than waiting out the TTL."""
+        """Forget the cached key/role after a password change, role change or
+        rename, so the very next request sees the new value rather than
+        waiting out the TTL."""
         with self._lock:
             self._keys.pop(username, None)
 
