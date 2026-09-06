@@ -286,6 +286,19 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "coverage.online", "coverage.unattributed", "coverage.notes",
         ],
     },
+    "changelog": {
+        # Patch notes: the checkout's commit history, each commit tagged with
+        # the version version.json held after it. `available` is False (with
+        # `reason`) on a host without a checkout, so the commit fields are
+        # listed under OPTIONAL -- the view renders the reason instead.
+        "/api/changelog": [
+            "available", "reason", "current", "commits",
+            "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
+            "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
+            "commits[].body", "commits[].version", "commits[].bumped_to",
+            "branch", "limit",
+        ],
+    },
     "coroner": {
         # Deaths across the fleet (the view filters by node). The list carries
         # the verdict without the recorder frames; /api/deaths/{id} has those.
@@ -390,6 +403,11 @@ OPTIONAL = {
     "crashes.events[].detail",
     "clients[].detail",               # only present when a client is detected
     "clients[].source",
+    # Patch notes exist only on a host running from a git checkout; the
+    # container image carries none and the view says so.
+    "commits[].sha", "commits[].short", "commits[].ts", "commits[].subject",
+    "commits[].type", "commits[].scope", "commits[].breaking", "commits[].summary",
+    "commits[].body", "commits[].version", "commits[].bumped_to", "branch", "limit",
 }
 
 
