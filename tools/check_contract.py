@@ -306,7 +306,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "/api/changelog?repo=agent": [
             "available", "reason", "current", "commits", "repo",
             "commits[].sha", "commits[].summary", "commits[].body", "commits[].version",
-            "branch", "limit", "source", "fetched_at", "stale_reason",
+            "branch", "limit", "source", "fetched_at", "stale_reason", "min_self_update_version",
         ],
     },
     "coroner": {
