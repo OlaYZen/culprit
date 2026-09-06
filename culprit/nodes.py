@@ -637,6 +637,42 @@ def _notifiable(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {"findings": findings}
 
 
+CONTAINER_RUNTIMES = ("docker", "containerd", "podman", "cri-o")
+
+
+def update_targets(metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[str, str]]]:
+    """Which agents an "Update all" covers, and why each other one is left
+    out. The rule is the daily sweep's (enabled, capable, an update
+    available) plus online -- a queued command to an absent agent would just
+    time out -- and never a containerised agent: those update through their
+    image, and the git-pull path does not exist inside one even when the
+    agent has not said so itself. Pure, so tools/check_updates.py pins it."""
+    targets: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for meta in metas:
+        name = str(meta.get("name") or "")
+        if not name:
+            continue
+        container = meta.get("container")
+        if meta.get("enabled") is False:
+            reason = "revoked"
+        elif container in CONTAINER_RUNTIMES:
+            reason = f"runs in {container}: updates through its image, not git"
+        elif not meta.get("online"):
+            reason = "offline"
+        elif meta.get("update_capable") is not True:
+            reason = str(meta.get("update_reason") or "update capability not yet reported")
+        elif meta.get("update_available") is False:
+            reason = "already up to date"
+        elif meta.get("update_available") is not True:
+            reason = "update availability not yet known"
+        else:
+            targets.append(name)
+            continue
+        skipped.append({"name": name, "reason": reason})
+    return targets, skipped
+
+
 def summarise_snapshot(meta: dict[str, Any],
                        snapshot: dict[str, Any]) -> dict[str, Any]:
     """One node's headline numbers. Used for agents and the host alike, so

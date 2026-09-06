@@ -36,6 +36,7 @@ from .db import LOCAL_NODE, ROLES, History
 from .expect import Expectations
 from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
+from . import nodes as nodes_module
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
 from . import changelog, portnames
 from .notify import Notifier
@@ -778,6 +779,34 @@ async def api_node_update(request: Request, name: str) -> dict[str, Any]:
     log.info("update triggered on '%s' by %s -> %s", name,
              getattr(request.state, "user", "?"), result)
     return result
+
+
+@app.post("/api/nodes/update-all",
+          summary="git-pull and restart every agent that has an update",
+          dependencies=[Depends(require_role("operator"))])
+async def api_nodes_update_all(request: Request) -> dict[str, Any]:
+    """The per-node button, fanned out: every enabled, online, capable agent
+    with an update available (nodes.update_targets -- never a containerised
+    one, which updates through its image). The commands are queued at once
+    and each agent picks its own up in its next report, so the fleet updates
+    in parallel; the response names every node, updated or not, and why the
+    rest were left out."""
+    assert registry is not None
+    targets, skipped = nodes_module.update_targets(registry.status_list())
+
+    async def one(name: str) -> dict[str, Any]:
+        try:
+            result = await _agent_command(name, "update", {},
+                                          timeout_override=UPDATE_TIMEOUT_S)
+            return {"name": name, "ok": True, "result": result}
+        except HTTPException as exc:
+            return {"name": name, "ok": False, "error": str(exc.detail)}
+
+    results = list(await asyncio.gather(*(one(name) for name in targets)))
+    log.info("update-all triggered on %s by %s -> %s", targets,
+             getattr(request.state, "user", "?"),
+             {r["name"]: r.get("ok") for r in results})
+    return {"targets": targets, "results": results, "skipped": skipped}
 
 
 @app.get("/api/nodes/{name}/actions/{action_id}",
