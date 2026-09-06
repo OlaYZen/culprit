@@ -37,7 +37,7 @@ from .expect import Expectations
 from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
-from . import portnames
+from . import changelog, portnames
 from .notify import Notifier
 from .verdict import ActionVerifier
 from .sampler import LIVE_KEYS, Sampler
@@ -1236,6 +1236,16 @@ async def api_portnames() -> dict[str, Any]:
     """The name a port number usually carries, for the Ports and Map views.
     A hint about the number, never a claim about the process behind it."""
     return portnames.load()
+
+
+# ------------------------------------------------------------- patch notes
+@app.get("/api/changelog", summary="Patch notes: the checkout's commit history")
+async def api_changelog() -> dict[str, Any]:
+    """Every commit this host's checkout carries (newest first), each tagged
+    with the version version.json held after it. One `git log` at first
+    request, cached for the life of the process; a host without a checkout
+    (the container image) says so rather than showing an empty list."""
+    return await asyncio.to_thread(changelog.load)
 
 
 # --------------------------------------------------------------------- map
