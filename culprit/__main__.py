@@ -4,8 +4,13 @@ Serves the host node by default; subcommands manage the credentials that the
 multi-node setup depends on:
 
     python -m culprit                        # run the host node
-    python -m culprit users add <name>       # dashboard user (prompts, hidden)
-    python -m culprit users list|remove
+    python -m culprit users add <name> [--role viewer|operator|admin]
+                                             # dashboard user (prompts, hidden;
+                                             # role defaults to admin, matching
+                                             # what every user got before roles
+                                             # existed)
+    python -m culprit users list|remove <name>
+    python -m culprit users role <name> <role>   # change an existing user's role
     python -m culprit agents add <name>      # enroll an agent, prints its
                                              # token exactly once
     python -m culprit agents list|revoke|remove
@@ -48,9 +53,12 @@ def _open_history():  # type: ignore[no-untyped-def]
 
 
 def _cmd_users(args: argparse.Namespace) -> int:
+    from .db import ROLES
+
     history = _open_history()
     try:
         if args.action == "add":
+            existed = history.user_exists(args.name)
             password = getpass.getpass(f"password for {args.name}: ")
             if len(password) < 8:
                 print("error: use at least 8 characters", file=sys.stderr)
@@ -58,16 +66,42 @@ def _cmd_users(args: argparse.Namespace) -> int:
             if password != getpass.getpass("repeat: "):
                 print("error: passwords do not match", file=sys.stderr)
                 return 1
-            history.add_user(args.name, password)
-            print(f"user '{args.name}' saved. Authentication is now REQUIRED "
-                  "for the dashboard (restart the server if it is running).")
+            history.add_user(args.name, password, args.role or "admin")
+            if existed:
+                print(f"password reset for '{args.name}' "
+                      f"(role unchanged: {history.user_role(args.name)}"
+                      + (" -- --role is only used when creating a new user; "
+                         "use `users role` to change it" if args.role else "")
+                      + ").")
+            else:
+                print(f"user '{args.name}' saved as {args.role or 'admin'}. "
+                      "Authentication is now REQUIRED for the dashboard "
+                      "(restart the server if it is running).")
         elif args.action == "remove":
             if history.remove_user(args.name):
                 print(f"user '{args.name}' removed."
                       + (" No users remain -- the dashboard is open again "
                          "(loopback only)." if history.user_count() == 0 else ""))
             else:
-                print(f"no such user '{args.name}'", file=sys.stderr)
+                if history.user_exists(args.name):
+                    print(f"error: cannot remove '{args.name}' -- this would "
+                          "leave no admin account", file=sys.stderr)
+                else:
+                    print(f"no such user '{args.name}'", file=sys.stderr)
+                return 1
+        elif args.action == "role":
+            if args.value not in ROLES:
+                print(f"error: role must be one of {', '.join(ROLES)}",
+                      file=sys.stderr)
+                return 1
+            if history.set_role(args.name, args.value):
+                print(f"user '{args.name}' is now {args.value}.")
+            else:
+                if history.user_exists(args.name):
+                    print(f"error: cannot change '{args.name}' -- this would "
+                          "leave no admin account", file=sys.stderr)
+                else:
+                    print(f"no such user '{args.name}'", file=sys.stderr)
                 return 1
         else:
             users = history.list_users()
@@ -77,7 +111,8 @@ def _cmd_users(args: argparse.Namespace) -> int:
             for user in users:
                 created = time.strftime("%Y-%m-%d",
                                         time.localtime(user["created_at"]))
-                print(f"  {user['username']}  (created {created})")
+                print(f"  {user['username']:<24} {user['role']:<8} "
+                      f"(created {created})")
         return 0
     finally:
         history.close()
@@ -236,8 +271,12 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command")
 
     users = subparsers.add_parser("users", help="manage dashboard users")
-    users.add_argument("action", choices=("add", "list", "remove"))
+    users.add_argument("action", choices=("add", "list", "remove", "role"))
     users.add_argument("name", nargs="?", default=None)
+    users.add_argument("value", nargs="?", default=None,
+                       help="the new role, for 'users role <name> <role>'")
+    users.add_argument("--role", choices=("viewer", "operator", "admin"),
+                       default=None, help="role for 'users add' (default: admin)")
 
     agents = subparsers.add_parser("agents", help="manage agent nodes")
     agents.add_argument("action", choices=("add", "list", "revoke", "remove"))
@@ -248,6 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("users", "agents"):
         if args.action in ("add", "remove", "revoke") and not args.name:
             parser.error(f"'{args.command} {args.action}' needs a name")
+        if args.command == "users" and args.action == "role" \
+                and not (args.name and args.value):
+            parser.error("'users role' needs a name and a role")
         return _cmd_users(args) if args.command == "users" else _cmd_agents(args)
     return _serve(args)
 

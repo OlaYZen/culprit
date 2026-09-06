@@ -20,7 +20,7 @@ import zlib
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
                                RedirectResponse, StreamingResponse)
@@ -31,7 +31,7 @@ from . import config as config_module
 from . import trust
 from .auth import SESSION_COOKIE, Auth, ensure_default_user
 from .coroner import Coroner
-from .db import LOCAL_NODE, History
+from .db import LOCAL_NODE, ROLES, History
 from .expect import Expectations
 from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
@@ -253,6 +253,7 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
                 response = RedirectResponse("/login", status_code=303)
         else:
             request.state.user = user
+            request.state.role = auth.role_of(user)
     if response is None:
         response = await call_next(request)
     return _harden(request, response)
@@ -275,6 +276,32 @@ def _refuse(request: Request, access: trust.Access):  # noqa: ANN201
         return JSONResponse({"detail": access.refusal, "reason": access.reason},
                             status_code=400)
     return PlainTextResponse(access.refusal + "\n", status_code=400)
+
+
+def require_role(minimum: str):
+    """A route dependency: 403 unless the signed-in session's role is at
+    least `minimum`. Declared as `dependencies=[Depends(require_role(...))]`
+    on the route itself (never called imperatively from inside a handler) so
+    a route's access level is a property of the route -- readable straight
+    off `app.routes` by anything that walks them, `tools/check_role_matrix.py`
+    included, the same way `EXPECTED_PUBLIC_PATHS` there mirrors the public
+    gate instead of trusting a route to remember to check itself.
+
+    With auth off there is no user concept at all -- and __main__ refuses to
+    bind a non-loopback address in that state -- so "off" means everyone
+    reaching this process already has full access, same as before roles
+    existed. A route with no such dependency needs nothing more than a
+    session -- the default every gated route already had before roles
+    existed, i.e. `viewer`.
+    """
+    async def _dep(request: Request) -> None:
+        if auth is None or not auth.enabled:
+            return
+        role = getattr(request.state, "role", None)
+        if not auth.satisfies(role, minimum):
+            raise HTTPException(403, f"requires {minimum} access")
+    _dep.minimum_role = minimum  # read by tools/check_role_matrix.py
+    return _dep
 
 
 def _harden(request: Request, response):  # noqa: ANN001, ANN201
@@ -339,7 +366,8 @@ async def api_logout() -> JSONResponse:
 async def api_auth(request: Request) -> dict[str, Any]:
     assert auth is not None
     user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
-    return {"enabled": auth.enabled, "username": user}
+    role = auth.role_of(user) if user else None
+    return {"enabled": auth.enabled, "username": user, "role": role}
 
 
 # ------------------------------------------------------------------- account
@@ -418,6 +446,77 @@ async def api_account_username(
         max_age=7 * 24 * 3600, path="/",
     )
     return response
+
+
+# --------------------------------------------------------------------- users
+# Admin-only management of *other* accounts, mirroring the /api/agents CRUD
+# shape below. Self-service (your own password/username) is the account
+# endpoints above, open to every role.
+@app.get("/api/users", summary="Dashboard users and their roles",
+         dependencies=[Depends(require_role("admin"))])
+async def api_users(request: Request) -> dict[str, Any]:
+    assert history is not None
+    return {"users": history.list_users()}
+
+
+@app.post("/api/users", summary="Create a dashboard user",
+          dependencies=[Depends(require_role("admin"))])
+async def api_user_create(
+    request: Request,
+    username: str = Body(..., embed=True),
+    password: str = Body(..., embed=True),
+    role: str = Body(..., embed=True),
+) -> dict[str, Any]:
+    assert history is not None
+    username = username.strip()
+    if not (1 <= len(username) <= 48) or \
+            not all(c.isalnum() or c in "-_." for c in username):
+        raise HTTPException(422, "username must be 1-48 characters: letters, "
+                                 "digits, '-', '_' and '.' only")
+    if role not in ROLES:
+        raise HTTPException(422, f"role must be one of {', '.join(ROLES)}")
+    if len(password) < 8:
+        raise HTTPException(422, "password must be at least 8 characters")
+    if history.user_exists(username):
+        raise HTTPException(409, f"a user named '{username}' already exists")
+    history.add_user(username, password, role)
+    log.info("user '%s' created as %s by %s", username, role,
+             getattr(request.state, "user", "?"))
+    return {"ok": True, "username": username, "role": role}
+
+
+@app.put("/api/users/{name}/role", summary="Change a user's role",
+         dependencies=[Depends(require_role("admin"))])
+async def api_user_role(name: str, request: Request,
+                        role: str = Body(..., embed=True)) -> dict[str, Any]:
+    assert history is not None and auth is not None
+    if role not in ROLES:
+        raise HTTPException(422, f"role must be one of {', '.join(ROLES)}")
+    if not history.set_role(name, role):
+        if not history.user_exists(name):
+            raise HTTPException(404, f"no such user '{name}'")
+        raise HTTPException(409, "refusing: this would leave no admin account")
+    auth.invalidate(name)
+    log.info("user '%s' role changed to %s by %s", name, role,
+             getattr(request.state, "user", "?"))
+    return {"ok": True, "username": name, "role": role}
+
+
+@app.delete("/api/users/{name}", summary="Remove a dashboard user",
+            dependencies=[Depends(require_role("admin"))])
+async def api_user_delete(name: str, request: Request) -> dict[str, Any]:
+    assert history is not None and auth is not None
+    if name == getattr(request.state, "user", None):
+        raise HTTPException(
+            409, "cannot remove your own account -- sign in as another "
+                 "admin, or remove it from the CLI")
+    if not history.remove_user(name):
+        if not history.user_exists(name):
+            raise HTTPException(404, f"no such user '{name}'")
+        raise HTTPException(409, "refusing: this would leave no admin account")
+    auth.invalidate(name)
+    log.info("user '%s' removed by %s", name, getattr(request.state, "user", "?"))
+    return {"ok": True, "username": name}
 
 
 # ------------------------------------------------------------------- agents
@@ -522,7 +621,10 @@ async def _verified_action(request: Request, name: str, action: str,
     The node's diagnosis *before* the action is the baseline; the verifier
     then follows the node's next diagnoses and reaches a verdict (helped /
     no change / ...), readable at /api/nodes/{name}/actions/{verify_id}. The
-    action itself is unchanged -- the verdict is extra, never a gate.
+    action itself is unchanged -- the verdict is extra, never a gate. Role
+    checked by each caller's own `dependencies=[Depends(require_role(...))]`,
+    not here -- this helper is not a route, so it has nothing for a tool
+    walking `app.routes` to read.
     """
     assert registry is not None and verifier is not None
     baseline = (registry.get_snapshot(name) or {}).get("diagnosis") or {}
@@ -544,7 +646,8 @@ async def _verified_action(request: Request, name: str, action: str,
     return result
 
 
-@app.post("/api/nodes/{name}/processes/{pid}/terminate")
+@app.post("/api/nodes/{name}/processes/{pid}/terminate",
+          dependencies=[Depends(require_role("operator"))])
 async def api_node_terminate(
     request: Request, name: str, pid: int,
     force: bool = Body(False, embed=True),
@@ -556,7 +659,8 @@ async def api_node_terminate(
                                   {"pid": pid, "force": force})
 
 
-@app.post("/api/nodes/{name}/processes/{pid}/priority")
+@app.post("/api/nodes/{name}/processes/{pid}/priority",
+          dependencies=[Depends(require_role("operator"))])
 async def api_node_priority(
     request: Request, name: str, pid: int, level: str = Body(..., embed=True),
 ) -> dict[str, Any]:
@@ -568,7 +672,8 @@ _THROTTLE_LEVELS = ("half", "quarter", "release")
 
 
 @app.post("/api/nodes/{name}/processes/{pid}/throttle",
-          summary="Cap the CPU/IO of the unit a process runs in")
+          summary="Cap the CPU/IO of the unit a process runs in",
+          dependencies=[Depends(require_role("operator"))])
 async def api_node_throttle(
     request: Request, name: str, pid: int, level: str = Body(..., embed=True),
 ) -> dict[str, Any]:
@@ -585,7 +690,8 @@ UPDATE_TIMEOUT_S = 120.0
 
 
 @app.post("/api/nodes/{name}/update",
-          summary="git-pull this agent's checkout and restart it")
+          summary="git-pull this agent's checkout and restart it",
+          dependencies=[Depends(require_role("operator"))])
 async def api_node_update(request: Request, name: str) -> dict[str, Any]:
     """Not wrapped in _verified_action: that machinery is a before/after
     diagnosis comparison for process actions, and does not apply here."""
@@ -691,7 +797,8 @@ def _docker_command(request: Request, token: str) -> str:
     )
 
 
-@app.post("/api/agents", summary="Enroll an agent; returns its token ONCE")
+@app.post("/api/agents", summary="Enroll an agent; returns its token ONCE",
+          dependencies=[Depends(require_role("admin"))])
 async def api_agent_create(
     request: Request,
     name: str = Body(..., embed=True),
@@ -717,7 +824,8 @@ async def api_agent_create(
 
 
 @app.post("/api/agents/{name}/token",
-          summary="Rotate an agent's token (re-enables a revoked one)")
+          summary="Rotate an agent's token (re-enables a revoked one)",
+          dependencies=[Depends(require_role("admin"))])
 async def api_agent_rotate(name: str, request: Request) -> dict[str, Any]:
     assert history is not None and registry is not None
     if name not in {a["name"] for a in history.list_agents()}:
@@ -733,7 +841,8 @@ async def api_agent_rotate(name: str, request: Request) -> dict[str, Any]:
                     "was minted; update the agent's config"}
 
 
-@app.post("/api/agents/{name}/revoke", summary="Reject this agent's reports")
+@app.post("/api/agents/{name}/revoke", summary="Reject this agent's reports",
+          dependencies=[Depends(require_role("admin"))])
 async def api_agent_revoke(name: str, request: Request) -> dict[str, Any]:
     assert history is not None and registry is not None
     if not history.revoke_agent(name):
@@ -744,7 +853,8 @@ async def api_agent_revoke(name: str, request: Request) -> dict[str, Any]:
     return {"ok": True, "name": name}
 
 
-@app.delete("/api/agents/{name}", summary="Remove an agent entirely")
+@app.delete("/api/agents/{name}", summary="Remove an agent entirely",
+            dependencies=[Depends(require_role("admin"))])
 async def api_agent_delete(name: str, request: Request) -> dict[str, Any]:
     assert history is not None and registry is not None
     if not history.remove_agent(name):
@@ -770,10 +880,12 @@ async def api_node_settings(
     request: Request,
     patch: dict[str, Any] = Body(...),
 ) -> dict[str, Any]:
-    """Session-gated. The agent applies this from its next report's response,
-    so it takes one report interval to land. In-memory on both sides by
-    design -- like the titlebar Refresh control locally, it means "faster
-    right now", not a saved preference; restarts revert to defaults."""
+    """Session-gated (any role): the title-bar Refresh control's live
+    `interval_fast` nudge for a remote agent, not configuration -- "faster
+    right now", never a saved preference. The agent applies it from its next
+    report's response, so it takes one report interval to land, and it is
+    in-memory on both sides: restarts revert to defaults. Contrast
+    `/api/settings`, which is real configuration and admin-only."""
     assert history is not None and registry is not None
     if name == LOCAL_NODE:
         raise HTTPException(422, "use /api/settings for the host node")
@@ -842,6 +954,7 @@ async def api_snapshot(request: Request) -> dict[str, Any]:
     payload["auth"] = {
         "enabled": auth.enabled if auth else False,
         "username": getattr(request.state, "user", None),
+        "role": getattr(request.state, "role", None),
     }
     if registry is not None:
         payload["nodes"] = registry.status_list()
@@ -1119,7 +1232,8 @@ async def api_expectations_suggested(
     return {"suggestions": expectations.suggest(node)}
 
 
-@app.post("/api/expectations", summary="Mark a finding as expected")
+@app.post("/api/expectations", summary="Mark a finding as expected",
+          dependencies=[Depends(require_role("operator"))])
 async def api_expectation_add(request: Request,
                               payload: dict[str, Any] = Body(...)) -> JSONResponse:
     assert history is not None and expectations is not None
@@ -1146,7 +1260,8 @@ async def api_expectation_add(request: Request,
 
 
 @app.delete("/api/expectations/{expectation_id}",
-            summary="Stop treating a finding as expected")
+            summary="Stop treating a finding as expected",
+            dependencies=[Depends(require_role("operator"))])
 async def api_expectation_remove(expectation_id: int,
                                  request: Request) -> dict[str, Any]:
     assert history is not None and expectations is not None
@@ -1165,7 +1280,8 @@ async def api_notify_status() -> dict[str, Any]:
     return notifier.status()
 
 
-@app.post("/api/notify/test", summary="Send a test message on every channel")
+@app.post("/api/notify/test", summary="Send a test message on every channel",
+          dependencies=[Depends(require_role("admin"))])
 async def api_notify_test(request: Request) -> dict[str, Any]:
     assert notifier is not None
     log.info("notification test requested by %s",
@@ -1242,19 +1358,23 @@ def _lockout_guard(request: Request, patch: dict[str, Any]) -> dict[str, str]:
                    "Include it, or save from a connection that stays allowed."}
 
 
-@app.put("/api/settings")
+@app.put("/api/settings", dependencies=[Depends(require_role("admin"))])
 async def api_put_settings(
     request: Request,
     patch: dict[str, Any] = Body(...),
     persist: bool = Query(
         True,
         description="False applies the change to the running sampler without "
-                    "writing config.json. Used by the title-bar Refresh "
-                    "control, where a change means 'faster right now' rather "
-                    "than a saved preference.",
+                    "writing config.json -- a live retune rather than a saved "
+                    "preference.",
     ),
 ) -> JSONResponse:
-    """Apply a settings patch.
+    """Apply a settings patch. Configuration, always -- unlike the identically-
+    shaped `/api/nodes/{name}/settings`, which is only ever the title-bar
+    Refresh control's live `interval_fast` nudge for a remote agent and needs
+    no more than a session; this host is never itself a node to nudge that
+    way (`store.isLocal()` is always false -- see stream.js), so every call
+    here is a real settings change.
 
     Rejections come back as a field-keyed map so the Settings form can render
     each message inline next to the offending input rather than as a toast.
@@ -1334,6 +1454,7 @@ async def api_stream(request: Request) -> StreamingResponse:
             snapshot["auth"] = {
                 "enabled": auth.enabled if auth else False,
                 "username": getattr(request.state, "user", None),
+                "role": getattr(request.state, "role", None),
             }
             if registry is not None:
                 snapshot["nodes"] = registry.status_list()
