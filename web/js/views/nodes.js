@@ -15,7 +15,7 @@ import { api, store } from "../stream.js";
 import {
   confirmAction, emptyState, inlineResult, note, pendingSlot, readySlot, setBusy, skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
 
 export function createNodes() {
   const root = el("div.view", { dataset: { view: "nodes" } });
@@ -44,6 +44,13 @@ export function createNodes() {
   let loaded = false;
 
   function buildEnroll() {
+    if (!canAdminister()) {
+      render(enrollSlot, section({
+        title: "Enroll a new agent",
+        body: emptyState("Admin access required", "Only an admin can enroll agents or manage their tokens."),
+      }));
+      return;
+    }
     const input = el("input", {
       type: "text", placeholder: "node name, e.g. web-01", autocomplete: "off", spellcheck: "false",
       "aria-label": "New node name",
@@ -317,8 +324,10 @@ export function createNodes() {
       ? "Issue a new token and re-enable this node"
       : "Issue a new token (the current one stops working immediately)");
 
-    show(entry.update, !revoked);
-    show(entry.revoke, !revoked);
+    show(entry.rotate, canAdminister());
+    show(entry.remove, canAdminister());
+    show(entry.update, !revoked && canOperate());
+    show(entry.revoke, !revoked && canAdminister());
     entry.update.disabled = !(capable && available);
     let updateTitle;
     if (!capable) updateTitle = node.update_reason || "update capability not yet reported";

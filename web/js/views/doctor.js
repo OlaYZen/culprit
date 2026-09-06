@@ -17,7 +17,7 @@ import {
   checkbox, emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
   skeletonStatus,
 } from "../ui.js";
-import { changeList, containerPill, culpritRow, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { canOperate, changeList, containerPill, culpritRow, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -315,10 +315,12 @@ export function createDoctor() {
     if (finding.expected) {
       meta.append(pill(`expected · ${finding.expected.reason}`, "ok"));
       meta.lastChild.title = `Marked as expected (${finding.expected.window}). Real severity: ${finding.severity_raw || "?"}.`;
-      const unmark = el("button.btn.btn--sm.finding__actions", { type: "button", title: "Stop treating this as expected" }, ["Unmark"]);
-      unmark.addEventListener("click", () => removeExpectation(finding.expected.id, unmark));
-      meta.append(unmark);
-    } else {
+      if (canOperate()) {
+        const unmark = el("button.btn.btn--sm.finding__actions", { type: "button", title: "Stop treating this as expected" }, ["Unmark"]);
+        unmark.addEventListener("click", () => removeExpectation(finding.expected.id, unmark));
+        meta.append(unmark);
+      }
+    } else if (canOperate()) {
       const mark = el("button.btn.btn--sm.finding__actions", { type: "button",
         title: "Say this is normal — here is why, and when" }, ["Mark as expected…"]);
       mark.addEventListener("click", () => openExpectDialog(finding));
@@ -389,7 +391,7 @@ export function createDoctor() {
       node.append(group);
     }
     const suggestion = suggestionFor(finding);
-    if (suggestion) {
+    if (suggestion && canOperate()) {
       // The host noticed this recurs at the same hour on several days; a
       // person still decides, with the dialog pre-filled from the record.
       const mark = el("button.btn.btn--sm", { type: "button" }, ["Mark as expected…"]);

@@ -277,6 +277,22 @@ export function culpritRow(culprit, index) {
   return node;
 }
 
+/* ══ Roles ═════════════════════════════════════════════════════════════
+ * The server is the real gate (a hidden button here is convenience, not
+ * security -- every mutating endpoint re-checks the role itself). Auth off
+ * means no role concept at all, and everyone reaching the process already
+ * has full access, same as before roles existed. */
+const ROLE_RANK = { viewer: 0, operator: 1, admin: 2 };
+
+function roleAtLeast(minimum) {
+  const auth = store.state.auth || {};
+  if (!auth.enabled) return true;
+  return (ROLE_RANK[auth.role] ?? -1) >= ROLE_RANK[minimum];
+}
+
+export function canOperate() { return roleAtLeast("operator"); }
+export function canAdminister() { return roleAtLeast("admin"); }
+
 /* ══ Process detail dialog ═════════════════════════════════════════════ */
 /** Base path for process endpoints on the selected node. Remote nodes route
  *  through the host, which relays to the agent and returns its answer. */
@@ -584,6 +600,10 @@ function buildProcessFooter(footer, detail) {
   footer.replaceChildren(result, el("span.spacer"));
   if (detail.is_self) {
     footer.append(el("span.faint.small", { text: "This is Culprit itself — no actions offered." }));
+    return;
+  }
+  if (!canOperate()) {
+    footer.append(el("span.faint.small", { text: "Viewing only — your account cannot act on processes." }));
     return;
   }
 
