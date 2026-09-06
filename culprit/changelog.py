@@ -31,6 +31,7 @@ from typing import Any
 import time
 
 from . import __version__
+from . import config as config_module
 from .config import ROOT
 
 log = logging.getLogger("culprit.changelog")
@@ -48,6 +49,7 @@ REPOS = ("host", "agent")
 
 _cache: dict[str, dict[str, Any]] = {}
 _agent_fetched_at = 0.0
+_agent_branch: str | None = None   # the branch the cached agent parse describes
 _lock = threading.Lock()
 
 
@@ -175,15 +177,20 @@ def _sync_agent_mirror() -> str:
     return ""
 
 
-def _build_agent() -> dict[str, Any]:
+def _build_agent(branch: str) -> dict[str, Any]:
     problem = _sync_agent_mirror()
     if problem and not (AGENT_MIRROR / "HEAD").exists():
-        return {"available": False, "reason": problem, "repo": "agent", "current": None, "commits": []}
-    tip, _ = _git(["show", "main:version.json"], AGENT_MIRROR)
+        return {"available": False, "reason": problem, "repo": "agent", "current": None,
+                "branch": branch, "commits": []}
+    exists, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], AGENT_MIRROR)
+    if exists is None:
+        return {"available": False, "repo": "agent", "current": None, "branch": branch, "commits": [],
+                "reason": f"the agent repository has no branch '{branch}' (Settings > Automatic agent updates)"}
+    tip, _ = _git(["show", f"{branch}:version.json"], AGENT_MIRROR)
     match = re.search(r'"version"\s*:\s*"([^"]+)"', tip or "")
-    out = _build(AGENT_MIRROR, "main", match.group(1) if match else None)
+    out = _build(AGENT_MIRROR, branch, match.group(1) if match else None)
     out["repo"] = "agent"
-    out["branch"] = "main"
+    out["branch"] = branch
     out["source"] = AGENT_REPO_URL
     out["fetched_at"] = _agent_fetched_at or None
     out["stale_reason"] = problem or None
@@ -192,8 +199,9 @@ def _build_agent() -> dict[str, Any]:
 
 def load(repo: str = "host") -> dict[str, Any]:
     """The parsed log for `repo` ("host": this checkout, parsed once per
-    process; "agent": the mirror, re-parsed after each successful fetch).
-    Safe to call from a thread."""
+    process; "agent": the mirror on the configured branch, re-parsed after
+    each successful fetch or when the branch setting changes). Safe to call
+    from a thread."""
     if repo not in REPOS:
         raise ValueError(f"unknown repo {repo!r}")
     with _lock:
@@ -202,13 +210,17 @@ def load(repo: str = "host") -> dict[str, Any]:
             if cached is None:
                 cached = _cache[repo] = _build_host()
         else:
-            due = cached is None or time.time() - _agent_fetched_at >= AGENT_REFRESH_S
+            global _agent_branch
+            branch = config_module.get().agent_update_branch or "main"
+            due = cached is None or branch != _agent_branch \
+                or time.time() - _agent_fetched_at >= AGENT_REFRESH_S
             if due:
-                fresh = _build_agent()
+                fresh = _build_agent(branch)
+                _agent_branch = branch
                 # A mirror that could not be refreshed still parses; only a
                 # mirror that never existed is unavailable, and even then a
                 # previous good answer is kept.
-                if fresh["available"] or cached is None:
+                if fresh["available"] or cached is None or cached.get("branch") != branch:
                     cached = _cache[repo] = fresh
                 else:
                     cached["stale_reason"] = fresh["reason"]

@@ -77,7 +77,7 @@ async def _sweep_loop() -> None:
                 # agent) -- off the event loop thread. refresh_remote_version
                 # itself no-ops until REMOTE_VERSION_REFRESH_S has passed.
                 await asyncio.get_running_loop().run_in_executor(
-                    None, registry.refresh_remote_version)
+                    None, registry.refresh_remote_version, config_module.get().agent_update_branch)
             _maybe_auto_update()
         except Exception:  # noqa: BLE001 -- housekeeping must not die
             log.exception("sweep failed")
@@ -112,9 +112,15 @@ def _maybe_auto_update() -> None:
             _run_scheduled_update(str(meta["name"])))
 
 
+def _update_payload(**extra: Any) -> dict[str, Any]:
+    """Every update command names the branch agents are meant to run, so an
+    agent on another line switches rather than pulling its own branch."""
+    return {"branch": config_module.get().agent_update_branch or "main", **extra}
+
+
 async def _run_scheduled_update(name: str) -> None:
     try:
-        result = await _agent_command(name, "update", {},
+        result = await _agent_command(name, "update", _update_payload(),
                                       timeout_override=UPDATE_TIMEOUT_S)
         log.info("scheduled update on '%s' -> %s", name, result)
     except HTTPException as exc:
@@ -776,7 +782,7 @@ async def api_node_update(request: Request, name: str) -> dict[str, Any]:
     if meta.get("update_capable") is not True:
         raise HTTPException(409, meta.get("update_reason")
                             or "this agent has not reported update capability yet")
-    result = await _agent_command(name, "update", {},
+    result = await _agent_command(name, "update", _update_payload(),
                                   timeout_override=UPDATE_TIMEOUT_S)
     # An explicit update to the tip ends any pin: the operator chose latest.
     if meta.get("pinned_version") and history is not None:
@@ -826,7 +832,7 @@ async def api_node_version(request: Request, name: str,
         raise HTTPException(404, f"no agent version '{version}' in the mirror")
     if meta.get("agent_version") == version:
         raise HTTPException(409, f"'{name}' is already on v{version}")
-    result = await _agent_command(name, "update", {"ref": commit["sha"]},
+    result = await _agent_command(name, "update", _update_payload(ref=commit["sha"]),
                                   timeout_override=UPDATE_TIMEOUT_S)
     latest = meta.get("remote_version")
     pinned = version != latest
@@ -863,7 +869,7 @@ async def api_nodes_update_all(request: Request) -> dict[str, Any]:
 
     async def one(name: str) -> dict[str, Any]:
         try:
-            result = await _agent_command(name, "update", {},
+            result = await _agent_command(name, "update", _update_payload(),
                                           timeout_override=UPDATE_TIMEOUT_S)
             return {"name": name, "ok": True, "result": result}
         except HTTPException as exc:

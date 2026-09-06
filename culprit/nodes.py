@@ -82,8 +82,13 @@ def _d(value: Any) -> dict[str, Any]:
 # One fetch for the whole fleet (NodeRegistry.refresh_remote_version, called
 # from main.py's sweep loop), not each agent hitting GitHub on its own
 # cadence -- see AGENTS.md's "Agent self-update".
-REMOTE_VERSION_URL = "https://raw.githubusercontent.com/OlaYZen/culprit-agent/main/version.json"
+REMOTE_VERSION_URL = "https://raw.githubusercontent.com/OlaYZen/culprit-agent/{branch}/version.json"
 REMOTE_VERSION_REFRESH_S = 1800.0
+
+
+def remote_version_url(branch: str) -> str:
+    """The version.json GitHub publishes for one branch of the agent repo."""
+    return REMOTE_VERSION_URL.format(branch=branch or "main")
 
 
 def _version_tuple(version: str | None) -> tuple[int, ...] | None:
@@ -107,6 +112,17 @@ def _is_newer(remote: str | None, local: str | None) -> bool | None:
     if remote_v is None or local_v is None:
         return None
     return remote_v > local_v
+
+
+def _update_available(remote: str | None, local: str | None,
+                      branch: str | None, agent_branch: str | None) -> bool | None:
+    """_is_newer, plus: an agent that reports its branch and is not on the
+    configured one has an update available whatever the numbers say, since
+    the update is what moves it. An agent that has not said its branch is
+    judged on the numbers alone."""
+    if agent_branch and branch and agent_branch != branch:
+        return True
+    return _is_newer(remote, local)
 
 
 def _scrub(root: Any) -> str | None:
@@ -174,6 +190,9 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         # refuses to send them a ref they would ignore.
         "update_refs": meta.get("update_refs")
             if isinstance(meta.get("update_refs"), bool) else None,
+        # The branch the agent's checkout is on, so the host can tell an
+        # agent that is on the wrong line from one that is merely behind.
+        "update_branch": _short(meta.get("update_branch"), 100),
     }
     snapshot: dict[str, Any] = {}
     dropped: list[str] = []
@@ -220,6 +239,7 @@ class _Node:
         self.update_capable: bool | None = None
         self.update_reason: str | None = None
         self.update_refs: bool | None = None
+        self.update_branch: str | None = None
         # Desired setting overrides, handed back to the agent in the response
         # to its next report -- the push-only channel's one-way "downlink".
         # Deliberately in memory only: this mirrors the titlebar Refresh
@@ -305,6 +325,8 @@ class NodeRegistry:
                 node.update_reason = meta["update_reason"]
             if meta["update_refs"] is not None:
                 node.update_refs = meta["update_refs"]
+            if meta["update_branch"]:
+                node.update_branch = meta["update_branch"]
             settings = dict(node.settings)
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
@@ -438,7 +460,8 @@ class NodeRegistry:
                 "report_interval": None, "agent_version": None,
                 "hostname": None, "os": None, "container": None,
                 "update_capable": None, "update_available": None,
-                "update_reason": None, "update_refs": None, "remote_version": None,
+                "update_reason": None, "update_refs": None, "update_branch": None,
+                "remote_version": None, "remote_branch": getattr(self, "_remote_branch", "main"),
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -452,17 +475,23 @@ class NodeRegistry:
         out.sort(key=lambda n: str(n["name"]))
         return out
 
-    def refresh_remote_version(self) -> None:
-        """Fetch REMOTE_VERSION_URL if it has been more than
-        REMOTE_VERSION_REFRESH_S since the last attempt. Blocking (a plain
-        urllib GET) -- callers off the event loop thread (main.py runs this
-        via run_in_executor). Never raises."""
+    def refresh_remote_version(self, branch: str = "main") -> None:
+        """Fetch the branch's version.json if it has been more than
+        REMOTE_VERSION_REFRESH_S since the last attempt, or at once when the
+        configured branch changed (the old value describes another line and
+        would mislabel every node until the window elapsed). Blocking (a
+        plain urllib GET) -- callers off the event loop thread (main.py runs
+        this via run_in_executor). Never raises."""
         now = time.monotonic()
-        if now - self._remote_version_checked < REMOTE_VERSION_REFRESH_S:
+        changed = branch != getattr(self, "_remote_branch", None)
+        if not changed and now - self._remote_version_checked < REMOTE_VERSION_REFRESH_S:
             return
         self._remote_version_checked = now
+        if changed:
+            self._remote_branch = branch
+            self._remote_version = None  # the other branch's number is not this one's
         try:
-            with urllib.request.urlopen(REMOTE_VERSION_URL, timeout=5) as response:
+            with urllib.request.urlopen(remote_version_url(branch), timeout=5) as response:
                 data = json.loads(response.read())
             self._remote_version = str(data["version"])
         except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
@@ -481,10 +510,17 @@ class NodeRegistry:
             "interval_fast": node.interval_fast,
             "agent_version": node.agent_version,
             "update_capable": node.update_capable,
-            "update_available": _is_newer(self._remote_version, node.agent_version),
+            # Behind the published version, or on another branch than the
+            # configured one: either way the configured line is not what
+            # this agent runs, and an update moves it there.
+            "update_available": _update_available(self._remote_version, node.agent_version,
+                                                  getattr(self, "_remote_branch", "main"),
+                                                  node.update_branch),
             "update_reason": node.update_reason,
             "update_refs": node.update_refs,
+            "update_branch": node.update_branch,
             "remote_version": self._remote_version,
+            "remote_branch": getattr(self, "_remote_branch", "main"),
             # Clamped: these travel in every node list and every SSE snapshot
             # frame, so a 2 MB "hostname" would be amplified to every viewer.
             "hostname": _short(system.get("hostname")),
