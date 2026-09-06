@@ -1,5 +1,5 @@
 /**
- * Entry point: routing, the top bar, sidebar vitals, and boot.
+ * Entry point: routing, the top bar, the sidebar footer, and boot.
  *
  * Views are created lazily and kept alive once created, so switching back to a
  * view is instant and its charts keep their history. Only the active view is
@@ -8,7 +8,7 @@
  * anything while you look at one of them.
  */
 
-import { $, $$, patchAttr, patchClass, patchStyle, patchText, show } from "./util/dom.js";
+import { $, $$, patchAttr, patchClass, patchText, show } from "./util/dom.js";
 import * as fmt from "./util/format.js";
 import { redrawAll } from "./charts.js";
 import { api, store } from "./stream.js";
@@ -162,10 +162,6 @@ function updateNodeStale(state) {
 /* ══ Top bar and sidebar ═══════════════════════════════════════════════ */
 function updateChrome(state) {
   const system = state.system || {};
-  const cpu = state.cpu || {};
-  const memory = state.memory || {};
-  const gpu = state.gpu || {};
-  const disk = (state.disk || {}).total || {};
   const diagnosis = state.diagnosis || {};
 
   patchText(bind.hostname, store.node ? (system.hostname || "?") : "no agent selected");
@@ -178,20 +174,6 @@ function updateChrome(state) {
   patchText(bind["health-text"], statusText);
   patchAttr(bind["health-dot"], "data-severity", severity);
 
-  setVital("cpu", cpu.total, fmt.pct(cpu.total), 80, 92);
-  setVital("mem", memory.percent, fmt.pct(memory.percent), 82, 92);
-  setVital("gpu", gpu.available === false ? null : gpu.total,
-    gpu.available === false ? "n/a" : fmt.pct(gpu.total), 80, 93);
-  setVital("disk", disk.busy_percent, fmt.pct(disk.busy_percent), 85, 96);
-}
-
-function setVital(key, value, text, warn, crit) {
-  patchText(bind[`mini-${key}`], text);
-  const bar = bind[`mini-${key}-bar`];
-  if (!bar) return;
-  patchStyle(bar, "width", `${fmt.isNum(value) ? Math.min(100, value) : 0}%`);
-  const hot = fmt.band(value, warn, crit);
-  patchAttr(bar, "data-hot", hot === "ok" || hot === "none" ? null : hot);
 }
 
 function updateBadges(state) {
@@ -375,7 +357,7 @@ function boot() {
   }
   store.on(["snapshot", "node_meta", "node"], reflectInterval);
 
-  store.on(["cpu", "memory", "gpu", "disk", "system", "diagnosis"], (state) => updateChrome(state));
+  store.on(["system", "diagnosis"], (state) => updateChrome(state));
   store.on(["diagnosis", "outage", "process_table", "services", "ports", "events", "sync", "volumes", "nodes"],
     (state) => updateBadges(state));
 

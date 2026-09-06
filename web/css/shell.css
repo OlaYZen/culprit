@@ -227,28 +227,14 @@
 .nav__badge[data-severity="warn"] { background: var(--warn-bg); color: var(--warn); }
 .nav__badge[data-severity="info"] { background: var(--info-bg); color: var(--info); }
 
-/* Always-visible vitals under the nav. */
-.sidebar__vitals {
+/* The footer under the nav: what this tool costs, and which build it is. */
+.sidebar__foot {
   padding: 10px 16px 12px;
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.vital { display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 8px; font-size: var(--fs-xs); }
-.vital__name { color: var(--fg-3); }
-.vital__val { color: var(--fg); font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
-.vital__bar { height: 2px; background: var(--line-2); overflow: hidden; }
-.vital__bar > i {
-  display: block; height: 100%; width: 0;
-  transition: width 240ms var(--ease), background var(--t) var(--ease);
-}
-.vital[data-key="cpu"]  .vital__bar > i { background: var(--m-cpu); }
-.vital[data-key="mem"]  .vital__bar > i { background: var(--m-mem); }
-.vital[data-key="gpu"]  .vital__bar > i { background: var(--m-gpu); }
-.vital[data-key="disk"] .vital__bar > i { background: var(--m-disk); }
-.vital__bar > i[data-hot="warn"] { background: var(--warn) !important; }
-.vital__bar > i[data-hot="crit"] { background: var(--crit) !important; }
 .sidebar__cost,
 .sidebar__version {
   font-size: 10.5px;

@@ -197,29 +197,9 @@
       </div>
     </nav>
 
-    <!-- Compact always-visible vitals, so switching views never loses sight
-         of the machine's state. -->
-    <div class="sidebar__vitals" id="sidebar-vitals">
-      <div class="vital" data-key="cpu">
-        <span class="vital__name">CPU</span>
-        <span class="vital__bar"><i data-bind="mini-cpu-bar"></i></span>
-        <span class="vital__val" data-bind="mini-cpu">—</span>
-      </div>
-      <div class="vital" data-key="mem">
-        <span class="vital__name">RAM</span>
-        <span class="vital__bar"><i data-bind="mini-mem-bar"></i></span>
-        <span class="vital__val" data-bind="mini-mem">—</span>
-      </div>
-      <div class="vital" data-key="gpu">
-        <span class="vital__name">GPU</span>
-        <span class="vital__bar"><i data-bind="mini-gpu-bar"></i></span>
-        <span class="vital__val" data-bind="mini-gpu">—</span>
-      </div>
-      <div class="vital" data-key="disk">
-        <span class="vital__name">Disk</span>
-        <span class="vital__bar"><i data-bind="mini-disk-bar"></i></span>
-        <span class="vital__val" data-bind="mini-disk">—</span>
-      </div>
+    <!-- What this tool costs and which build it is: the machine's own numbers
+         live in the views, not here. -->
+    <div class="sidebar__foot" id="sidebar-foot">
       <div class="sidebar__cost" data-bind="overhead" title="What this tool costs to run"></div>
       <div class="sidebar__version" data-bind="version" title="Version of this Culprit host (version.json)"></div>
     </div>
