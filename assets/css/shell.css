@@ -249,12 +249,14 @@
 .vital[data-key="disk"] .vital__bar > i { background: var(--m-disk); }
 .vital__bar > i[data-hot="warn"] { background: var(--warn) !important; }
 .vital__bar > i[data-hot="crit"] { background: var(--crit) !important; }
-.sidebar__cost {
-  margin-top: 4px;
+.sidebar__cost,
+.sidebar__version {
   font-size: 10.5px;
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
+.sidebar__cost { margin-top: 4px; }
+.sidebar__version:empty { display: none; }
 
 /* ── Main pane ─────────────────────────────────────────────────────────── */
 .main { position: relative; overflow-y: auto; overflow-x: hidden; }

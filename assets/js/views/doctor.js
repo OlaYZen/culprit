@@ -17,7 +17,7 @@ import {
   checkbox, emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
   skeletonStatus,
 } from "../ui.js";
-import { changeList, containerPill, culpritRow, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { canOperate, changeList, containerPill, culpritRow, freeDeletedFile, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -85,11 +85,13 @@ export function createDoctor() {
       const canvas = el("canvas");
       const pctNode = el("div.gauge__pct", { text: "—" });
       const verdictNode = el("div", { style: { fontSize: "var(--fs-s)", fontWeight: "600", marginTop: "2px" } });
+      const trendNode = key === "memory" ? el("div.small", { style: { marginTop: "6px", lineHeight: "1.5" } }) : null;
       const body = el("div.row", { style: { alignItems: "flex-start", flexWrap: "nowrap", gap: "14px" } }, [
         el("div.gauge", {}, [el("div.gauge__ring", {}, [canvas, pctNode])]),
         el("div", { style: { minWidth: 0 } }, [
           verdictNode,
           el("div.faint.small", { style: { lineHeight: "1.5", marginTop: "3px" }, text: PRESSURE_EXPLAIN[key] }),
+          trendNode,
         ]),
       ]);
       grid.append(section({
@@ -97,6 +99,7 @@ export function createDoctor() {
         body,
       }));
       nodes.gauges[key] = { canvas, pctNode, verdictNode };
+      if (trendNode) nodes.memTrend = trendNode;
     }
     content.append(grid);
 
@@ -176,6 +179,7 @@ export function createDoctor() {
         value >= 90 ? "tone-crit" : value >= 70 ? "tone-warn" : value >= 40 ? "tone-info" : "tone-ok");
     }
 
+    renderMemoryTrend(diagnosis.memory_forecast);
     refreshSuggestions();
     const findings = diagnosis.findings || [];
     const expected = findings.filter((f) => f.expected).length;
@@ -209,6 +213,46 @@ export function createDoctor() {
       const tone = value >= 90 ? "crit" : value >= 60 ? "warn" : "ok";
       return gaugeRow(label, value, `${Math.round(value)}%`, tone);
     }));
+  }
+
+  /** Under the memory gauge: where MemAvailable is heading over the last
+   *  hour, and who is taking it. Pressure says how it feels now; this says
+   *  what happens next. */
+  function renderMemoryTrend(forecast) {
+    const node = nodes.memTrend;
+    if (!node) return;
+    if (!forecast) { render(node, []); return; }
+    if (forecast.available === false) {
+      render(node, [el("span.faint", { text: `Trend: ${forecast.reason || "not available"}` })]);
+      return;
+    }
+    const perHour = Number(forecast.bytes_per_hour || 0);
+    const mins = Math.round((forecast.window_seconds || 0) / 60);
+    if (forecast.trend === "stable") {
+      render(node, [el("span.faint", { text: `Trend: available memory stable over the last ${mins} min.` })]);
+      return;
+    }
+    if (forecast.trend === "growing") {
+      render(node, [el("span.faint", { text: `Trend: available memory growing by ${fmt.bytes(perHour)}/h over the last ${mins} min.` })]);
+      return;
+    }
+    const hours = fmt.isNum(forecast.seconds_to_exhaust) ? forecast.seconds_to_exhaust / 3600 : null;
+    const eta = hours === null ? "" : hours < 1 ? `${Math.round(hours * 60)} min` : hours < 48 ? `${hours.toFixed(1)} h` : `${(hours / 24).toFixed(1)} days`;
+    const tone = hours !== null && hours <= 0.5 ? "crit" : hours !== null && hours <= 2 ? "warn" : hours !== null && hours <= 4 ? "info" : null;
+    const rough = forecast.r2 < 0.9 ? " (uneven — rough)" : "";
+    const top = (forecast.growers || [])[0];
+    const parts = [
+      el("span.faint", { text: "Trend: " }),
+      el("span", { class: tone ? `tone-${tone}` : "", text: `shrinking ${fmt.bytes(-perHour)}/h` }),
+      eta ? el("span.faint", { text: ` · gone in about ${eta}${rough}` }) : null,
+    ];
+    if (top) {
+      const open = el("button.linkbtn", { type: "button", title: "Open the process" }, [`${fmt.imageName(top.name)} #${top.pid}`]);
+      open.addEventListener("click", () => openProcessModal(top.pid));
+      parts.push(el("span.faint", { text: " · grower: " }), open,
+        el("span.faint", { text: ` +${fmt.bytes(top.growth_bytes)}${fmt.isNum(top.share_of_loss) ? ` (${Math.round(top.share_of_loss * 100)}% of the loss)` : ""}` }));
+    }
+    render(node, parts.filter(Boolean));
   }
 
   async function refreshSuggestions() {
@@ -315,10 +359,12 @@ export function createDoctor() {
     if (finding.expected) {
       meta.append(pill(`expected · ${finding.expected.reason}`, "ok"));
       meta.lastChild.title = `Marked as expected (${finding.expected.window}). Real severity: ${finding.severity_raw || "?"}.`;
-      const unmark = el("button.btn.btn--sm.finding__actions", { type: "button", title: "Stop treating this as expected" }, ["Unmark"]);
-      unmark.addEventListener("click", () => removeExpectation(finding.expected.id, unmark));
-      meta.append(unmark);
-    } else {
+      if (canOperate()) {
+        const unmark = el("button.btn.btn--sm.finding__actions", { type: "button", title: "Stop treating this as expected" }, ["Unmark"]);
+        unmark.addEventListener("click", () => removeExpectation(finding.expected.id, unmark));
+        meta.append(unmark);
+      }
+    } else if (canOperate()) {
       const mark = el("button.btn.btn--sm.finding__actions", { type: "button",
         title: "Say this is normal — here is why, and when" }, ["Mark as expected…"]);
       mark.addEventListener("click", () => openExpectDialog(finding));
@@ -365,6 +411,43 @@ export function createDoctor() {
       if (unit.manager === "user") row.append(document.createTextNode(" "), pill("user manager"));
       node.append(row);
     }
+    const heldFiles = finding.held || [];
+    if (heldFiles.length) {
+      // Space a deleted-but-open file still holds: name it, and offer to
+      // free it through the holder's descriptor (no restart, no signal).
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", { text: "Space held by deleted files still open" }));
+      heldFiles.forEach((h) => {
+        const row = el("div.row", { style: { gap: "8px", alignItems: "center", padding: "3px 0", flexWrap: "wrap" } }, [
+          el("b.small", { text: fmt.bytes(h.size) }),
+          el("span.mono.small.trunc", { text: h.path, title: h.path, style: { minWidth: 0, maxWidth: "40ch" } }),
+          el("span.faint.small", { text: `held by ${fmt.imageName(h.name)} #${h.pid}` }),
+        ]);
+        if (canOperate()) {
+          const free = el("button.btn.btn--sm", { type: "button", title: "Truncate through /proc/<pid>/fd — frees the space without restarting the process" }, ["Free it…"]);
+          free.addEventListener("click", () => freeDeletedFile(h));
+          row.append(free);
+        }
+        group.append(row);
+      });
+      node.append(group);
+    }
+    const newcomers = finding.newcomers || [];
+    if (newcomers.length) {
+      // Too young to fit a slope, but holding a real share of memory: where
+      // the memory went, said as a fact, not ranked as a grower.
+      const group = el("div.finding__culprits");
+      group.append(el("span.label", { text: "Appeared within the window, holding memory" }));
+      group.append(el("div.pills", {}, newcomers.map((n) => {
+        const chip = el("button.copybtn", { type: "button", title: "Open the process" });
+        chip.append(document.createTextNode(`${fmt.imageName(n.name)} #${n.pid} · ${fmt.bytes(n.working_set)} · ${fmt.shortDuration(n.elapsed_seconds || 0)} old`));
+        const where = containerPill(n.container);
+        if (where) chip.append(where);
+        chip.addEventListener("click", () => openProcessModal(n.pid));
+        return chip;
+      })));
+      node.append(group);
+    }
     const victims = finding.next_victims || [];
     if (victims.length) {
       const group = el("div.finding__culprits");
@@ -389,7 +472,7 @@ export function createDoctor() {
       node.append(group);
     }
     const suggestion = suggestionFor(finding);
-    if (suggestion) {
+    if (suggestion && canOperate()) {
       // The host noticed this recurs at the same hour on several days; a
       // person still decides, with the dialog pre-filled from the record.
       const mark = el("button.btn.btn--sm", { type: "button" }, ["Mark as expected…"]);
@@ -416,7 +499,11 @@ export function createDoctor() {
       const group = el("div.finding__culprits");
       group.append(el("span.label", { text: finding.victims
         ? "Processes stuck waiting (victims, not culprits)"
-        : `Leading contributors by ${finding.resource}` }));
+        : finding.growers
+          ? "Processes that grew over the window (by growth rate, not size)"
+          : finding.mount
+            ? "Writing there now (by write rate, with the file)"
+            : `Leading contributors by ${finding.resource}` }));
       culprits.forEach((culprit, index) => group.append(culpritRow(culprit, index)));
       node.append(group);
     }

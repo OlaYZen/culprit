@@ -9,17 +9,24 @@
  * its context.
  */
 
-import { el, render } from "../util/dom.js";
+import { el, patchAttr, patchText, render, show } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
   confirmAction, emptyState, inlineResult, note, pendingSlot, readySlot, setBusy, skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
 
 export function createNodes() {
   const root = el("div.view", { dataset: { view: "nodes" } });
   let built = false;
+  // Rows are reconciled by node name, not rebuilt every poll: replacing the
+  // tbody each tick (the "Last report" column changes every few seconds)
+  // recreated every button, which discarded hover state and closed any
+  // tooltip the moment it opened. Only what actually changed is patched.
+  const rowsByName = new Map();
+  let tableSection = null;
+  let tbody = null;
 
   const head = viewHead({
     title: "Nodes",
@@ -37,6 +44,13 @@ export function createNodes() {
   let loaded = false;
 
   function buildEnroll() {
+    if (!canAdminister()) {
+      render(enrollSlot, section({
+        title: "Enroll a new agent",
+        body: emptyState("Admin access required", "Only an admin can enroll agents or manage their tokens."),
+      }));
+      return;
+    }
     const input = el("input", {
       type: "text", placeholder: "node name, e.g. web-01", autocomplete: "off", spellcheck: "false",
       "aria-label": "New node name",
@@ -121,6 +135,7 @@ export function createNodes() {
     ]));
 
     if (!list.length) {
+      tableSection = null; tbody = null; rowsByName.clear();
       readySlot(tableSlot, section({
         title: "Agents",
         body: emptyState("No agents enrolled", "Generate a token above and run the deploy command on any server you want to watch."),
@@ -128,20 +143,82 @@ export function createNodes() {
       return;
     }
 
-    const table = el("table.tbl");
-    table.innerHTML = `<thead><tr><th>Node</th><th>Status</th><th>Host</th><th>Agent</th><th>Last report</th><th>From</th><th class="r">Actions</th></tr></thead>`;
-    const tbody = el("tbody");
-    for (const node of list) {
-      const revoked = node.enabled === false;
-      const status = revoked ? pill("revoked", "crit") : node.online ? pill("online", "ok") : pill("offline", "warn");
-      const isDocker = node.container === "docker" || node.container === "containerd";
-      const actions = el("div.actions");
+    if (!tableSection) {
+      const table = el("table.tbl");
+      table.innerHTML = `<thead><tr><th>Node</th><th>Status</th><th>Host</th><th>Agent</th><th>Last report</th><th>From</th><th class="r">Actions</th></tr></thead>`;
+      tbody = el("tbody");
+      table.append(tbody);
+      tableSection = section({
+        title: "Agents", meta: "",
+        body: el("div.tblwrap", {}, [table]),
+        foot: "Revoking rejects reports instantly but leaves the remote process running; rotating a token re-enables "
+            + "a revoked node. Tokens are hashed at rest — none of them can be read back, only replaced.",
+      });
+      readySlot(tableSlot, tableSection);
+    }
+    patchText(tableSection.metaNode, `${list.length} enrolled`);
+    reconcileRows(list);
+  }
 
-      const rotate = el("button.btn.btn--sm", {
-        type: "button",
-        title: revoked ? "Issue a new token and re-enable this node" : "Issue a new token (the current one stops working immediately)",
-      }, [revoked ? "Re-enable" : "New token"]);
-      rotate.addEventListener("click", () => confirmAction({
+  function reconcileRows(list) {
+    const seen = new Set();
+    let previous = null;
+    for (const node of list) {
+      seen.add(node.name);
+      let entry = rowsByName.get(node.name);
+      if (!entry) {
+        entry = createRow();
+        rowsByName.set(node.name, entry);
+      }
+      updateRow(entry, node);
+      const expected = previous ? previous.nextElementSibling : tbody.firstElementChild;
+      if (expected !== entry.tr) {
+        if (previous) previous.after(entry.tr);
+        else tbody.prepend(entry.tr);
+      }
+      previous = entry.tr;
+    }
+    for (const [name, entry] of rowsByName) {
+      if (!seen.has(name)) { entry.tr.remove(); rowsByName.delete(name); }
+    }
+  }
+
+  /** Skeleton built once per node; updateRow() patches it in place from then
+   * on. Click handlers read `entry.node`, refreshed by updateRow() on every
+   * poll, never a value captured when the row was first created. */
+  function createRow() {
+    const nameLabel = el("span.strong");
+    const dockerBadge = el("span");
+    const statusCell = el("td");
+    const hostCell = el("td.faint");
+    const versionText = el("span.mono.faint");
+    const versionBadge = el("span");
+    const lastCell = el("td");
+    const addrCell = el("td.mono.faint");
+
+    const rotate = el("button.btn.btn--sm", { type: "button" }, [""]);
+    const update = el("button.btn.btn--sm", { type: "button" }, ["Update"]);
+    const revoke = el("button.btn.btn--sm", { type: "button", title: "Reject this node's reports immediately" }, ["Revoke"]);
+    const remove = el("button.btn.btn--danger.btn--sm", { type: "button", title: "Remove this node from the list entirely" }, ["Delete"]);
+
+    const entry = {
+      tr: el("tr", {}, [
+        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [nameLabel, dockerBadge])]),
+        statusCell,
+        hostCell,
+        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [versionText, versionBadge])]),
+        lastCell,
+        addrCell,
+        el("td", {}, [el("div.actions", {}, [rotate, update, revoke, remove])]),
+      ]),
+      nameLabel, dockerBadge, statusCell, hostCell, versionText, versionBadge, lastCell, addrCell,
+      rotate, update, revoke, remove, node: null, flags: {},
+    };
+
+    rotate.addEventListener("click", () => {
+      const node = entry.node;
+      const revoked = node.enabled === false;
+      confirmAction({
         title: `${revoked ? "Re-enable" : "Rotate the token for"} ${node.name}?`,
         message: revoked
           ? `This issues a fresh token and starts accepting ${node.name}'s reports again.`
@@ -153,26 +230,45 @@ export function createNodes() {
           showToken(payload, revoked ? "re-enabled — new token" : "token rotated");
           return `New token issued for ${node.name}.`;
         },
-      }));
-      actions.append(rotate);
+      });
+    });
 
-      if (!revoked) {
-        const revoke = el("button.btn.btn--sm", { type: "button", title: "Reject this node's reports immediately" }, ["Revoke"]);
-        revoke.addEventListener("click", () => confirmAction({
-          title: `Revoke ${node.name}?`,
-          message: `Reports from ${node.name} are rejected the moment you confirm.`,
-          detail: "The agent process keeps running on that server and will retry with 401s until you stop it or re-enable the node here. Stored history is kept.",
-          confirmLabel: "Revoke",
-          onConfirm: async () => {
-            await api(`/api/agents/${encodeURIComponent(node.name)}/revoke`, { method: "POST" });
-            return `${node.name} revoked.`;
-          },
-        }));
-        actions.append(revoke);
-      }
+    update.addEventListener("click", () => {
+      const node = entry.node;
+      confirmAction({
+        title: `Update ${node.name}?`,
+        message: node.update_available && node.remote_version
+          ? `Updates ${node.name} from v${node.agent_version} to v${node.remote_version} and restarts it.`
+          : `Pulls the latest commit from ${node.name}'s own git checkout and restarts it.`,
+        detail: "The agent is offline for the few seconds the restart takes. If a dependency reinstall fails, "
+            + "the checkout is rolled back automatically and the current process keeps running unchanged.",
+        confirmLabel: "Update", danger: false,
+        onConfirm: async () => {
+          const outcome = await api(`/api/nodes/${encodeURIComponent(node.name)}/update`, { method: "POST" });
+          return outcome && outcome.updated === false
+            ? `${node.name} was already up to date.`
+            : `${node.name} updated and restarting.`;
+        },
+      });
+    });
 
-      const remove = el("button.btn.btn--danger.btn--sm", { type: "button", title: "Remove this node from the list entirely" }, ["Delete"]);
-      remove.addEventListener("click", () => confirmAction({
+    revoke.addEventListener("click", () => {
+      const node = entry.node;
+      confirmAction({
+        title: `Revoke ${node.name}?`,
+        message: `Reports from ${node.name} are rejected the moment you confirm.`,
+        detail: "The agent process keeps running on that server and will retry with 401s until you stop it or re-enable the node here. Stored history is kept.",
+        confirmLabel: "Revoke",
+        onConfirm: async () => {
+          await api(`/api/agents/${encodeURIComponent(node.name)}/revoke`, { method: "POST" });
+          return `${node.name} revoked.`;
+        },
+      });
+    });
+
+    remove.addEventListener("click", () => {
+      const node = entry.node;
+      confirmAction({
         title: `Delete ${node.name}?`,
         message: `This removes ${node.name} and invalidates its token.`,
         detail: "Its stored history stays in the database (Trends can still chart it). Enrolling the same name later starts a fresh token.",
@@ -181,26 +277,64 @@ export function createNodes() {
           await api(`/api/agents/${encodeURIComponent(node.name)}`, { method: "DELETE" });
           return `${node.name} deleted.`;
         },
-      }));
-      actions.append(remove);
+      });
+    });
 
-      tbody.append(el("tr", {}, [
-        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [el("span.strong", { text: node.name }), isDocker ? pill("Docker", "info") : null])]),
-        el("td", {}, [status]),
-        el("td.faint", { text: node.hostname || fmt.dash }),
-        el("td.mono.faint", { text: node.agent_version ? `v${node.agent_version}` : fmt.dash }),
-        el("td", { text: node.last_seen ? fmt.ago(node.last_seen) : "never", title: node.last_seen ? fmt.dateTime(node.last_seen) : "" }),
-        el("td.mono.faint", { text: node.last_addr || fmt.dash }),
-        el("td", {}, [actions]),
-      ]));
+    return entry;
+  }
+
+  function updateRow(entry, node) {
+    entry.node = node;
+    const revoked = node.enabled === false;
+    const isDocker = node.container === "docker" || node.container === "containerd";
+    const capable = node.update_capable === true;
+    const available = node.update_available === true;
+
+    patchText(entry.nameLabel, node.name);
+    if (entry.flags.docker !== isDocker) {
+      entry.flags.docker = isDocker;
+      entry.dockerBadge.replaceChildren(isDocker ? pill("Docker", "info") : "");
     }
-    table.append(tbody);
-    readySlot(tableSlot, section({
-      title: "Agents", meta: `${list.length} enrolled`,
-      body: el("div.tblwrap", {}, [table]),
-      foot: "Revoking rejects reports instantly but leaves the remote process running; rotating a token re-enables "
-          + "a revoked node. Tokens are hashed at rest — none of them can be read back, only replaced.",
-    }));
+
+    const statusKey = revoked ? "revoked" : node.online ? "online" : "offline";
+    if (entry.flags.status !== statusKey) {
+      entry.flags.status = statusKey;
+      entry.statusCell.replaceChildren(statusKey === "revoked" ? pill("revoked", "crit")
+        : statusKey === "online" ? pill("online", "ok") : pill("offline", "warn"));
+    }
+
+    patchText(entry.hostCell, node.hostname || fmt.dash);
+
+    patchText(entry.versionText, node.agent_version ? `v${node.agent_version}` : fmt.dash);
+    // Docker updates through the image, not this git-pull path — the badge
+    // would just be noise with no action behind it there.
+    const badgeVersion = available && !isDocker ? node.remote_version : null;
+    if (entry.flags.badge !== badgeVersion) {
+      entry.flags.badge = badgeVersion;
+      entry.versionBadge.replaceChildren(badgeVersion ? pill(`v${badgeVersion} available`, "info") : "");
+    }
+
+    patchText(entry.lastCell, node.last_seen ? fmt.ago(node.last_seen) : "never");
+    patchAttr(entry.lastCell, "title", node.last_seen ? fmt.dateTime(node.last_seen) : null);
+
+    patchText(entry.addrCell, node.last_addr || fmt.dash);
+
+    patchText(entry.rotate, revoked ? "Re-enable" : "New token");
+    patchAttr(entry.rotate, "title", revoked
+      ? "Issue a new token and re-enable this node"
+      : "Issue a new token (the current one stops working immediately)");
+
+    show(entry.rotate, canAdminister());
+    show(entry.remove, canAdminister());
+    show(entry.update, !revoked && canOperate());
+    show(entry.revoke, !revoked && canAdminister());
+    entry.update.disabled = !(capable && available);
+    let updateTitle;
+    if (!capable) updateTitle = node.update_reason || "update capability not yet reported";
+    else if (node.update_available === false) updateTitle = "already up to date";
+    else if (available) updateTitle = "git-pull the agent's latest commit, reinstall dependencies if they changed, and restart it";
+    else updateTitle = "update availability not yet known";
+    patchAttr(entry.update, "title", updateTitle);
   }
 
   function buildHelp() {
@@ -212,6 +346,7 @@ export function createNodes() {
         kv("Auth", "per-node bearer token, SHA-256-hashed at rest, constant-time checked, revocable here"),
         kv("Transport", "use https:// in the deploy command when crossing an untrusted network (self-signed: add --insecure)"),
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
+        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings"),
       ], { wide: true }),
     }));
   }

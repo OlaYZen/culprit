@@ -12,7 +12,7 @@ import * as fmt from "../util/format.js";
 import { createChart } from "../charts.js";
 import { store, api } from "../stream.js";
 import { emptyState, note, pendingSlot, readySlot, skeletonFigures, skeletonSection } from "../ui.js";
-import { containerPill, figures, kv, kvs, legend, meter, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { canOperate, containerPill, figures, freeDeletedFile, kv, kvs, legend, meter, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 export function createStorage() {
   const root = el("div.view", { dataset: { view: "storage" } });
@@ -180,10 +180,11 @@ export function createStorage() {
             : null,
         ]));
       }
-      const foot = payload.writers_note
-        ? payload.writers_note
-        : "Growth is a least-squares slope over the last hour of samples; writers are the processes with open files under "
-          + "the mount and a non-zero write rate. Deleted-but-open files keep their space until the holder closes them.";
+      const foot = (payload.writers_note ? `${payload.writers_note} ` : "")
+        + "Growth is a least-squares slope over the last hour of samples; writers are the processes with open files under "
+        + "the mount and a non-zero write rate. A file's own rate is "
+        + (payload.files_method || "its descriptor's offset between samples")
+        + " — a file with none listed may be written through mmap. Deleted-but-open files keep their space until the holder closes them.";
       readySlot(volumeSlot, section({ title: "Volumes", meta: `${volumes.length} mounted`, body: grid, foot }));
     }
 
@@ -240,16 +241,17 @@ export function createStorage() {
     ]);
   }
 
-  /** Who is writing here now, and which deleted files still hold space. */
+  /** Who is writing here now, which files, and which deleted files still hold space. */
   function writersBlock(volume) {
     const writers = volume.writers || [];
+    const files = volume.files || [];
     const held = volume.held_deleted || [];
-    if (!writers.length && !held.length) return null;
+    if (!writers.length && !held.length && !files.length) return null;
     const wrap = el("div", { style: { marginTop: "6px" } });
     if (writers.length) {
       wrap.append(el("div.pills", {}, writers.slice(0, 4).map((w) => {
         const chip = el("button.copybtn", { type: "button",
-          title: (w.paths || []).map((p) => `${p.path}${p.deleted ? " (deleted)" : ""}`).join("\n") || (w.by_cwd ? "attributed by working directory only" : "") });
+          title: (w.paths || []).map((p) => `${p.path}${p.deleted ? " (deleted)" : ""}${fmt.isNum(p.rate_bytes_sec) ? ` · ${fmt.rate(p.rate_bytes_sec)}` : ""}`).join("\n") || (w.by_cwd ? "attributed by working directory only" : "") });
         chip.append(document.createTextNode(`${fmt.imageName(w.name)} · ${fmt.rate(w.write_bytes_sec)}${w.by_cwd ? " (cwd)" : ""}`));
         const where = containerPill(w.container);
         if (where) chip.append(where);
@@ -257,12 +259,32 @@ export function createStorage() {
         return chip;
       })));
     }
+    // The files themselves: the name, not just the process, with how fast
+    // each descriptor's offset is advancing.
+    for (const f of files.slice(0, 3)) {
+      const row = el("button.linkbtn.small", { type: "button", title: `${f.path} — written by ${fmt.imageName(f.name)} #${f.pid}; open the process`,
+        style: { display: "flex", gap: "6px", maxWidth: "100%", marginTop: "3px", textAlign: "left" } }, [
+        el("span.mono.trunc", { text: f.path, style: { minWidth: 0 } }),
+        f.deleted ? pill("deleted", "warn") : null,
+        el("span.faint", { text: `${fmt.rate(f.rate_bytes_sec)} · ${fmt.imageName(f.name)}`, style: { whiteSpace: "nowrap" } }),
+      ]);
+      row.addEventListener("click", () => openProcessModal(f.pid));
+      wrap.append(row);
+    }
     for (const h of held.slice(0, 3)) {
-      wrap.append(el("div.small.tone-warn", { style: { marginTop: "4px" } }, [
+      const line = el("div.small.tone-warn", { style: { marginTop: "4px", display: "flex", gap: "6px", alignItems: "center", flexWrap: "wrap" } }, [
         el("b", { text: `${fmt.bytes(h.size)} held by a deleted file` }),
         el("span.faint", { text: ` still open by ${fmt.imageName(h.name)} #${h.pid}: `, title: h.path }),
         el("span.mono.trunc", { text: h.path, title: h.path, style: { maxWidth: "24ch", display: "inline-block", verticalAlign: "bottom" } }),
-      ]));
+      ]);
+      if (canOperate()) {
+        // Free it through the holder's descriptor; the agent refuses a file
+        // that has a name again, and the verdict says whether the space came back.
+        const free = el("button.btn.btn--sm", { type: "button", title: "Truncate the deleted file through /proc/<pid>/fd — frees the space without restarting the process" }, ["Free it…"]);
+        free.addEventListener("click", () => freeDeletedFile(h));
+        line.append(free);
+      }
+      wrap.append(line);
     }
     return wrap;
   }

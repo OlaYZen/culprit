@@ -41,8 +41,9 @@ export function createNetwork() {
   const figSlot = el("div");
   const topRow = el("div.cols.cols--2");
   const adapterSlot = el("div");
+  const usersSlot = el("div");
   const socketSlot = el("div");
-  root.append(el("div.stack", {}, [figSlot, topRow, adapterSlot, socketSlot]));
+  root.append(el("div.stack", {}, [figSlot, topRow, adapterSlot, usersSlot, socketSlot]));
 
   function build() {
     built = true;
@@ -199,9 +200,11 @@ export function createNetwork() {
     }
 
     if (sockets.available === false) {
+      readySlot(usersSlot, []);
       readySlot(socketSlot, section({ title: "Sockets", body: emptyState("Socket table not readable", sockets.reason) }));
       return;
     }
+    readySlot(usersSlot, networkUsers(sockets));
     const byState = sockets.by_state || {};
     const stateOptions = Object.entries(byState).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ value: name, label: name, count }));
     if (!nodes.socketCombo) {
@@ -256,4 +259,48 @@ export function createNetwork() {
     }),
   ];
   return root;
+}
+
+/**
+ * Who is using the network: each process's established connections summed,
+ * with what its own kernel measured for them. Byte rates come from two
+ * readings of the connections' counters (`ss -ti`), so the first slow tick
+ * shows dashes; without `ss` only the connection counts and queues are known,
+ * and the section says so rather than showing zeros.
+ */
+function networkUsers(sockets) {
+  const rows = (sockets.per_process || []).slice(0, 20);
+  const foot = sockets.tcp_info === false
+    ? `${sockets.tcp_info_reason || "Per-connection counters are not readable"}; only connection counts and queues are known here.`
+    : "Per connection, read passively from the kernel's own tcp_info: no probe is sent. Round trip is the slowest of the "
+      + "process's connections; a non-zero send queue means bytes the far side has not yet acknowledged.";
+  if (!rows.length) {
+    return section({ title: "Who is using the network", body: emptyState("No attributable connections",
+      sockets.unattributed ? `${sockets.unattributed} socket(s) belong to other users' processes and cannot be attributed at this privilege level.`
+        : "No process holds an established connection right now."), foot });
+  }
+  const table = el("table.tbl.tbl--tight");
+  table.innerHTML = `<thead><tr><th>Process</th><th class="r">Conns</th><th class="r">Peers</th><th class="r">Upload</th>
+    <th class="r">Download</th><th class="r">Round trip</th><th class="r">Retrans</th><th class="r">Send queue</th></tr></thead>`;
+  const tbody = el("tbody");
+  for (const p of rows) {
+    const tr = el("tr.is-link", {}, [
+      el("td", {}, [el("span", { text: fmt.imageName(p.name || `pid ${p.pid}`) }),
+        p.unit ? el("span.faint.small", { text: ` ${p.unit}` }) : null]),
+      el("td.n", { text: fmt.count(p.connections) }),
+      el("td.n", { text: fmt.count(p.peers) }),
+      el("td.n", { text: sockets.tcp_info === false ? fmt.dash : fmt.rate(p.send_bytes_sec) }),
+      el("td.n", { text: sockets.tcp_info === false ? fmt.dash : fmt.rate(p.recv_bytes_sec) }),
+      el("td.n", { text: fmt.isNum(p.rtt_ms) ? fmt.ms(p.rtt_ms) : fmt.dash }),
+      el("td.n", { text: sockets.tcp_info === false ? fmt.dash : fmt.count(p.retrans) }),
+      el("td.n", { class: `n${p.tx_queue ? " tone-warn" : ""}`, text: p.tx_queue ? fmt.bytes(p.tx_queue) : "0" }),
+    ]);
+    tr.addEventListener("click", () => openProcessModal(p.pid));
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  return section({
+    title: "Who is using the network", meta: `${rows.length} process${rows.length === 1 ? "" : "es"} with connections`,
+    body: el("div.tblwrap", {}, [table]), foot,
+  });
 }

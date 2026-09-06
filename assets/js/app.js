@@ -15,15 +15,19 @@ import { api, store } from "./stream.js";
 import { banner, combobox, dismissBanner, initModal, initScrollTop, wireCopy } from "./ui.js";
 import { createOverview } from "./views/overview.js";
 import { createDoctor } from "./views/doctor.js";
+import { createOutage } from "./views/outage.js";
 import { createProcesses } from "./views/processes.js";
 import { createServices } from "./views/services.js";
 import { createStorage } from "./views/storage.js";
 import { createNetwork } from "./views/network.js";
 import { createPorts } from "./views/ports.js";
+import { createMap } from "./views/map.js";
 import { createEvents } from "./views/events.js";
+import { createCoroner } from "./views/coroner.js";
 import { createSessions } from "./views/sessions.js";
 import { createSync } from "./views/sync.js";
 import { createTrends } from "./views/trends.js";
+import { createCompare } from "./views/compare.js";
 import { createNodes } from "./views/nodes.js";
 import { createSettings } from "./views/settings.js";
 import { initMobile } from "./mobile.js";
@@ -31,24 +35,28 @@ import { initMobile } from "./mobile.js";
 const FACTORIES = {
   overview: createOverview,
   doctor: createDoctor,
+  outage: createOutage,
   processes: createProcesses,
   services: createServices,
   storage: createStorage,
   network: createNetwork,
   ports: createPorts,
+  map: createMap,
   events: createEvents,
+  coroner: createCoroner,
   sessions: createSessions,
   sync: createSync,
   trends: createTrends,
+  compare: createCompare,
   nodes: createNodes,
   settings: createSettings,
 };
 
 const TITLES = {
-  overview: "Overview", doctor: "Lag Doctor", processes: "Processes",
+  overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
-  ports: "Ports", events: "Events", sessions: "Sessions", sync: "Sync",
-  trends: "Trends", nodes: "Nodes", settings: "Settings",
+  ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
+  trends: "Trends", compare: "Compare", nodes: "Nodes", settings: "Settings",
 };
 
 const views = new Map();
@@ -193,6 +201,11 @@ function updateBadges(state) {
   setBadge("badge-doctor", findings.length || null,
     worst === "critical" ? null : worst === "warn" ? "warn" : "info");
 
+  const outage = state.outage || {};
+  const brokenItems = (outage.items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
+  setBadge("badge-outage", brokenItems.length || null,
+    brokenItems.some((i) => i.severity === "critical") ? null : "warn");
+
   const processes = state.process_table || {};
   patchText(bind["badge-processes"], processes.totals?.count ? String(processes.totals.count) : "");
 
@@ -223,6 +236,24 @@ function setBadge(name, value, severity) {
   node.hidden = false;
   patchText(node, String(value));
   patchAttr(node, "data-severity", severity);
+}
+
+/** The Coroner's badge: deaths of the selected node in the last week. A
+ *  death is rare and the list is host-side, so this is a slow poll, not a
+ *  stream. */
+let coronerBadgeNode = null;
+async function updateCoronerBadge() {
+  if (!store.node) { setBadge("badge-coroner", null, null); return; }
+  const node = store.node;
+  try {
+    const since = Date.now() / 1000 - 7 * 86400;
+    const payload = await api(`/api/deaths?node=${encodeURIComponent(node)}&since=${since}&limit=20`);
+    if (store.node !== node) return;
+    coronerBadgeNode = node;
+    const deaths = payload.deaths || [];
+    const worst = deaths.some((d) => d.severity === "critical") ? null : deaths.some((d) => d.severity === "warn") ? "warn" : "info";
+    setBadge("badge-coroner", deaths.length || null, worst);
+  } catch { /* the view itself reports errors */ }
 }
 
 function updateOverhead() {
@@ -276,6 +307,13 @@ function boot() {
     window.location.href = "/login";
   });
   store.on(["auth", "snapshot"], (state) => { if (logout) logout.hidden = !state.auth?.enabled; });
+  // The host's own version rides the config section, which every frame
+  // carries (even while a remote node is being viewed), so it is right
+  // after the first snapshot and stays right across a host upgrade.
+  store.on(["config", "snapshot"], (state) => {
+    const version = state.config?.version;
+    patchText(bind.version, version ? `Culprit v${version}` : "");
+  });
 
   for (const item of $$("[data-nav]")) {
     item.addEventListener("click", () => navigate(item.dataset.nav));
@@ -336,7 +374,7 @@ function boot() {
   store.on(["snapshot", "node_meta", "node"], reflectInterval);
 
   store.on(["cpu", "memory", "gpu", "disk", "system", "diagnosis"], (state) => updateChrome(state));
-  store.on(["diagnosis", "process_table", "services", "ports", "events", "sync", "volumes", "nodes"],
+  store.on(["diagnosis", "outage", "process_table", "services", "ports", "events", "sync", "volumes", "nodes"],
     (state) => updateBadges(state));
 
   store.on("connection", (state) => {
@@ -372,6 +410,8 @@ function boot() {
 
   updateOverhead();
   setInterval(updateOverhead, 10000);
+  store.on("node", () => { if (store.node !== coronerBadgeNode) updateCoronerBadge(); });
+  setInterval(updateCoronerBadge, 60000);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

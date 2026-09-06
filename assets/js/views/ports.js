@@ -26,6 +26,7 @@ import {
   confirmAction, emptyState, note, pendingSlot, readySlot, searchField, segmented, skeletonFigures, skeletonSection,
 } from "../ui.js";
 import { figures, meter, openProcessModal, pill, procBase, section, viewHead } from "./shared.js";
+import { loadPortNames, portDesc, portName } from "../portnames.js";
 
 export function createPorts() {
   const root = el("div.view", { dataset: { view: "ports" } });
@@ -35,7 +36,7 @@ export function createPorts() {
   let backlogInfo = {};
 
   const search = searchField({
-    placeholder: "Filter by port, process or unit…", label: "Filter ports",
+    placeholder: "Filter by port, name, process or unit…", label: "Filter ports",
     onInput: (value) => { view.query = value.trim().toLowerCase(); repaint(); },
   });
   const scopeSeg = segmented({
@@ -196,6 +197,7 @@ export function createPorts() {
     if (view.query) {
       const q = view.query;
       rows = rows.filter((p) => String(p.port).includes(q)
+        || String(portName(p.port, (p.protocols || []).includes("tcp") ? "tcp" : "udp") || "").includes(q)
         || (p.protocols || []).some((proto) => proto.includes(q))
         || (p.processes || []).some((proc) => String(proc.name || "").toLowerCase().includes(q)
           || String(proc.cmdline || "").toLowerCase().includes(q)
@@ -245,8 +247,15 @@ export function createPorts() {
       actionCell = el("span.faint.small", { text: shortReason(reason), title: reason });
     }
 
+    // The number's usual name (ports.json): a hint about the number, not a
+    // claim about the process, which is named in the Service column.
+    const proto = (entry.protocols || []).includes("tcp") ? "tcp" : "udp";
+    const known = portName(entry.port, proto);
     return el("tr", { dataset: primary ? { pid: String(primary.pid) } : {} }, [
-      el("td.n.strong", { text: String(entry.port) }),
+      el("td.n.strong", { title: known ? `${entry.port}: ${portDesc(entry.port, proto) || known}` : "" }, [
+        document.createTextNode(String(entry.port)),
+        known ? el("span.portname", { text: known }) : null,
+      ]),
       el("td.pills", {}, (entry.protocols || []).map((p) => pill(p.toUpperCase()))),
       el("td", {}, [pill(entry.scope === "public" ? "exposed" : "loopback", entry.scope === "public" ? "warn" : null)]),
       el("td.wide", { style: { maxWidth: "340px" } }, [serviceCell]),
@@ -258,7 +267,7 @@ export function createPorts() {
     ]);
   }
 
-  root.mount = () => { if (!built) build(); repaint(); };
+  root.mount = () => { if (!built) build(); repaint(); loadPortNames().then(() => { if (root.isActive) repaint(); }); };
   root.subscriptions = [store.on(["ports", "node"], () => { if (root.isActive) repaint(); })];
   return root;
 }

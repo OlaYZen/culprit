@@ -25,10 +25,10 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  checkbox, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection,
-  subnav, switchControl,
+  checkbox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures,
+  skeletonSection, subnav, switchControl,
 } from "../ui.js";
-import { figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
 
 const GROUPS = [
   {
@@ -100,10 +100,17 @@ const PAGES = [
   { key: "deployment", label: "Deployment", icon: icons.deploy },
   { key: "sampling", label: "Sampling", icon: icons.timer },
   { key: "account", label: "Account", icon: icons.user },
+  { key: "users", label: "Users", icon: icons.user },
   { key: "network", label: "Network", icon: icons.shield },
   { key: "notifications", label: "Notifications", icon: icons.bell },
   { key: "expected", label: "Expected findings", icon: icons.calendar },
 ];
+
+const ROLE_HINT = {
+  viewer: "Read-only: sees every dashboard and history view, no actions.",
+  operator: "Viewer, plus process actions (end task, priority, throttle), agent updates, and marking findings as expected.",
+  admin: "Operator, plus managing users, agents, and Settings.",
+};
 
 export function createSettings() {
   const root = el("div.view", { dataset: { view: "settings" } });
@@ -125,8 +132,10 @@ export function createSettings() {
   // not in the tuning form's summary on another page.
   const immediateResult = el("div.result");
   const accountSlot = el("div");
+  const usersSlot = el("div");
   const trustSlot = el("div");
   const deploySlot = el("div");
+  const autoUpdateSlot = el("div");
   const notifySlot = el("div");
   const expectSlot = el("div");
   const form = el("form", { novalidate: true });
@@ -144,9 +153,10 @@ export function createSettings() {
 
   const pages = {
     general: el("div.stack", {}, [figSlot, togglesSlot, infoRow]),
-    deployment: el("div.stack", {}, [deploySlot]),
+    deployment: el("div.stack", {}, [deploySlot, autoUpdateSlot]),
     sampling: el("div.stack", {}, [form]),
     account: el("div.stack", {}, [accountSlot]),
+    users: el("div.stack", {}, [usersSlot]),
     network: el("div.stack", {}, [trustSlot, nodesSlot]),
     notifications: el("div.stack", {}, [notifySlot]),
     expected: el("div.stack", {}, [expectSlot]),
@@ -169,8 +179,10 @@ export function createSettings() {
     pendingSlot(figSlot, skeletonFigures(6));
     pendingSlot(togglesSlot, skeletonSection("Immediate settings", 2));
     pendingSlot(accountSlot, skeletonSection("Account", 4));
+    pendingSlot(usersSlot, skeletonSection("Users", 4));
     pendingSlot(trustSlot, skeletonSection("Network trust", 5));
     pendingSlot(deploySlot, skeletonSection("Agent deployment", 4));
+    pendingSlot(autoUpdateSlot, skeletonSection("Automatic agent updates", 2));
     pendingSlot(notifySlot, skeletonSection("Notifications", 6));
     pendingSlot(expectSlot, skeletonSection("Expected findings", 3));
     if (!groupsSlot.childElementCount) {
@@ -189,8 +201,10 @@ export function createSettings() {
       renderForm();
       renderToggles();
       renderAccount();
+      renderUsers();
       renderTrust();
       renderDeploy();
+      renderAutoUpdate();
       renderNotify();
       renderExpectations();
       renderInfo();
@@ -199,7 +213,7 @@ export function createSettings() {
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, trustSlot, deploySlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
+      for (const slot of [figSlot, togglesSlot, accountSlot, usersSlot, trustSlot, deploySlot, autoUpdateSlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
       readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
@@ -318,6 +332,114 @@ export function createSettings() {
         ]),
       ]),
       foot: "Both changes require your current password. Renaming re-issues your session automatically — you stay signed in.",
+    }));
+  }
+
+  const ROLE_OPTIONS = [
+    { value: "viewer", label: "Viewer", title: ROLE_HINT.viewer },
+    { value: "operator", label: "Operator", title: ROLE_HINT.operator },
+    { value: "admin", label: "Admin", title: ROLE_HINT.admin },
+  ];
+
+  /** Manage *other* accounts. Admin-only, both here (the tab still renders
+   *  for every role, honestly, rather than vanishing) and on the server --
+   *  a hidden control here would only be convenience, never the real gate. */
+  async function renderUsers() {
+    if (!canAdminister()) {
+      readySlot(usersSlot, section({
+        title: "Users",
+        body: emptyState("Admin access required",
+          `Your account is ${store.state.auth?.role || "not signed in"} — only an admin can see or manage other users.`),
+      }));
+      return;
+    }
+    let list;
+    try {
+      const payload = await api("/api/users");
+      list = payload.users || [];
+    } catch (error) {
+      readySlot(usersSlot, section({ title: "Users", body: emptyState("Could not load", error.message) }));
+      return;
+    }
+    const me = store.state.auth?.username;
+
+    const nameInput = el("input", { type: "text", placeholder: "username", autocomplete: "off", spellcheck: "false", "aria-label": "New username" });
+    const pwInput = el("input", { type: "password", placeholder: "password (min 8)", autocomplete: "new-password", "aria-label": "New user's password" });
+    let newRole = "viewer";
+    const roleSeg = segmented({ label: "Role", options: ROLE_OPTIONS, value: newRole, onChange: (v) => { newRole = v; } });
+    const addResult = el("div.result");
+    const addBtn = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Add user"]);
+    addBtn.addEventListener("click", async () => {
+      const username = nameInput.value.trim();
+      if (!username) { inlineResult(addResult, "Give the user a name first.", "error"); return; }
+      if (pwInput.value.length < 8) { inlineResult(addResult, "Password must be at least 8 characters.", "error"); return; }
+      setBusy(addBtn, true, "Adding…");
+      try {
+        await api("/api/users", {
+          method: "POST",
+          body: JSON.stringify({ username, password: pwInput.value, role: newRole }),
+        });
+        nameInput.value = ""; pwInput.value = ""; newRole = "viewer"; roleSeg.setValue("viewer");
+        inlineResult(addResult, `User '${username}' created.`, "ok");
+        renderUsers();
+      } catch (error) {
+        inlineResult(addResult, error.message, "error");
+      }
+      setBusy(addBtn, false, "Add user");
+    });
+
+    const table = el("table.tbl.tbl--tight");
+    table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>";
+    const tbody = el("tbody");
+    for (const user of list) {
+      const isSelf = user.username === me;
+      const seg = segmented({
+        label: `Role for ${user.username}`, options: ROLE_OPTIONS, value: user.role,
+        onChange: async (role) => {
+          try {
+            await api(`/api/users/${encodeURIComponent(user.username)}/role`, {
+              method: "PUT", body: JSON.stringify({ role }),
+            });
+            if (isSelf) renderUsers(); // our own role changed -- re-render to reflect it everywhere
+          } catch (error) {
+            seg.setValue(user.role);
+            inlineResult(addResult, `Could not change '${user.username}': ${error.message}`, "error");
+          }
+        },
+      });
+      const remove = el("button.btn.btn--sm", {
+        type: "button", disabled: isSelf,
+        title: isSelf ? "Sign in as another admin to remove your own account" : "Remove this user",
+      }, ["Remove"]);
+      remove.addEventListener("click", () => {
+        confirmAction({
+          title: `Remove ${user.username}?`,
+          message: "This user immediately loses access; any open sessions of theirs stop working.",
+          confirmLabel: "Remove", danger: true,
+          onConfirm: async () => {
+            await api(`/api/users/${encodeURIComponent(user.username)}`, { method: "DELETE" });
+            renderUsers();
+            return `User '${user.username}' removed.`;
+          },
+        });
+      });
+      tbody.append(el("tr", {}, [
+        el("td", { text: user.username + (isSelf ? " (you)" : "") }),
+        el("td", {}, [seg]),
+        el("td.faint", { text: fmt.dateTime(user.created_at) }),
+        el("td.n", {}, [remove]),
+      ]));
+    }
+    table.append(tbody);
+
+    readySlot(usersSlot, section({
+      title: "Users", meta: `${list.length} account${list.length === 1 ? "" : "s"}`,
+      body: el("div.stack", {}, [
+        el("div.formrow", {}, [el("div.input", {}, [nameInput]), el("div.input", {}, [pwInput]), roleSeg, addBtn, addResult]),
+        el("div.tblwrap", {}, [table]),
+      ]),
+      foot: "A role change or removal takes effect on that account's next request. Culprit always keeps at least one admin, "
+          + "so the last one cannot be demoted or removed.",
     }));
   }
 
@@ -471,6 +593,55 @@ export function createSettings() {
     }));
   }
 
+  /* ── Automatic agent updates ─────────────────────────────────────── */
+  function renderAutoUpdate() {
+    let enabled = !!config.auto_update_enabled;
+    const hourInput = el("input", {
+      type: "number", id: "set-auto_update_hour", min: 0, max: 23, step: 1,
+      value: String(config.auto_update_hour ?? 3), "aria-label": "Hour to run automatic updates",
+    });
+    const error = el("div.field__err", { id: "err-auto_update_hour", hidden: true });
+    const result = el("div.result");
+    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save"]);
+
+    save.addEventListener("click", async () => {
+      setBusy(save, true, "Saving…");
+      error.hidden = true;
+      hourInput.removeAttribute("aria-invalid");
+      try {
+        const payload = await api("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify({ auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value) }),
+        });
+        config = payload.config;
+        inlineResult(result, "Saved.", "ok");
+      } catch (err) {
+        const message = err.payload?.field_errors?.auto_update_hour;
+        if (message) {
+          error.textContent = message;
+          error.hidden = false;
+          hourInput.setAttribute("aria-invalid", "true");
+          hourInput.focus();
+        }
+        inlineResult(result, message || err.message, "error");
+      }
+      setBusy(save, false, "Save");
+    });
+
+    readySlot(autoUpdateSlot, section({
+      title: "Automatic agent updates",
+      body: el("div", {}, [
+        checkbox({ label: "Automatically update capable agents once a day", checked: enabled,
+          onChange: (v) => { enabled = v; } }),
+        fieldRow({ id: hourInput.id, label: "At hour", unit: "0-23, this host's local time", input: hourInput, error }),
+        el("div.formrow", { style: { marginTop: "10px" } }, [save, result]),
+      ]),
+      foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
+          + "agents that have reported themselves update-capable and behind the version GitHub publishes. "
+          + "The agent is never told a schedule — only ever told to update now.",
+    }));
+  }
+
   /* ── Notifications ───────────────────────────────────────────────── */
   const NOTIFY_FIELDS = [
     ["notify_ntfy_url", "ntfy topic URL", "https://ntfy.sh/<topic>", "Plain-text push to a phone or desktop. Leave blank to switch this channel off."],
@@ -614,7 +785,7 @@ export function createSettings() {
           el("td", { text: row.reason }),
           el("td", { text: windowText(row) }),
           el("td.faint", { text: `${row.created_by || "?"} · ${fmt.ago(row.created_at)}` }),
-          el("td.n", {}, [remove]),
+          el("td.n", {}, [canOperate() ? remove : ""]),
         ]);
         remove.addEventListener("click", async () => {
           setBusy(remove, true, "Removing…");
@@ -656,6 +827,10 @@ export function createSettings() {
     wrap.append(el("div.subhead", { text: `Suggested for ${store.node}` }));
     if (!list.length) {
       wrap.append(el("div.faint.small", { text: "Nothing recurs at the same time of day on three or more days in the last two weeks." }));
+      return wrap;
+    }
+    if (!canOperate()) {
+      wrap.append(el("div.faint.small", { text: `${list.length} recurring finding${list.length === 1 ? "" : "s"} found — your account cannot mark them as expected.` }));
       return wrap;
     }
     for (const s of list) {
@@ -751,6 +926,7 @@ export function createSettings() {
       section({
         title: "About this tool",
         body: kvs([
+          kv("Version", config.version ? `v${config.version}` : fmt.dash, { mono: true }),
           kv("Configuration file", "config.json", { mono: true }),
           kv("History database", config.history_enabled ? "data/culprit.db" : "disabled", { mono: true }),
           kv("History error", config.history_error || "none", { tone: config.history_error ? "crit" : "ok" }),
@@ -855,7 +1031,7 @@ export function createSettings() {
   root.subscriptions = [
     store.on(["snapshot", "tick:fast"], () => { if (root.isActive) updateCost(); }),
     store.on("nodes", () => { if (root.isActive && config) renderNodes(); }),
-    store.on("auth", () => { if (root.isActive && config) renderAccount(); }),
+    store.on("auth", () => { if (root.isActive && config) { renderAccount(); renderUsers(); } }),
   ];
   return root;
 }
