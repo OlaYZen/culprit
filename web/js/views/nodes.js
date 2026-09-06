@@ -13,7 +13,8 @@ import { el, patchAttr, patchText, render, show } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  confirmAction, emptyState, inlineResult, note, pendingSlot, readySlot, setBusy, skeletonFigures, skeletonSection,
+  combobox, confirmAction, emptyState, inlineResult, note, openModal, pendingSlot, readySlot, setBusy,
+  skeletonFigures, skeletonSection,
 } from "../ui.js";
 import { canAdminister, canOperate, codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
 
@@ -123,7 +124,7 @@ export function createNodes() {
   // in the confirmation; the host decides for real.
   const CONTAINER_RUNTIMES = ["docker", "containerd", "podman", "cri-o"];
   const updateTargets = (list) => list.filter((n) => n.enabled !== false && n.online
-    && n.update_capable === true && n.update_available === true
+    && n.update_capable === true && n.update_available === true && !n.pinned_version
     && !CONTAINER_RUNTIMES.includes(n.container));
   const updateAll = el("button.btn.btn--sm", { type: "button" }, ["Update all"]);
   const countNode = el("span");
@@ -239,11 +240,15 @@ export function createNodes() {
     const hostCell = el("td.faint");
     const versionText = el("span.mono.faint");
     const versionBadge = el("span");
+
+    const pinBadge = el("span");
     const lastCell = el("td");
     const addrCell = el("td.mono.faint");
 
     const rotate = el("button.btn.btn--sm", { type: "button" }, [""]);
     const update = el("button.btn.btn--sm", { type: "button" }, ["Update"]);
+    const version = el("button.btn.btn--sm", { type: "button" }, ["Version…"]);
+    const unpin = el("button.btn.btn--sm", { type: "button", title: "Let the schedule and Update all move this agent again" }, ["Unpin"]);
     const revoke = el("button.btn.btn--sm", { type: "button", title: "Reject this node's reports immediately" }, ["Revoke"]);
     const remove = el("button.btn.btn--danger.btn--sm", { type: "button", title: "Remove this node from the list entirely" }, ["Delete"]);
 
@@ -252,13 +257,13 @@ export function createNodes() {
         el("td", {}, [el("div.row", { style: { gap: "6px" } }, [nameLabel, dockerBadge])]),
         statusCell,
         hostCell,
-        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [versionText, versionBadge])]),
+        el("td", {}, [el("div.row", { style: { gap: "6px" } }, [versionText, versionBadge, pinBadge])]),
         lastCell,
         addrCell,
-        el("td", {}, [el("div.actions", {}, [rotate, update, revoke, remove])]),
+        el("td", {}, [el("div.actions", {}, [rotate, update, version, unpin, revoke, remove])]),
       ]),
       nameLabel, dockerBadge, statusCell, hostCell, versionText, versionBadge, lastCell, addrCell,
-      rotate, update, revoke, remove, node: null, flags: {},
+      rotate, update, version, unpin, revoke, remove, pinBadge, node: null, flags: {},
     };
 
     rotate.addEventListener("click", () => {
@@ -294,6 +299,22 @@ export function createNodes() {
           return outcome && outcome.updated === false
             ? `${node.name} was already up to date.`
             : `${node.name} updated and restarting.`;
+        },
+      });
+    });
+
+    version.addEventListener("click", () => openVersionDialog(entry.node));
+
+    unpin.addEventListener("click", () => {
+      const node = entry.node;
+      confirmAction({
+        title: `Unpin ${node.name}?`,
+        message: `${node.name} stays on v${node.agent_version || "?"} for now, but the daily schedule and Update all `
+            + "may move it to the published version again.",
+        confirmLabel: "Unpin", danger: false,
+        onConfirm: async () => {
+          await api(`/api/nodes/${encodeURIComponent(node.name)}/pin`, { method: "DELETE" });
+          return `${node.name} unpinned.`;
         },
       });
     });
@@ -360,6 +381,14 @@ export function createNodes() {
       entry.versionBadge.replaceChildren(badgeVersion ? pill(`v${badgeVersion} available`, "info") : "");
     }
 
+    const pinned = node.pinned_version || null;
+    if (entry.flags.pin !== pinned) {
+      entry.flags.pin = pinned;
+      entry.pinBadge.replaceChildren(pinned ? pill(`pinned v${pinned}`, "warn") : "");
+      patchAttr(entry.pinBadge, "title", pinned
+        ? "Moved here on purpose: the schedule and Update all leave this agent alone until it is unpinned or updated" : null);
+    }
+
     patchText(entry.lastCell, node.last_seen ? fmt.ago(node.last_seen) : "never");
     patchAttr(entry.lastCell, "title", node.last_seen ? fmt.dateTime(node.last_seen) : null);
 
@@ -373,6 +402,8 @@ export function createNodes() {
     show(entry.rotate, canAdminister());
     show(entry.remove, canAdminister());
     show(entry.update, !revoked && canOperate());
+    show(entry.version, !revoked && canOperate());
+    show(entry.unpin, !revoked && canOperate() && !!pinned);
     show(entry.revoke, !revoked && canAdminister());
     entry.update.disabled = !(capable && available);
     let updateTitle;
@@ -381,6 +412,83 @@ export function createNodes() {
     else if (available) updateTitle = "git-pull the agent's latest commit, reinstall dependencies if they changed, and restart it";
     else updateTitle = "update availability not yet known";
     patchAttr(entry.update, "title", updateTitle);
+
+    // A version change needs a capable agent whose build takes a ref; an
+    // older one is told to update first rather than sent a ref it ignores.
+    const canPick = capable && node.online && node.update_refs === true && !isDocker;
+    entry.version.disabled = !canPick;
+    patchAttr(entry.version, "title", !node.online ? "offline"
+      : isDocker ? "Docker agents change version through their image"
+      : !capable ? (node.update_reason || "update capability not yet reported")
+      : node.update_refs !== true ? `agent v${node.agent_version || "?"} predates version selection — update it first`
+      : "Move this agent to any published version, older ones included, and pin it there");
+  }
+
+  /** The picker: every version the agent repository has shipped, from the
+   * host's mirror (the same list Patch notes shows), newest first. */
+  async function openVersionDialog(node) {
+    const result = el("div.result");
+    const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
+    const confirm = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" }, disabled: true }, ["Change version"]);
+    const footer = el("div", { style: { display: "contents" } }, [result, el("span.spacer"), cancel, confirm]);
+    const pickSlot = el("div", { style: { margin: "10px 0" } });
+    const body = el("div", {}, [
+      el("p", { text: `${node.name} runs v${node.agent_version || "?"}. Pick the version to move it to; the agent resets `
+          + "its checkout to the commit that shipped that version, reinstalls dependencies if they changed, and restarts." }),
+      pickSlot,
+      note("warn", "Any version other than the published one pins the agent there: the daily schedule and Update all "
+          + "leave it alone until you unpin it or update it again. An older agent may lack features this host relies on.",
+        { margin: true }),
+    ]);
+    const modal = openModal({ title: `Change ${node.name}'s version`, body, footer, narrow: true, dismissible: false, initialFocus: "cancel" });
+    cancel.addEventListener("click", () => modal.close());
+    pickSlot.append(el("div.faint.small", { text: "Loading versions…" }));
+    let chosen = null;
+    try {
+      const notes = await api("/api/changelog?repo=agent");
+      if (!notes.available) throw new Error(notes.reason || "the agent repository could not be read");
+      const seen = new Map();
+      for (const commit of notes.commits || []) {
+        if (!commit.version || seen.has(commit.version)) continue;
+        seen.set(commit.version, commit.ts);
+      }
+      const options = [...seen].map(([version, ts]) => {
+        const marks = [];
+        if (version === node.remote_version) marks.push("latest");
+        if (version === node.agent_version) marks.push("current");
+        return { value: version, label: `v${version} · ${ts ? fmt.dayTime(ts) : ""}${marks.length ? ` · ${marks.join(", ")}` : ""}` };
+      });
+      if (!options.length) throw new Error("the mirror lists no versions");
+      const picker = combobox({
+        label: "Version", options, value: node.agent_version && seen.has(node.agent_version) ? node.agent_version : null,
+        allLabel: node.agent_version && seen.has(node.agent_version) ? null : "Choose…", ariaLabel: "Version to install",
+        onChange: (value) => {
+          chosen = value;
+          confirm.disabled = !chosen || chosen === node.agent_version;
+          patchText(confirm, chosen && chosen !== node.remote_version ? "Change and pin" : "Change version");
+        },
+      });
+      pickSlot.replaceChildren(picker);
+    } catch (error) {
+      pickSlot.replaceChildren();
+      inlineResult(result, error.message, "error");
+      return;
+    }
+    confirm.addEventListener("click", async () => {
+      if (!chosen) return;
+      setBusy(confirm, true, "Change version");
+      result.replaceChildren();
+      try {
+        const outcome = await api(`/api/nodes/${encodeURIComponent(node.name)}/version`, {
+          method: "POST", body: JSON.stringify({ version: chosen }),
+        });
+        inlineResult(result, `${node.name} moved to v${outcome.version}${outcome.pinned ? " and pinned there" : ""}; restarting.`, "ok");
+        setTimeout(() => modal.close(), 900);
+      } catch (error) {
+        inlineResult(result, error.message, "error");
+        setBusy(confirm, false, "Change version");
+      }
+    });
   }
 
   function buildHelp() {
@@ -393,6 +501,7 @@ export function createNodes() {
         kv("Transport", "use https:// in the deploy command when crossing an untrusted network (self-signed: add --insecure)"),
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
         kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings"),
+        kv("Versions", "Version… moves an agent to any version the agent repository has shipped, older ones included: the host resolves it to the commit that shipped it and the agent resets to that commit. Anything but the published version pins the node, so the schedule and Update all leave it alone until it is unpinned or updated again"),
       ], { wide: true }),
     }));
   }
