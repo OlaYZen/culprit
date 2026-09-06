@@ -46,6 +46,7 @@ export const icons = {
   shield: '<svg viewBox="0 0 24 24"><path d="M12 3l7.5 3v5.5c0 4.5-3.2 8.2-7.5 9.5-4.3-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2 2 4-4"/></svg>',
   bell: '<svg viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
   calendar: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
+  compare: '<svg viewBox="0 0 24 24"><path d="M9 3.5v17M15 3.5v17"/><path d="M3.5 8l-1.5 2 1.5 2M20.5 8l1.5 2-1.5 2"/></svg>',
 };
 
 const toneIcon = (tone) => ({
