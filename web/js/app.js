@@ -68,8 +68,11 @@ const bind = {};
 /* ══ Routing ═══════════════════════════════════════════════════════════ */
 function navigate(target, { push = true } = {}) {
   // "#settings/network": the view, then the page inside it. A view that has
-  // pages exposes setPage; the hash is the only thing the tabs write.
-  const [base, page] = String(target || "").split("/");
+  // pages exposes setPage; the hash is the only thing the tabs write. The
+  // page keeps everything after the first slash ("changelog/agent/dev": the
+  // component and the branch), so a view can carry more than one choice.
+  const [base, ...rest] = String(target || "").split("/");
+  const page = rest.join("/");
   const name = FACTORIES[base] ? base : "overview";
   const hash = `#${name}${page ? `/${page}` : ""}`;
   if (current === name) {

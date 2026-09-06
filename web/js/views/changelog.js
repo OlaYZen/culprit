@@ -13,6 +13,11 @@
  * On the agent side each version group also says which enrolled agents run
  * it, so an agent that is behind shows exactly what it is missing.
  *
+ * Either side can be read at any branch the repository has (the picker in
+ * the head; "#changelog/agent/dev" in the hash): a host on dev can read what
+ * main ships and the other way round. The running (host) and configured
+ * (agent) branch are the defaults, and a view of another branch says so.
+ *
  * A component without history (the container image, or a host that cannot
  * reach the agent repository) says so, never an empty list.
  */
@@ -20,7 +25,7 @@
 import { el } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
-import { emptyState, icons, pendingSlot, readySlot, segmented, skeletonSection } from "../ui.js";
+import { combobox, emptyState, icons, pendingSlot, readySlot, segmented, skeletonSection } from "../ui.js";
 import { logItem, pill, section, viewHead } from "./shared.js";
 
 const TYPE_WORD = {
@@ -34,6 +39,7 @@ const FILTERS = {
   fix: (c) => c.type === "fix" || c.type === "perf" || c.type === "revert",
 };
 const REPOS = ["host", "agent"];
+const BRANCH_WORD = { main: "release line", dev: "unreleased work" };
 const LEAD = {
   host: "What changed in this host, from its own commit history: each entry is a commit, grouped under the "
       + "version it shipped in, newest first.",
@@ -43,18 +49,26 @@ const LEAD = {
 
 export function createChangelog() {
   const root = el("div.view", { dataset: { view: "changelog" } });
-  const payloads = {};
+  const payloads = {};      // `${repo}/${branch}` -> /api/changelog payload
+  const listings = {};      // repo -> /api/changelog/branches payload
   const loading = {};
   let repo = "host";
+  let branch = { host: null, agent: null };   // null: the repository's default branch
   let filter = "all";
 
-  // The tabs only write the hash; the router reads it back into setPage, so
-  // a reload and the back button land on the same component.
+  // The tabs and the picker only write the hash; the router reads it back
+  // into setPage, so a reload and the back button land on the same
+  // component and branch.
   const repoControl = segmented({
     label: "Component",
     options: [{ value: "host", label: "Host" }, { value: "agent", label: "Agent" }],
     value: repo,
-    onChange: (value) => { location.hash = `#changelog/${value}`; },
+    onChange: (value) => { location.hash = hashFor(value, branch[value]); },
+  });
+  const branchControl = combobox({
+    label: "Branch", allLabel: null, ariaLabel: "Branch to read the patch notes at",
+    options: [], value: "…",
+    onChange: (value) => { location.hash = hashFor(repo, value); },
   });
   const filterControl = segmented({
     label: "Show",
@@ -64,17 +78,30 @@ export function createChangelog() {
       { value: "fix", label: "Fixes" },
     ],
     value: filter,
-    onChange: (value) => { filter = value; if (payloads[repo]) renderAll(); },
+    onChange: (value) => { filter = value; if (payloads[keyOf(repo, branch[repo])]) renderAll(); },
   });
-  const head = viewHead({ title: "Patch notes", lead: LEAD.host, tools: [repoControl, filterControl] });
+  const head = viewHead({ title: "Patch notes", lead: LEAD.host, tools: [repoControl, branchControl, filterControl] });
   root.append(head);
   const slot = el("div.stack");
   root.append(slot);
 
+  function hashFor(component, name) {
+    return `#changelog/${component}${name ? `/${encodeURIComponent(name)}` : ""}`;
+  }
+
+  /** The cache key of the current choice; a null branch is the default. */
+  const keyOf = (component, name) => `${component}/${name || ""}`;
+
   root.setPage = (key) => {
-    const next = REPOS.includes(key) ? key : "host";
-    if (next === repo && payloads[repo]) return;
+    const [component, ...rest] = String(key || "").split("/");
+    const next = REPOS.includes(component) ? component : "host";
+    let name = rest.length ? decodeURIComponent(rest.join("/")) : null;
+    // The default branch spelled out in the hash is the same page as no
+    // branch at all, so the two never load twice.
+    if (name && listings[next]?.default === name) name = null;
+    if (next === repo && name === branch[next] && payloads[keyOf(repo, name)]) return;
     repo = next;
+    branch[next] = name;
     repoControl.setValue(repo);
     head.leadNode.textContent = LEAD[repo];
     load();
@@ -82,21 +109,52 @@ export function createChangelog() {
 
   async function load() {
     const which = repo;
-    if (payloads[which]) { renderAll(); return; }
-    if (loading[which]) return;
-    loading[which] = true;
+    const name = branch[which];
+    const key = keyOf(which, name);
+    if (payloads[key] && listings[which]) { paintBranches(); renderAll(); return; }
+    if (loading[key]) return;
+    loading[key] = true;
     head.setPending(true);
+    branchControl.setValue(name || "…");
     pendingSlot(slot, el("div.stack", {}, [skeletonSection("v0.0.0-b", 4), skeletonSection("v0.0.0-b", 3)]));
     try {
-      payloads[which] = await api(`/api/changelog?repo=${which}`);
+      const query = `repo=${which}${name ? `&branch=${encodeURIComponent(name)}` : ""}`;
+      const [listing, payload] = await Promise.all([
+        listings[which] ? Promise.resolve(listings[which])
+          : api(`/api/changelog/branches?repo=${which}&refresh=1`)
+            .catch((error) => ({ available: false, reason: error.message, branches: [], default: null })),
+        api(`/api/changelog?${query}`),
+      ]);
+      listings[which] = listing;
+      payloads[key] = payload;
     } catch (error) {
-      payloads[which] = { available: false, reason: error.message, error: true, commits: [] };
+      payloads[key] = { available: false, reason: error.message, error: true, commits: [], branch: name };
     } finally {
-      loading[which] = false;
+      loading[key] = false;
     }
-    if (which !== repo) return;
+    if (which !== repo || name !== branch[which]) return;
     head.setPending(false);
+    paintBranches();
     renderAll();
+  }
+
+  /** The picker lists what the repository has, the current choice always
+   * among them (a branch typed into the hash that the listing lacks is
+   * still shown, marked), the default named for what it is. */
+  function paintBranches() {
+    const listing = listings[repo] || { branches: [], default: null };
+    const payload = payloads[keyOf(repo, branch[repo])] || {};
+    const names = listing.branches.slice();
+    const shown = branch[repo] || listing.default || payload.branch;
+    if (shown && !names.includes(shown)) names.push(shown);
+    const defaultWord = repo === "host" ? "running now" : "agents follow this";
+    branchControl.setOptions(names.map((name) => ({
+      value: name,
+      label: name
+        + (name === listing.default ? ` · ${defaultWord}` : BRANCH_WORD[name] ? ` · ${BRANCH_WORD[name]}` : "")
+        + (!listing.branches.includes(name) ? " · not in the repository" : ""),
+    })));
+    branchControl.setValue(shown || "…");
   }
 
   function groups(commits) {
@@ -137,7 +195,8 @@ export function createChangelog() {
   }
 
   function renderAll() {
-    const payload = payloads[repo];
+    const payload = payloads[keyOf(repo, branch[repo])];
+    const listing = listings[repo] || {};
     if (!payload.available) {
       readySlot(slot, section({
         title: repo === "agent" ? "Agent patch notes" : "Patch notes",
@@ -165,8 +224,10 @@ export function createChangelog() {
     const sections = groups(shown).map((group, index) => {
       const newest = group.commits[0];
       const marks = [];
-      if (repo === "host" && group.version === payload.current) marks.push(pill("running now", "ok"));
-      if (repo === "agent" && index === 0 && group.version === payload.current) marks.push(pill("latest", "info"));
+      if (repo === "host" && payload.current && group.version === payload.current) marks.push(pill("running now", "ok"));
+      if (index === 0 && payload.tip && group.version === payload.tip && !(repo === "host" && payload.running)) {
+        marks.push(pill(`latest on ${payload.branch || "this branch"}`, "info"));
+      }
       if (running && running.has(group.version)) {
         const names = running.get(group.version);
         marks.push(pill(`running on ${names.join(", ")}`, group.version === payload.current ? "ok" : "warn"));
@@ -185,7 +246,16 @@ export function createChangelog() {
     });
     const footBits = [`${shown.length} of ${payload.commits.length} commits on ${payload.branch || "this checkout"}`
       + (payload.commits.length >= (payload.limit || Infinity) ? `; only the newest ${payload.limit} are listed` : "")];
+    if (repo === "host") {
+      if (!payload.running && payload.running_branch) footBits.push(`this host runs from ${payload.running_branch}`);
+      if (!payload.running && payload.fetched_at) footBits.push(`origin fetched ${fmt.ago(payload.fetched_at)}`);
+      if (payload.stale_reason) footBits.push(`not refreshed: ${payload.stale_reason}`);
+    }
     if (repo === "agent") {
+      const configured = payload.configured_branch || listing.configured;
+      if (configured && payload.branch !== configured) {
+        footBits.push(`agents follow ${configured} (Settings › Automatic agent updates)`);
+      }
       if (payload.fetched_at) footBits.push(`mirror of ${payload.source || "the agent repository"} fetched ${fmt.ago(payload.fetched_at)}`);
       if (payload.stale_reason) footBits.push(`not refreshed: ${payload.stale_reason}`);
       if (behind.length) footBits.push(`agents on a version not in this list: ${behind.map((v) => `v${v} (${running.get(v).join(", ")})`).join("; ")}`);
@@ -218,8 +288,8 @@ export function createChangelog() {
   // side showing: read the hash here and default to the host.
   window.addEventListener("hashchange", () => {
     if (!root.isActive) return;
-    const [base, page] = location.hash.slice(1).split("/");
-    if (base === "changelog") root.setPage(page || "host");
+    const [base, ...rest] = location.hash.slice(1).split("/");
+    if (base === "changelog") root.setPage(rest.join("/") || "host");
   });
   root.subscriptions = [
     // The agent side annotates versions with who runs them. The node list
@@ -228,7 +298,7 @@ export function createChangelog() {
     // rebuilding the entries each second replaced the text under a
     // selection and made the notes impossible to copy.
     store.on("nodes", () => {
-      if (!root.isActive || repo !== "agent" || !payloads.agent) return;
+      if (!root.isActive || repo !== "agent" || !payloads[keyOf(repo, branch[repo])]) return;
       if (runningKey() !== renderedRunningKey) renderAll();
     }),
   ];
