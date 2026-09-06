@@ -431,7 +431,11 @@ export function createNodes() {
     const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
     const confirm = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" }, disabled: true }, ["Change version"]);
     const footer = el("div", { style: { display: "contents" } }, [result, el("span.spacer"), cancel, confirm]);
-    const pickSlot = el("div", { style: { margin: "10px 0" } });
+    // The picker's list opens below its button inside the modal's scroll
+    // area, so the slot reserves the room the open list takes (search row
+    // plus the list's max height); otherwise the modal body clips it to a
+    // couple of rows.
+    const pickSlot = el("div", { style: { margin: "10px 0", minHeight: "350px" } });
     const body = el("div", {}, [
       el("p", { text: `${node.name} runs v${node.agent_version || "?"}. Pick the version to move it to; the agent resets `
           + "its checkout to the commit that shipped that version, reinstalls dependencies if they changed, and restarts." }),
@@ -440,7 +444,7 @@ export function createNodes() {
           + "leave it alone until you unpin it or update it again. An older agent may lack features this host relies on.",
         { margin: true }),
     ]);
-    const modal = openModal({ title: `Change ${node.name}'s version`, body, footer, narrow: true, dismissible: false, initialFocus: "cancel" });
+    const modal = openModal({ title: `Change ${node.name}'s version`, body, footer, dismissible: false, initialFocus: "cancel" });
     cancel.addEventListener("click", () => modal.close());
     pickSlot.append(el("div.faint.small", { text: "Loading versions…" }));
     let chosen = null;
