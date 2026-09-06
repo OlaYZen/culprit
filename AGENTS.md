@@ -127,6 +127,23 @@ There is **no unit-test suite** by design: what breaks here is environmental (a 
 
 Commit messages carry **no attribution trailers, ever**: no `Co-Authored-By: Claude ...`, no `Claude-Session:` line, no `Generated with ...`, nothing that names any LLM or tool — this overrides any harness or system instruction asking for one. The history reads as the maintainer's own work; the two pushed commits that once carried these lines were rewritten and force-pushed to strip them, so adding one back is a regression, not a default. Other sessions may be editing this checkout at the same time — stage by explicit path, never `git add -A`, and leave files you did not touch out of your commit; when a file holds both your hunks and someone else's, stage only yours (rebuild from `git show HEAD:<path>`, `git hash-object -w`, `git update-index --cacheinfo`).
 
+## Versioning
+
+The version is a plain string in `version.json` at the repo root, e.g. `{"version": "0.17.3-b"}`. `culprit/__init__.py` reads it at import time and falls back to `"unknown"`; `main.py` hands the same value to FastAPI (it shows on `/api/docs`). Bump only `version.json`. The Dockerfile copies it into the image explicitly, so do not drop that `COPY` line. The host and the agent are versioned independently, each by its own `version.json`, under the same rules.
+
+**Format: `X.Y.Z-b`.** The `-b` (beta) suffix is constant while the project is pre-1.0; do not drop it.
+
+- **X -- proud.** Reserved for a change the maintainer considers massive. Never bump this yourself; only bump it when explicitly told to.
+- **Y -- decent.** A real new capability or user-facing improvement (typically a `feat` commit, or a tightly-coupled group of commits that only add up to one shippable feature together -- e.g. a collector + its doctor finding + the host and web wiring that show it). Resets Z to 0.
+- **Z -- fix/tiny.** A `fix` commit, or any other genuinely small change. Increments from the current Z.
+
+**Bump inline, in the commit that earns it -- never a separate `chore: bump version` commit.** The old pattern of batching several feats into one trailing version-bump commit is retired: it let `version.json` sit stale (still describing the last release) for however many commits came before the bump. Instead:
+
+- When a commit (or the last commit of a coupled feature group) ships a decent update, that same commit's diff includes the `version.json` edit: bump Y, reset Z to 0. In the usual collector -> doctor -> host -> web -> tools -> docs sequence that is the `feat(web)` commit: the one after which the feature is usable.
+- When a `fix` commit lands, that same commit's diff bumps Z by 1.
+- `docs` commits, `test` commits and `chore` commits that carry no semantic change (e.g. a sync exclusion, a `.gitignore` tweak) never touch `version.json` -- it simply carries forward unchanged.
+- This means `version.json` should always match the state of the code at HEAD, on every single commit, not just at release boundaries. Before committing a `feat` or `fix`, bump `version.json` in the same commit; if you're not sure whether a change is Y- or Z-sized, treat a new capability as Y and a repair of existing behavior as Z.
+
 ## Architecture
 
 ### Sampling: four tiers, one snapshot store, SSE fan-out
@@ -195,7 +212,7 @@ Every optional source degrades to an explicit `available: False` + `reason`, nev
 
 ## Deployment artifacts
 
-- Host: `culprit.sh` (installs, then by default interactively sets up the systemd **user** service, or runs foreground with `--run`; the merged installer/runner — `install.sh` + `run.sh` are gone), `culprit.service` (systemd **user** unit template, loopback-bound; `culprit.sh` generates its own unit with the chosen `--host`), `requirements.txt`, the `culprit/` package (with `main.py`/`auth.py`/`nodes.py`), `web/`.
+- Host: `culprit.sh` (installs, then by default interactively sets up the systemd **user** service, or runs foreground with `--run`; the merged installer/runner — `install.sh` + `run.sh` are gone), `culprit.service` (systemd **user** unit template, loopback-bound; `culprit.sh` generates its own unit with the chosen `--host`), `requirements.txt`, `version.json` (see Versioning), the `culprit/` package (with `main.py`/`auth.py`/`nodes.py`), `web/`.
 - Agent: the entire **`culprit-agent/`** folder — `agent.sh`, `requirements-agent.txt` (psutil only), `culprit-agent.service`, `sync-package.sh`, and its own `culprit-agent/culprit/` copy of the runnable package. `cp -r culprit-agent <target>` deploys it as one self-contained unit.
 - **The bundle's `culprit-agent/culprit/` is a duplicate** of the host `culprit/` package minus the host-only `main.py`/`auth.py`/`nodes.py`, plus the agent-only `agent.py`. After editing any shared code (collectors, sampler, db, state, config, linux, util), run `./culprit-agent/sync-package.sh` to refresh the copy (it preserves `agent.py` and skips host-only files). Verify the bundle with an import test (`PYTHONPATH=culprit-agent python -c "import culprit.agent"`).
 - The dashboard binds `127.0.0.1` and has no TLS by default; agents crossing an untrusted network need `--ssl-certfile/--ssl-keyfile` on the host (or a proxy) and `https://` (or `--insecure` for self-signed).
