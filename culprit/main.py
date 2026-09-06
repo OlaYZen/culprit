@@ -1343,28 +1343,42 @@ async def api_portnames() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------- patch notes
-@app.get("/api/changelog/branches", summary="Branches of the agent repository, for the branch setting")
+@app.get("/api/changelog/branches", summary="Branches of the host checkout or the agent repository")
 async def api_changelog_branches(
-    refresh: bool = Query(False, description="fetch the mirror first if it is older than a minute"),
+    repo: str = Query("agent", pattern="^(host|agent)$",
+                      description="agent: the mirror of the agent repository (the branch setting, "
+                                  "Patch notes); host: this checkout's own branches"),
+    refresh: bool = Query(False, description="fetch first if the last fetch is older than a minute"),
 ) -> dict[str, Any]:
-    """What the mirror of the agent repository has under refs/heads, the
-    demo branch left out. Unavailable with the reason on a host that has no
-    mirror; Settings then offers a typed name instead of an empty list."""
-    return await asyncio.to_thread(changelog.branches, refresh)
+    """What the mirror of the agent repository has under refs/heads, or the
+    host checkout's local and origin branches, the demo branch left out;
+    `default` is the branch Patch notes opens on (running / configured).
+    Unavailable with the reason on a host that has no mirror or checkout;
+    Settings then offers a typed name instead of an empty list."""
+    return await asyncio.to_thread(changelog.branches, repo, refresh)
 
 
 @app.get("/api/changelog", summary="Patch notes: the host's or the agent's commit history")
 async def api_changelog(
     repo: str = Query("host", pattern="^(host|agent)$",
                       description="host: this checkout; agent: a mirror of the agent repository"),
+    branch: str | None = Query(None, max_length=200,
+                               description="a branch of that repository; the running one (host) "
+                                           "or the configured update branch (agent) when omitted"),
 ) -> dict[str, Any]:
     """Every commit (newest first), each tagged with the version version.json
-    held after it. The host's is one `git log` over its own checkout at first
-    request, cached for the life of the process; the agent's comes from a
-    bare mirror under data/ fetched at most once an hour. A host without a
-    checkout (the container image), or one that cannot reach the agent
+    held after it. The host's running branch is one `git log` over HEAD at
+    first request, cached for the life of the process; any other branch of
+    either repository comes from refs fetched at most once an hour (origin's
+    for the host, the bare mirror under data/ for the agent). A host without
+    a checkout (the container image), or one that cannot reach the agent
     repository, says so rather than showing an empty list."""
-    return await asyncio.to_thread(changelog.load, repo)
+    if branch is not None:
+        try:
+            branch = config_module._branch_name(branch.strip())
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+    return await asyncio.to_thread(changelog.load, repo, branch)
 
 
 # --------------------------------------------------------------------- map
