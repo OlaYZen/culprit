@@ -25,8 +25,7 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  checkbox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures,
-  skeletonSection, subnav, switchControl,
+  checkbox, combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection, subnav, switchControl,
 } from "../ui.js";
 import { canAdminister, canOperate, figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
 
@@ -601,12 +600,45 @@ export function createSettings() {
       value: String(config.auto_update_hour ?? 3), "aria-label": "Hour to run automatic updates",
     });
     const error = el("div.field__err", { id: "err-auto_update_hour", hidden: true });
+    // The branch is picked from what the agent repository actually has (the
+    // host's mirror, demo left out); only a host without a mirror gets a
+    // typed name. `branchValue()` is what Save sends either way.
+    let branchChoice = String(config.agent_update_branch || "main");
     const branchInput = el("input", {
       type: "text", id: "set-agent_update_branch", spellcheck: "false", autocomplete: "off",
-      value: String(config.agent_update_branch || "main"), placeholder: "main",
+      value: branchChoice, placeholder: "main",
       "aria-label": "Branch of the agent repository agents update from",
     });
+    const branchSlot = el("div.input", {}, [branchInput]);
+    const branchHelp = el("div.field__help", { id: "help-set-agent_update_branch", text: "Loading branches…" });
     const branchError = el("div.field__err", { id: "err-agent_update_branch", hidden: true });
+    let branchValue = () => branchInput.value.trim() || "main";
+    (async () => {
+      try {
+        const listing = await api("/api/changelog/branches?refresh=1");
+        if (!listing.available) throw new Error(listing.reason || "no mirror of the agent repository");
+        const names = listing.branches.slice();
+        if (!names.includes(branchChoice)) names.push(branchChoice);
+        const picker = combobox({
+          label: "Branch", allLabel: null, ariaLabel: "Branch of the agent repository agents update from",
+          options: names.map((name) => ({
+            value: name,
+            label: name + (name === "main" ? " · release line" : name === "dev" ? " · unreleased work" : "")
+              + (!listing.branches.includes(name) ? " · not in the repository" : ""),
+          })),
+          value: branchChoice,
+          onChange: (value) => { branchChoice = value; },
+        });
+        picker.id = "set-agent_update_branch";
+        branchSlot.replaceWith(picker);
+        branchValue = () => branchChoice;
+        branchHelp.textContent = `${listing.branches.length} branch${listing.branches.length === 1 ? "" : "es"} in the agent repository`
+          + (listing.stale_reason ? ` (list may be stale: ${listing.stale_reason})` : "")
+          + (listing.hidden?.length ? `; ${listing.hidden.join(", ")} hidden` : "") + ".";
+      } catch (err) {
+        branchHelp.textContent = `Branches could not be listed (${err.message}); type the name.`;
+      }
+    })();
     const result = el("div.result");
     const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save"]);
 
@@ -621,11 +653,12 @@ export function createSettings() {
           method: "PUT",
           body: JSON.stringify({
             auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value),
-            agent_update_branch: branchInput.value.trim() || "main",
+            agent_update_branch: branchValue(),
           }),
         });
         config = payload.config;
-        branchInput.value = config.agent_update_branch || "main";
+        branchChoice = config.agent_update_branch || "main";
+        branchInput.value = branchChoice;
         inlineResult(result, "Saved.", "ok");
       } catch (err) {
         const fieldErrors = err.payload?.field_errors || {};
@@ -648,8 +681,11 @@ export function createSettings() {
         checkbox({ label: "Automatically update capable agents once a day", checked: enabled,
           onChange: (v) => { enabled = v; } }),
         fieldRow({ id: hourInput.id, label: "At hour", unit: "0-23, this host's local time", input: hourInput, error }),
-        fieldRow({ id: branchInput.id, label: "Branch", unit: "of the agent repository; main is the release line, dev follows unreleased work",
-          input: branchInput, error: branchError }),
+        el("div.field", {}, [
+          el("label.field__label", { for: branchInput.id }, [el("span", { text: "Branch" }),
+            el("span.field__unit", { text: "of the agent repository agents follow" })]),
+          branchSlot, branchHelp, branchError,
+        ]),
         el("div.formrow", { style: { marginTop: "10px" } }, [save, result]),
       ]),
       foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
