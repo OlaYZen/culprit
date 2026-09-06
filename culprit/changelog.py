@@ -11,6 +11,13 @@ the entries under the release they landed in.
 A container image (the Dockerfile copies files, not `.git`) or a tarball
 has no history: the payload then says `available: False` with the reason,
 never an empty list dressed as "nothing changed".
+
+The agent's notes come the same way from a bare mirror of the agent
+repository kept under data/ (the host already talks to GitHub for the
+agent's published version, so this is the same trust): cloned on first
+request, fetched again at most once an hour, and parsed by the same code
+with the mirror's main as the tip. A failed fetch keeps the last good parse
+rather than blanking the view; a host that cannot clone says why.
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ import re
 import subprocess
 import threading
 from typing import Any
+
+import time
 
 from . import __version__
 from .config import ROOT
@@ -32,15 +41,21 @@ _SEP_RECORD = "\x1e"
 _SUBJECT = re.compile(r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?: (?P<summary>.+)$")
 _VERSION_LINE = re.compile(r'^([-+])\s*"version"\s*:\s*"([^"]+)"', re.M)
 
-_cache: dict[str, Any] | None = None
+AGENT_REPO_URL = "https://github.com/OlaYZen/culprit-agent.git"
+AGENT_MIRROR = ROOT / "data" / "culprit-agent.git"
+AGENT_REFRESH_S = 3600.0
+REPOS = ("host", "agent")
+
+_cache: dict[str, dict[str, Any]] = {}
+_agent_fetched_at = 0.0
 _lock = threading.Lock()
 
 
-def _git(args: list[str]) -> tuple[str | None, str]:
+def _git(args: list[str], cwd: Any = ROOT, timeout: float = 15) -> tuple[str | None, str]:
     """(stdout, reason): stdout is None when git could not answer."""
     try:
-        done = subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
-                              text=True, timeout=15, errors="replace")
+        done = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                              text=True, timeout=timeout, errors="replace")
     except FileNotFoundError:
         return None, "git is not installed on the host"
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -51,10 +66,10 @@ def _git(args: list[str]) -> tuple[str | None, str]:
     return done.stdout, ""
 
 
-def _bumps() -> dict[str, tuple[str | None, str | None]]:
+def _bumps(cwd: Any, ref: str) -> dict[str, tuple[str | None, str | None]]:
     """sha -> (version before, version after) for every commit that changed
     version.json. Empty when the file has no history yet."""
-    out, _ = _git(["log", "--no-color", "-p", f"--format={_SEP_RECORD}%H", "--", "version.json"])
+    out, _ = _git(["log", "--no-color", "-p", f"--format={_SEP_RECORD}%H", ref, "--", "version.json"], cwd)
     bumps: dict[str, tuple[str | None, str | None]] = {}
     if not out:
         return bumps
@@ -73,12 +88,13 @@ def _bumps() -> dict[str, tuple[str | None, str | None]]:
     return bumps
 
 
-def _parse(raw: str, bumps: dict[str, tuple[str | None, str | None]]) -> list[dict[str, Any]]:
+def _parse(raw: str, bumps: dict[str, tuple[str | None, str | None]],
+           tip_version: str | None) -> list[dict[str, Any]]:
     commits: list[dict[str, Any]] = []
     # Newest first: the version a commit belongs to is the one version.json
-    # held after it, which is the current version until we pass the commit
+    # held after it, which is the tip's version until we pass the commit
     # that set it; from there on, the version that commit replaced.
-    version: str | None = __version__ if __version__ != "unknown" else None
+    version: str | None = tip_version
     for record in raw.split(_SEP_RECORD):
         if not record.strip():
             continue
@@ -109,33 +125,93 @@ def _parse(raw: str, bumps: dict[str, tuple[str | None, str | None]]) -> list[di
     return commits
 
 
-def _build() -> dict[str, Any]:
+def _build(cwd: Any, ref: str, tip_version: str | None) -> dict[str, Any]:
     fmt = _SEP_FIELD.join(["%H", "%h", "%at", "%s", "%b"]) + _SEP_RECORD
-    raw, reason = _git(["log", "--no-color", f"-n{LIMIT}", f"--format={fmt}"])
+    raw, reason = _git(["log", "--no-color", f"-n{LIMIT}", f"--format={fmt}", ref], cwd)
     if raw is None:
         if "not a git repository" in reason.lower():
             reason = "this host is not running from a git checkout, so it has no commit history"
-        return {"available": False, "reason": reason, "current": __version__, "commits": []}
-    commits = _parse(raw, _bumps())
-    branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+        return {"available": False, "reason": reason, "current": tip_version, "commits": []}
+    commits = _parse(raw, _bumps(cwd, ref), tip_version)
     return {
         "available": True,
         "reason": None,
-        "current": __version__,
-        "branch": (branch or "").strip() or None,
+        "current": tip_version,
         "limit": LIMIT,
         "commits": commits,
     }
 
 
-def load() -> dict[str, Any]:
-    """The parsed log, computed once per process. Safe to call from a thread."""
-    global _cache
+def _build_host() -> dict[str, Any]:
+    out = _build(ROOT, "HEAD", __version__ if __version__ != "unknown" else None)
+    out["repo"] = "host"
+    if out["available"]:
+        branch, _ = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+        out["branch"] = (branch or "").strip() or None
+    return out
+
+
+def _sync_agent_mirror() -> str:
+    """Clone the agent repository as a bare mirror on first use, then fetch
+    it again when AGENT_REFRESH_S has passed. Returns "" or the reason the
+    mirror could not be brought up to date (an existing mirror is still
+    served then -- stale beats blank, and the payload says when it was
+    fetched)."""
+    global _agent_fetched_at
+    if not (AGENT_MIRROR / "HEAD").exists():
+        AGENT_MIRROR.parent.mkdir(parents=True, exist_ok=True)
+        out, reason = _git(["clone", "--mirror", "--quiet", AGENT_REPO_URL, str(AGENT_MIRROR)],
+                           ROOT, timeout=90)
+        if out is None:
+            return f"could not fetch the agent repository ({AGENT_REPO_URL}): {reason}"
+        _agent_fetched_at = time.time()
+        return ""
+    if time.time() - _agent_fetched_at < AGENT_REFRESH_S:
+        return ""
+    _agent_fetched_at = time.time()   # one attempt per window, success or not
+    out, reason = _git(["fetch", "--quiet", "--prune"], AGENT_MIRROR, timeout=60)
+    if out is None:
+        return f"could not refresh the agent repository: {reason}"
+    return ""
+
+
+def _build_agent() -> dict[str, Any]:
+    problem = _sync_agent_mirror()
+    if problem and not (AGENT_MIRROR / "HEAD").exists():
+        return {"available": False, "reason": problem, "repo": "agent", "current": None, "commits": []}
+    tip, _ = _git(["show", "main:version.json"], AGENT_MIRROR)
+    match = re.search(r'"version"\s*:\s*"([^"]+)"', tip or "")
+    out = _build(AGENT_MIRROR, "main", match.group(1) if match else None)
+    out["repo"] = "agent"
+    out["branch"] = "main"
+    out["source"] = AGENT_REPO_URL
+    out["fetched_at"] = _agent_fetched_at or None
+    out["stale_reason"] = problem or None
+    return out
+
+
+def load(repo: str = "host") -> dict[str, Any]:
+    """The parsed log for `repo` ("host": this checkout, parsed once per
+    process; "agent": the mirror, re-parsed after each successful fetch).
+    Safe to call from a thread."""
+    if repo not in REPOS:
+        raise ValueError(f"unknown repo {repo!r}")
     with _lock:
-        if _cache is None:
-            _cache = _build()
-            if _cache["available"]:
-                log.debug("changelog: %d commits parsed", len(_cache["commits"]))
-            else:
-                log.info("changelog unavailable: %s", _cache["reason"])
-        return _cache
+        cached = _cache.get(repo)
+        if repo == "host":
+            if cached is None:
+                cached = _cache[repo] = _build_host()
+        else:
+            due = cached is None or time.time() - _agent_fetched_at >= AGENT_REFRESH_S
+            if due:
+                fresh = _build_agent()
+                # A mirror that could not be refreshed still parses; only a
+                # mirror that never existed is unavailable, and even then a
+                # previous good answer is kept.
+                if fresh["available"] or cached is None:
+                    cached = _cache[repo] = fresh
+                else:
+                    cached["stale_reason"] = fresh["reason"]
+        if not cached["available"]:
+            log.info("changelog (%s) unavailable: %s", repo, cached["reason"])
+        return cached

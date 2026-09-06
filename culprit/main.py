@@ -1268,13 +1268,18 @@ async def api_portnames() -> dict[str, Any]:
 
 
 # ------------------------------------------------------------- patch notes
-@app.get("/api/changelog", summary="Patch notes: the checkout's commit history")
-async def api_changelog() -> dict[str, Any]:
-    """Every commit this host's checkout carries (newest first), each tagged
-    with the version version.json held after it. One `git log` at first
-    request, cached for the life of the process; a host without a checkout
-    (the container image) says so rather than showing an empty list."""
-    return await asyncio.to_thread(changelog.load)
+@app.get("/api/changelog", summary="Patch notes: the host's or the agent's commit history")
+async def api_changelog(
+    repo: str = Query("host", pattern="^(host|agent)$",
+                      description="host: this checkout; agent: a mirror of the agent repository"),
+) -> dict[str, Any]:
+    """Every commit (newest first), each tagged with the version version.json
+    held after it. The host's is one `git log` over its own checkout at first
+    request, cached for the life of the process; the agent's comes from a
+    bare mirror under data/ fetched at most once an hour. A host without a
+    checkout (the container image), or one that cannot reach the agent
+    repository, says so rather than showing an empty list."""
+    return await asyncio.to_thread(changelog.load, repo)
 
 
 # --------------------------------------------------------------------- map
