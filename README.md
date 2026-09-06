@@ -74,7 +74,11 @@ holds a port, on any machine in the fleet, right from the same screen. Then
 Culprit **tells you whether it worked**: it keeps sampling after every action
 and states the verdict in plain words ("IO pressure fell 100% → 5%; the finding
 cleared in 40 s", or "no change: `bash` was not the culprit, the next candidate
-is `rsync`").
+is `rsync`"). When something is **broken rather than slow**, the Outage
+Doctor's cards carry the verb too: *Restart* the unit that failed first,
+*Start* the one that is enabled but stopped, *Reload or restart* the one
+that stopped listening, and the same verdict follows -- *fixed*, or *it came
+back: the unit starts and fails again, so the cause is upstream of it*.
 
 Ten more things follow from that loop:
 
@@ -116,12 +120,22 @@ Ten more things follow from that loop:
   80%. Alongside, *if memory runs out*: the kernel's own `oom_score` ranking
   says which process the OOM killer takes first, and the memory findings
   carry it.
-- **It forecasts a full disk and names the writer.** Used space per mount is
-  fitted over the last hour; *"/var will be full in about 3 h at +240 GB/day"*
-  becomes a finding a day ahead, ranking the processes with open files under
-  that mount by their write rate, and it points out space held by
-  **deleted files still open** (the rotated log a daemon never closed), which
-  a restart frees without a reboot.
+- **It forecasts a full disk and names the writer -- and the file.** Used
+  space per mount is fitted over the last hour; *"/var will be full in about
+  3 h at +240 GB/day"* becomes a finding a day ahead, ranking the processes
+  with open files under that mount by their write rate, each with **the file
+  it is writing fastest** (*`rsync` → `/var/backups/db.tar` at 240 MB/s*,
+  from the offset of its descriptor between samples). It points out space
+  held by **deleted files still open** (the rotated log a daemon never
+  closed) and offers to **free it** through the holder's own descriptor,
+  no restart needed.
+- **It forecasts running out of memory and names the grower.** `MemAvailable`
+  is fitted the same way, and every process's RSS with it: *"available memory
+  runs out in about 1.5 h; `node` (pid 4410) grew 1.1 GB over the same
+  window, 96% of what the machine lost -- and it is not what the OOM killer
+  would take first, that is `postgres`."* The grower, ranked by growth rather
+  than size, is a different answer from the largest process and from the
+  kernel's victim, and the finding carries all three.
 - **It remembers what worked.** Every process dialog shows the track record
   of earlier actions on that name or unit on that node, judged by their
   verdicts: *"Throttle: helped 3 of 3, last 2 h ago · End task: no change 2 of
@@ -148,7 +162,7 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | **The question it answers** | *What's slowing this box, and does it matter?* | *Is a metric past a threshold?* | *Store & query metrics* | *Live metric dashboards* | *What security events happened?* |
 | Names the responsible **process / unit** | ● built in | ○ you correlate + SSH | ○ | ○ | ○ |
 | Tells **problem** from merely **busy** (kernel PSI) | ● | ○ static thresholds | ○ | ◑ | ○ |
-| **Act** from the UI (kill port, End task, renice, throttle) and **verify** the action helped | ● | ○ | ○ | ○ | ○ |
+| **Act** from the UI (kill port, End task, renice, throttle, restart the unit that failed first, free a deleted-but-held file) and **verify** the action helped | ● | ○ | ○ | ○ | ○ |
 | Names the **container** behind a PID | ● | ○ | ○ | ◑ | ○ |
 | Says when the cause is **outside the machine** (steal, thermal, NFS, RAID rebuild, interrupts) | ● | ○ | ○ | ○ | ○ |
 | Pressure and caps **inside one unit / container** (cgroup PSI, quota, memory limit) | ● | ○ | ○ | ◑ | ○ |
@@ -298,15 +312,15 @@ letting them pass as live (and, if you have set up notifications, tells you).
 |---|---|
 | **Processor** | Per-core utilisation from `/proc/stat` with **iowait and steal** broken out (steal matters on VMs), runnable-queue depth, load averages, D-state count, clock, governor, context switches |
 | **Pressure (PSI)** | The kernel's own stall accounting from `/proc/pressure/*`: the measured fraction of wall time tasks spent waiting on CPU, memory or IO (`some` vs `full`), and per systemd unit |
-| **Memory** | MemAvailable (the honest field), commit charge vs limit, **major-fault rate** (real paging), swap in/out, OOM-kill counter, dirty/writeback |
+| **Memory** | MemAvailable (the honest field), commit charge vs limit, **major-fault rate** (real paging), swap in/out, OOM-kill counter, dirty/writeback, and a **fill forecast**: where MemAvailable is heading over the last hour and **which process grew** to take it |
 | **GPU** | A backend chain, DRM fdinfo (cross-vendor, per-PID), NVML (NVIDIA) and amdgpu sysfs, each degrading to an explicit reason when absent |
-| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, a **fill forecast** per mount with the **processes writing there** and the space **held by deleted-but-open files**, SSD/HDD identity |
+| **Disk** | Per-device throughput, **in-flight queue and iostat-style await latency** (layered dm/md devices never double-counted), mount capacity by what a *user* can actually write, a **fill forecast** per mount with the **processes writing there**, **the files they are writing and how fast**, and the space **held by deleted-but-open files** (with a button to free it), SSD/HDD identity |
 | **Network** | Per-interface throughput, errors and drops, real upstream DNS (not the `127.0.0.53` stub), socket table with honest PID attribution, **WAN IP + VPN detection** (including a router-level VPN, via the exit IP), reachability probes that call a silent gateway *filtered*, never *down* |
 | **Ports** | Every listening TCP/UDP port resolved to the **process and systemd unit** behind it, its number's usual name beside it (`443 · https`, `2049 · nfs`, from `ports.json` at the repo root, which the Map uses too), exposed-vs-loopback, live inbound-connection counts, each listener's **accept queue against its backlog** with the kernel's turned-away rate (`ListenOverflows`) so a service that is dropping clients is named, and a **one-click kill** with the same guards as End task |
 | **Map** | Who depends on whom across the fleet, from each node's own socket and port tables, and **who is waiting on whom**, from each client's own kernel: per-connection round trip, retransmits and a send queue that is not draining (`ss -ti`, read passively, nothing probed), the target's findings joined onto every edge, the **blast radius** of an action, and **who is using the network** per process |
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
-| **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before |
+| **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before, and for units a **Restart / Start / Reload button** whose outcome is verified against the next samples |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -411,6 +425,33 @@ restart, which it says); growth within 24 h becomes a finding (warn within
 reads as "rough", ranking the processes that have files open under that mount
 by write rate. Deleted-but-open files are listed with their size and holder;
 the finding says a restart or a truncate through `/proc/<pid>/fd` frees them.
+
+**Name the file.** A mount's writers are ranked by their write rate, and
+each one now carries the file it is writing fastest: for every open,
+writable descriptor under the mount, the offset in `/proc/<pid>/fdinfo` is
+read on each slow tick and the advance per second is that file's rate. That
+is exact for a sequential writer (a log, a backup, a download) and blind to
+`mmap` and `pwrite`, which move no offset -- so a file with no rate is listed
+without one, never as 0, and the Storage view says how the number is made.
+A deleted-but-open file is listed with its size and holder, and the card
+offers to **free it**: the agent truncates it through the holder's own
+descriptor (what `: > /proc/<pid>/fd/<n>` does), refusing anything that
+still has a name on disk, and the verdict says whether the storage finding
+cleared.
+
+**Memory-fill forecast.** The disk forecast's sibling. `MemAvailable` is
+fitted by least squares over the last hour (after ten minutes of samples,
+never across an agent restart, fit quality stated), and every process's RSS
+over the same window; a trend that reaches zero within four hours is a
+finding (warn within 2 h, critical within 30 min) whose culprits are the
+processes that *grew*, ranked by growth rate with their share of what the
+machine lost -- not the largest processes, which `memory_low` already ranks,
+and not the kernel's OOM victim, which the finding carries separately and
+compares against the grower by name. A process too young to fit that holds
+a real share of memory is listed as a newcomer, not ranked. When nothing
+grew, the finding says so and points at the kernel rather than inventing a
+ranking. The trend is shown under the memory gauge at all times, whether
+or not it has become a finding.
 
 **Turned-away clients.** A service can be up, attributed and apparently idle
 while the kernel refuses connections on its behalf: once its accept queue (the
@@ -559,7 +600,20 @@ working while every counter looks fine, and walks each one to its root:
 
 Every item names its unit, its root, its evidence and its **fix** (a copyable
 command), how long it has held, and what changed in the minutes before it
-began, from the same change log the Lag Doctor uses. Nothing fires from a
+began, from the same change log the Lag Doctor uses. Unit items also carry
+the **verb**: *Restart* (the root first, when the root is another unit,
+then the unit itself), *Start* for an enabled unit that is not running,
+*Reload or restart* for one that stopped listening -- run on the agent with
+the same guards as the process actions (never init, journald, logind,
+udevd, dbus, or the agent's own unit; a system unit needs root or a polkit
+rule, and the answer says so), with the unit's state before and after. The
+host then watches the node's next outage samples and states the outcome:
+**fixed** (the items that named the unit cleared and stayed clear), **it
+came back** (cleared for one sample and returned -- the unit starts and
+fails again, so the cause is upstream), **partly**, or **no change** with
+the root named when it is another unit. Verdicts are stored like the
+process ones, so a card shows *"Restart before: fixed 2 of 3, last 2 h
+ago"* before offering the button again. Nothing fires from a
 threshold: a certificate with weeks left and a pending reboot are shown as
 information; an expired certificate on a live listener is the outage. Every
 check reports its own availability -- a journal that needs the group, a
