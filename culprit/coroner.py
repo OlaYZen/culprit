@@ -344,7 +344,10 @@ def _state_line(frames: dict[str, Any]) -> str | None:
 
 
 def _memory_death(frames: dict[str, Any], by_kind: dict[str, list]) -> bool:
-    if by_kind.get("oom_kill") or by_kind.get("oom_unit"):
+    # memory_exhaustion is the Windows agent's marker: the commit charge
+    # ran out (Resource-Exhaustion-Detector 2004). Not a kill, but the same
+    # story -- and it names the consumer the way an OOM kill names a victim.
+    if by_kind.get("oom_kill") or by_kind.get("oom_unit") or by_kind.get("memory_exhaustion"):
         return True
     if (frames.get("mem_pct_last") or 0) >= 95:
         return True
@@ -377,11 +380,14 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
     cause = None
 
     # --- a shutdown the machine wrote down -------------------------------
+    # shutdown_request is the Windows agent's marker (USER32 1074: the
+    # process that asked, on whose behalf, and the reason it gave).
     shutdown = (by_kind.get("shutdown_target") or by_kind.get("logind_shutdown")
-                or by_kind.get("shutdown_notice"))
+                or by_kind.get("shutdown_notice") or by_kind.get("shutdown_request"))
     if shutdown:
         target = next((m.get("target") for m in
                        (by_kind.get("logind_shutdown") or []) + (by_kind.get("shutdown_notice") or [])
+                       + (by_kind.get("shutdown_request") or [])
                        + (by_kind.get("shutdown_target") or [])
                        if m.get("target") and m.get("target") != "shutdown"), "shutdown")
         verb = {"reboot": "Rebooted", "poweroff": "Powered off", "halt": "Halted",
@@ -399,6 +405,15 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
                     who = f"user {marker['who']} (via logind)"
                     because.append(f"logind recorded the request from user {marker['who']}")
                     break
+        if who is None:
+            for marker in by_kind.get("shutdown_request") or []:
+                asked = marker.get("who") or marker.get("via")
+                if not asked:
+                    continue
+                via = marker.get("via") or marker.get("command")
+                who = f"{asked}" + (f" (via {via})" if via and via != asked else "")
+                because.append(f"Windows recorded the request: {marker.get('message', '')[:160]}")
+                break
         if who is None and by_kind.get("power_key"):
             who = "the power button"
             because.append("logind recorded the power key being pressed")
@@ -413,13 +428,15 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
         because.append(f"the shutdown path ran: \"{first.get('message', '')[:100]}\" "
                        f"{_ago(float(first.get('ts') or died_at), died_at)}")
         if by_kind.get("journal_stopped"):
-            because.append("journald closed its files normally (\"Journal stopped\")")
+            stopped = by_kind["journal_stopped"][0].get("message") or "Journal stopped"
+            because.append(f"the log closed its files normally (\"{stopped[:80]}\")")
         title = f"{verb} {'by ' + who if who else 'on request'}"
         if kernel_pkg and not who:
             title = f"{verb} after a kernel upgrade"
         elif kernel_pkg:
             title += " after a kernel upgrade"
-        summary = (f"{hostname} went down cleanly at {when}: systemd ran its shutdown path"
+        manager = "Windows" if evidence.get("platform") == "windows" else "systemd"
+        summary = (f"{hostname} went down cleanly at {when}: {manager} ran its shutdown path"
                    + (f", asked for by {who}" if who else ", and the journal does not say who asked")
                    + ". Nothing crashed. "
                    + ("A newer kernel had just been installed, which is the usual reason." if kernel_pkg else ""))
@@ -456,6 +473,12 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
         for marker in (by_kind.get("oom_kill") or [])[:3]:
             because.append(f"the kernel killed {marker.get('victim')} (pid {marker.get('pid')}) "
                            f"for memory {_ago(float(marker.get('ts') or died_at), died_at)}")
+        for marker in (by_kind.get("memory_exhaustion") or [])[:2]:
+            because.append(f"Windows diagnosed virtual memory running out "
+                           f"{_ago(float(marker.get('ts') or died_at), died_at)}"
+                           + (f"; the largest consumer was {marker['victim']}"
+                              f"{' (pid ' + str(marker['pid']) + ')' if marker.get('pid') else ''}"
+                              if marker.get("victim") else ""))
         if cause:
             because.append(f"{cause['name']} (pid {cause['pid']}) {cause['role']}: {cause['detail']}")
         return ("hang_memory", "critical",
