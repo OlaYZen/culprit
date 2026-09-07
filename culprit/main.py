@@ -709,7 +709,7 @@ async def api_node_truncate(
     Verified like a process action: the storage finding should clear."""
     if not confirm:
         raise HTTPException(400, "confirm must be true for a truncate request")
-    if not path.startswith("/"):
+    if not (path.startswith("/") or re.match(r"^[A-Za-z]:\\", path)):
         raise HTTPException(422, "path must be absolute")
     return await _verified_action(request, name, "truncate",
                                   {"pid": pid, "path": path})
@@ -721,6 +721,19 @@ async def api_node_truncate(
 UNIT_VERBS = ("restart", "start", "reload-or-restart", "reset-failed")
 UNIT_TIMEOUT_S = 60.0
 _UNIT_NAME = re.compile(r"^[A-Za-z0-9:_.@\\-]{1,255}\.(service|socket|timer|mount|path|target)$")
+# A Windows service name: the SCM's key name (Spooler, W32Time, MSSQL$SQLEXPRESS),
+# no suffix. The agent applies its own guards on top (units.refuse).
+_SERVICE_NAME = re.compile(r"^[A-Za-z0-9_.$@ -]{1,256}$")
+
+
+def _node_platform(name: str) -> str:
+    """linux / windows for an enrolled node, from its last report (or the
+    persisted value for an offline one); linux when nothing is known."""
+    assert registry is not None
+    for meta in registry.status_list():
+        if meta.get("name") == name:
+            return str(meta.get("platform") or "linux")
+    return "linux"
 
 
 @app.post("/api/nodes/{name}/units/{unit}/{verb}",
@@ -742,11 +755,18 @@ async def api_node_unit_action(
         raise HTTPException(422, f"verb must be one of {', '.join(UNIT_VERBS)}")
     if manager not in ("system", "user"):
         raise HTTPException(422, "manager must be system or user")
-    if not _UNIT_NAME.match(unit):
+    assert registry is not None and verifier is not None
+    # The name's shape depends on which agent this is: a systemd unit on a
+    # Linux node, the SCM's service name on a Windows one.
+    if _node_platform(name) == "windows":
+        if not _SERVICE_NAME.match(unit) or unit != unit.strip():
+            raise HTTPException(422, "not a service name")
+        if manager != "system":
+            raise HTTPException(422, "Windows services have one manager (system)")
+    elif not _UNIT_NAME.match(unit):
         raise HTTPException(422, "not a unit name")
     if not confirm:
         raise HTTPException(400, "confirm must be true for a unit action")
-    assert registry is not None and verifier is not None
     baseline = (registry.get_snapshot(name) or {}).get("outage") or {}
     result = await _agent_command(name, "unit_action",
                                   {"unit": unit, "verb": verb, "manager": manager},
@@ -826,7 +846,8 @@ async def api_node_version(request: Request, name: str,
         raise HTTPException(409, f"agent v{meta.get('agent_version') or '?'} cannot change "
                                  f"to a chosen version; update it to v{AGENT_REFS_SINCE} "
                                  "or newer first")
-    notes = await asyncio.to_thread(changelog.load, "agent")
+    notes = await asyncio.to_thread(
+        changelog.load, "agent-windows" if _node_platform(name) == "windows" else "agent")
     if not notes.get("available"):
         raise HTTPException(503, f"cannot list agent versions: {notes.get('reason')}")
     commit = next((c for c in notes["commits"] if c.get("version") == version), None)
@@ -950,6 +971,12 @@ def _deploy_command(request: Request, token: str) -> str:
     return f"{command} {_deploy_base(request)} {token}"
 
 
+def _deploy_command_windows(request: Request, token: str) -> str:
+    # The Windows agent's installer takes the same two positionals; run it
+    # from an Administrator PowerShell for the SYSTEM task.
+    return f".\\agent.ps1 {_deploy_base(request)} {token}"
+
+
 def _docker_command(request: Request, token: str) -> str:
     # The privileged `docker run` installer with this host's URL and the agent's
     # token filled in -- the exact one-liner the agent README documents, so an
@@ -994,6 +1021,7 @@ async def api_agent_create(
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name, "token": token,
             "deploy_command": _deploy_command(request, token),
+            "deploy_command_windows": _deploy_command_windows(request, token),
             "docker_command": _docker_command(request, token),
             "note": "this token is shown once; only its hash is stored"}
 
@@ -1011,6 +1039,7 @@ async def api_agent_rotate(name: str, request: Request) -> dict[str, Any]:
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name, "token": token,
             "deploy_command": _deploy_command(request, token),
+            "deploy_command_windows": _deploy_command_windows(request, token),
             "docker_command": _docker_command(request, token),
             "note": "the previous token stopped working the moment this one "
                     "was minted; update the agent's config"}
@@ -1345,9 +1374,10 @@ async def api_portnames() -> dict[str, Any]:
 # ------------------------------------------------------------- patch notes
 @app.get("/api/changelog/branches", summary="Branches of the host checkout or the agent repository")
 async def api_changelog_branches(
-    repo: str = Query("agent", pattern="^(host|agent)$",
-                      description="agent: the mirror of the agent repository (the branch setting, "
-                                  "Patch notes); host: this checkout's own branches"),
+    repo: str = Query("agent", pattern="^(host|agent|agent-windows)$",
+                      description="agent: the mirror of the Linux agent repository (the branch "
+                                  "setting, Patch notes); agent-windows: the Windows agent's; "
+                                  "host: this checkout's own branches"),
     refresh: bool = Query(False, description="fetch first if the last fetch is older than a minute"),
 ) -> dict[str, Any]:
     """What the mirror of the agent repository has under refs/heads, or the
@@ -1360,8 +1390,9 @@ async def api_changelog_branches(
 
 @app.get("/api/changelog", summary="Patch notes: the host's or the agent's commit history")
 async def api_changelog(
-    repo: str = Query("host", pattern="^(host|agent)$",
-                      description="host: this checkout; agent: a mirror of the agent repository"),
+    repo: str = Query("host", pattern="^(host|agent|agent-windows)$",
+                      description="host: this checkout; agent: a mirror of the Linux agent "
+                                  "repository; agent-windows: of the Windows agent's"),
     branch: str | None = Query(None, max_length=200,
                                description="a branch of that repository; the running one (host) "
                                            "or the configured update branch (agent) when omitted"),

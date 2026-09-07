@@ -84,11 +84,20 @@ def _d(value: Any) -> dict[str, Any]:
 # cadence -- see AGENTS.md's "Agent self-update".
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/OlaYZen/culprit-agent/{branch}/version.json"
 REMOTE_VERSION_REFRESH_S = 1800.0
+# The two agents are two repositories with two version lines. A node's
+# platform (from its report meta) picks the feed it is measured against;
+# an agent too old to say is linux, the only kind there was.
+PLATFORMS = ("linux", "windows")
+REMOTE_VERSION_URLS = {
+    "linux": REMOTE_VERSION_URL,
+    "windows": "https://raw.githubusercontent.com/OlaYZen/culprit-agent-windows/{branch}/version.json",
+}
 
 
-def remote_version_url(branch: str) -> str:
-    """The version.json GitHub publishes for one branch of the agent repo."""
-    return REMOTE_VERSION_URL.format(branch=branch or "main")
+def remote_version_url(branch: str, platform: str = "linux") -> str:
+    """The version.json GitHub publishes for one branch of an agent repo."""
+    return REMOTE_VERSION_URLS.get(platform or "linux", REMOTE_VERSION_URL).format(
+        branch=branch or "main")
 
 
 def _version_tuple(version: str | None) -> tuple[int, ...] | None:
@@ -122,9 +131,12 @@ def _is_newer(remote: str | None, local: str | None) -> bool | None:
 MIN_SELF_UPDATE_VERSION = "0.18.1-b"
 
 
-def self_update_broken(agent_version: str | None) -> bool | None:
+def self_update_broken(agent_version: str | None, platform: str | None = "linux") -> bool | None:
     """True when the agent's build predates the working updater, False when
-    it is at or past it, None when the version does not parse."""
+    it is at or past it, None when the version does not parse. The Windows
+    agent's line starts after the fix, so it is never broken this way."""
+    if platform == "windows":
+        return False if _version_tuple(agent_version) else None
     return _is_newer(MIN_SELF_UPDATE_VERSION, agent_version)
 
 
@@ -136,11 +148,12 @@ def self_update_broken(agent_version: str | None) -> bool | None:
 MIN_BRANCH_SWITCH_VERSION = "0.21.0-b"
 
 
-def branch_switch_supported(agent_version: str | None, agent_branch: str | None) -> bool | None:
+def branch_switch_supported(agent_version: str | None, agent_branch: str | None,
+                            platform: str | None = "linux") -> bool | None:
     """True when the agent reports its branch (only a switch-capable build
     does) or its version is at or past the fix, False when its version
-    predates it, None when nothing is known."""
-    if agent_branch:
+    predates it, None when nothing is known. Every Windows build switches."""
+    if agent_branch or platform == "windows":
         return True
     newer = _is_newer(MIN_BRANCH_SWITCH_VERSION, agent_version)
     return None if newer is None else not newer
@@ -225,6 +238,10 @@ def sanitise_report(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, 
         # The branch the agent's checkout is on, so the host can tell an
         # agent that is on the wrong line from one that is merely behind.
         "update_branch": _short(meta.get("update_branch"), 100),
+        # Which agent this is. Only the two known values pass; an agent
+        # that does not say (a Linux build older than the field) is linux.
+        "platform": (str(meta.get("platform")) if meta.get("platform") in PLATFORMS
+                     else None),
     }
     snapshot: dict[str, Any] = {}
     dropped: list[str] = []
@@ -272,6 +289,8 @@ class _Node:
         self.update_reason: str | None = None
         self.update_refs: bool | None = None
         self.update_branch: str | None = None
+        # "linux" or "windows", from the report meta; linux until told.
+        self.platform: str = "linux"
         # Desired setting overrides, handed back to the agent in the response
         # to its next report -- the push-only channel's one-way "downlink".
         # Deliberately in memory only: this mirrors the titlebar Refresh
@@ -319,6 +338,7 @@ class NodeRegistry:
         # loop thread). Stays at its last known-good value on a fetch failure
         # rather than flipping every node's badge off.
         self._remote_version: str | None = None
+        self._remote_version_windows: str | None = None
         self._remote_version_checked = 0.0
 
     # ----------------------------------------------------------------- ingest
@@ -359,6 +379,14 @@ class NodeRegistry:
                 node.update_refs = meta["update_refs"]
             if meta["update_branch"]:
                 node.update_branch = meta["update_branch"]
+            platform = meta.get("platform") or "linux"
+            if platform != node.platform or not known:
+                node.platform = platform
+                # Persisted so an offline node still says what it is.
+                try:
+                    self.history.set_agent_platform(name, platform)
+                except Exception:  # noqa: BLE001 -- bookkeeping, never the ingest
+                    log.debug("could not persist platform for %s", name)
             settings = dict(node.settings)
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
@@ -490,11 +518,13 @@ class NodeRegistry:
             meta = live.get(name) or {
                 "name": name, "online": False, "last_seen": agent.get("last_seen"),
                 "report_interval": None, "agent_version": None,
+                "platform": agent.get("platform") or "linux",
                 "hostname": None, "os": None, "container": None,
                 "update_capable": None, "update_available": None,
                 "update_reason": None, "update_refs": None, "update_branch": None,
                 "update_self_broken": None, "branch_switch_supported": None,
-                "remote_version": None, "remote_branch": getattr(self, "_remote_branch", "main"),
+                "remote_version": self._remote_version_for(agent.get("platform") or "linux"),
+                "remote_branch": getattr(self, "_remote_branch", "main"),
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -523,12 +553,42 @@ class NodeRegistry:
         if changed:
             self._remote_branch = branch
             self._remote_version = None  # the other branch's number is not this one's
+            self._remote_version_windows = None
         try:
             with urllib.request.urlopen(remote_version_url(branch), timeout=5) as response:
                 data = json.loads(response.read())
             self._remote_version = str(data["version"])
         except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
             log.warning("could not check the agent's published version: %s", exc)
+        # The Windows agent's line, only when a Windows node is enrolled: no
+        # point asking GitHub about a repository no node here runs from.
+        if self._has_platform("windows"):
+            try:
+                with urllib.request.urlopen(remote_version_url(branch, "windows"),
+                                            timeout=5) as response:
+                    data = json.loads(response.read())
+                self._remote_version_windows = str(data["version"])
+            except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
+                log.warning("could not check the Windows agent's published version: %s", exc)
+
+    def _has_platform(self, platform: str) -> bool:
+        """Whether any node -- live this run, or enrolled and persisted --
+        runs that agent. Defensive about its own attributes: the offline
+        tools build a registry without __init__ to pin the update logic."""
+        nodes = getattr(self, "_nodes", None) or {}
+        if any(getattr(node, "platform", "linux") == platform for node in nodes.values()):
+            return True
+        history = getattr(self, "history", None)
+        try:
+            return bool(history) and any((agent.get("platform") or "linux") == platform
+                                         for agent in history.list_agents())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _remote_version_for(self, platform: str | None) -> str | None:
+        if platform == "windows":
+            return getattr(self, "_remote_version_windows", None)
+        return self._remote_version
 
     def _meta(self, node: _Node) -> dict[str, Any]:
         system = _d(node.snapshot.get("system"))
@@ -542,19 +602,22 @@ class NodeRegistry:
             "report_interval": node.report_interval,
             "interval_fast": node.interval_fast,
             "agent_version": node.agent_version,
+            "platform": node.platform,
             "update_capable": node.update_capable,
             # Behind the published version, or on another branch than the
             # configured one: either way the configured line is not what
             # this agent runs, and an update moves it there.
-            "update_available": _update_available(self._remote_version, node.agent_version,
+            "update_available": _update_available(self._remote_version_for(node.platform),
+                                                  node.agent_version,
                                                   getattr(self, "_remote_branch", "main"),
                                                   node.update_branch),
             "update_reason": node.update_reason,
             "update_refs": node.update_refs,
             "update_branch": node.update_branch,
-            "update_self_broken": self_update_broken(node.agent_version),
-            "branch_switch_supported": branch_switch_supported(node.agent_version, node.update_branch),
-            "remote_version": self._remote_version,
+            "update_self_broken": self_update_broken(node.agent_version, node.platform),
+            "branch_switch_supported": branch_switch_supported(node.agent_version, node.update_branch,
+                                                               node.platform),
+            "remote_version": self._remote_version_for(node.platform),
             "remote_branch": getattr(self, "_remote_branch", "main"),
             # Clamped: these travel in every node list and every SSE snapshot
             # frame, so a 2 MB "hostname" would be amplified to every viewer.
@@ -748,7 +811,7 @@ def update_targets(metas: list[dict[str, Any]]) -> tuple[list[str], list[dict[st
             reason = "offline"
         elif meta.get("update_capable") is not True:
             reason = str(meta.get("update_reason") or "update capability not yet reported")
-        elif self_update_broken(meta.get("agent_version")):
+        elif self_update_broken(meta.get("agent_version"), meta.get("platform") or "linux"):
             reason = (f"agent v{meta.get('agent_version')} cannot update itself (fixed in "
                       f"v{MIN_SELF_UPDATE_VERSION}); re-run agent.sh on the machine once")
         elif meta.get("update_available") is False:

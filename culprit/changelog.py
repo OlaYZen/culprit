@@ -36,6 +36,7 @@ import threading
 from typing import Any
 
 import time
+from pathlib import Path
 
 from . import __version__
 from . import config as config_module
@@ -51,17 +52,24 @@ _VERSION_LINE = re.compile(r'^([-+])\s*"version"\s*:\s*"([^"]+)"', re.M)
 
 AGENT_REPO_URL = "https://github.com/OlaYZen/culprit-agent.git"
 AGENT_MIRROR = ROOT / "data" / "culprit-agent.git"
+# The Windows agent is its own repository with its own version line; its
+# notes come from a second bare mirror kept the same way.
+AGENT_REPOS: dict[str, tuple[str, Path]] = {
+    "agent": (AGENT_REPO_URL, AGENT_MIRROR),
+    "agent-windows": ("https://github.com/OlaYZen/culprit-agent-windows.git",
+                      ROOT / "data" / "culprit-agent-windows.git"),
+}
 AGENT_REFRESH_S = 3600.0
 BRANCH_REFRESH_S = 60.0       # a Settings visit may fetch again this often
 # Branches of the agent repository that are not lines agents should follow
 # (the demo branch carries synthetic data for the public dashboard).
 HIDDEN_BRANCHES = ("demo",)
-REPOS = ("host", "agent")
+REPOS = ("host", "agent", "agent-windows")
 
 HOST_REFRESH_S = AGENT_REFRESH_S
 
 _cache: dict[tuple[str, str], dict[str, Any]] = {}   # (repo, branch) -> parsed payload
-_agent_fetched_at = 0.0
+_agent_fetched: dict[str, float] = {name: 0.0 for name in AGENT_REPOS}
 _host_fetched_at = 0.0
 _lock = threading.Lock()
 
@@ -239,25 +247,25 @@ def _build_host(branch: str | None, running: str | None, problem: str) -> dict[s
     return out
 
 
-def _sync_agent_mirror() -> str:
+def _sync_agent_mirror(repo: str = "agent") -> str:
     """Clone the agent repository as a bare mirror on first use, then fetch
     it again when AGENT_REFRESH_S has passed. Returns "" or the reason the
     mirror could not be brought up to date (an existing mirror is still
     served then -- stale beats blank, and the payload says when it was
     fetched)."""
-    global _agent_fetched_at
-    if not (AGENT_MIRROR / "HEAD").exists():
-        AGENT_MIRROR.parent.mkdir(parents=True, exist_ok=True)
-        out, reason = _git(["clone", "--mirror", "--quiet", AGENT_REPO_URL, str(AGENT_MIRROR)],
+    url, mirror = AGENT_REPOS[repo]
+    if not (mirror / "HEAD").exists():
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        out, reason = _git(["clone", "--mirror", "--quiet", url, str(mirror)],
                            ROOT, timeout=90)
         if out is None:
-            return f"could not fetch the agent repository ({AGENT_REPO_URL}): {reason}"
-        _agent_fetched_at = time.time()
+            return f"could not fetch the agent repository ({url}): {reason}"
+        _agent_fetched[repo] = time.time()
         return ""
-    if time.time() - _agent_fetched_at < AGENT_REFRESH_S:
+    if time.time() - _agent_fetched[repo] < AGENT_REFRESH_S:
         return ""
-    _agent_fetched_at = time.time()   # one attempt per window, success or not
-    out, reason = _git(["fetch", "--quiet", "--prune"], AGENT_MIRROR, timeout=60)
+    _agent_fetched[repo] = time.time()   # one attempt per window, success or not
+    out, reason = _git(["fetch", "--quiet", "--prune"], mirror, timeout=60)
     if out is None:
         return f"could not refresh the agent repository: {reason}"
     return ""
@@ -275,7 +283,7 @@ def branches(repo: str = "agent", refresh: bool = False) -> dict[str, Any]:
     falls back to a typed name."""
     if repo not in REPOS:
         raise ValueError(f"unknown repo {repo!r}")
-    global _agent_fetched_at, _host_fetched_at
+    global _host_fetched_at
     with _lock:
         if repo == "host":
             running = _running_branch()
@@ -297,54 +305,57 @@ def branches(repo: str = "agent", refresh: bool = False) -> dict[str, Any]:
                     "hidden": list(HIDDEN_BRANCHES), "default": running, "running": running,
                     "fetched_at": _host_fetched_at or None, "stale_reason": problem or None}
         configured = config_module.get().agent_update_branch or "main"
-        problem = _sync_agent_mirror()
-        if not (AGENT_MIRROR / "HEAD").exists():
+        _url, mirror = AGENT_REPOS[repo]
+        problem = _sync_agent_mirror(repo)
+        if not (mirror / "HEAD").exists():
             return {"available": False, "reason": problem or "no mirror of the agent repository yet",
-                    "repo": "agent", "branches": [], "hidden": list(HIDDEN_BRANCHES),
+                    "repo": repo, "branches": [], "hidden": list(HIDDEN_BRANCHES),
                     "default": configured, "configured": configured, "fetched_at": None,
                     "stale_reason": None}
-        if refresh and not problem and time.time() - _agent_fetched_at >= BRANCH_REFRESH_S:
-            _agent_fetched_at = time.time()
-            out, reason = _git(["fetch", "--quiet", "--prune"], AGENT_MIRROR, timeout=60)
+        if refresh and not problem and time.time() - _agent_fetched[repo] >= BRANCH_REFRESH_S:
+            _agent_fetched[repo] = time.time()
+            out, reason = _git(["fetch", "--quiet", "--prune"], mirror, timeout=60)
             problem = "" if out is not None else f"could not refresh the agent repository: {reason}"
-        out, reason = _git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], AGENT_MIRROR)
+        out, reason = _git(["for-each-ref", "--format=%(refname:short)", "refs/heads"], mirror)
         if out is None:
             return {"available": False, "reason": f"could not list branches: {reason}",
-                    "repo": "agent", "branches": [], "hidden": list(HIDDEN_BRANCHES),
+                    "repo": repo, "branches": [], "hidden": list(HIDDEN_BRANCHES),
                     "default": configured, "configured": configured,
-                    "fetched_at": _agent_fetched_at or None, "stale_reason": problem or None}
+                    "fetched_at": _agent_fetched[repo] or None, "stale_reason": problem or None}
         names = _sorted_branches({line.strip() for line in out.splitlines() if line.strip()}
                                  - set(HIDDEN_BRANCHES))
-        return {"available": True, "reason": None, "repo": "agent", "branches": names,
+        return {"available": True, "reason": None, "repo": repo, "branches": names,
                 "hidden": list(HIDDEN_BRANCHES), "default": configured, "configured": configured,
-                "fetched_at": _agent_fetched_at or None, "stale_reason": problem or None}
+                "fetched_at": _agent_fetched[repo] or None, "stale_reason": problem or None}
 
 
-def _build_agent(branch: str, problem: str) -> dict[str, Any]:
-    out = _build_agent_inner(branch, problem)
+def _build_agent(repo: str, branch: str, problem: str) -> dict[str, Any]:
+    out = _build_agent_inner(repo, branch, problem)
     # The version picker warns before a downgrade below the first build whose
-    # updater works: from there the host cannot bring the agent back.
+    # updater works: from there the host cannot bring the agent back. Only
+    # the Linux agent's line has such a build; the Windows one started after.
     from .nodes import MIN_SELF_UPDATE_VERSION
-    out["min_self_update_version"] = MIN_SELF_UPDATE_VERSION
+    out["min_self_update_version"] = MIN_SELF_UPDATE_VERSION if repo == "agent" else None
     out["configured_branch"] = config_module.get().agent_update_branch or "main"
     return out
 
 
-def _build_agent_inner(branch: str, problem: str) -> dict[str, Any]:
-    if problem and not (AGENT_MIRROR / "HEAD").exists():
-        return {"available": False, "reason": problem, "repo": "agent", "current": None, "tip": None,
+def _build_agent_inner(repo: str, branch: str, problem: str) -> dict[str, Any]:
+    url, mirror = AGENT_REPOS[repo]
+    if problem and not (mirror / "HEAD").exists():
+        return {"available": False, "reason": problem, "repo": repo, "current": None, "tip": None,
                 "branch": branch, "commits": []}
-    exists, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], AGENT_MIRROR)
+    exists, _ = _git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], mirror)
     if exists is None:
-        return {"available": False, "repo": "agent", "current": None, "tip": None, "branch": branch,
+        return {"available": False, "repo": repo, "current": None, "tip": None, "branch": branch,
                 "commits": [], "reason": f"the agent repository has no branch '{branch}'"}
-    tip = _tip_version(AGENT_MIRROR, branch)
-    out = _build(AGENT_MIRROR, branch, tip)
-    out["repo"] = "agent"
+    tip = _tip_version(mirror, branch)
+    out = _build(mirror, branch, tip)
+    out["repo"] = repo
     out["branch"] = branch
     out["tip"] = tip
-    out["source"] = AGENT_REPO_URL
-    out["fetched_at"] = _agent_fetched_at or None
+    out["source"] = url
+    out["fetched_at"] = _agent_fetched[repo] or None
     out["stale_reason"] = problem or None
     return out
 
@@ -358,14 +369,14 @@ def load(repo: str = "host", branch: str | None = None) -> dict[str, Any]:
     if repo not in REPOS:
         raise ValueError(f"unknown repo {repo!r}")
     with _lock:
-        if repo == "agent":
+        if repo in AGENT_REPOS:
             branch = branch or config_module.get().agent_update_branch or "main"
-            problem = _sync_agent_mirror()
+            problem = _sync_agent_mirror(repo)
             key = (repo, branch)
             cached = _cache.get(key)
-            if cached is None or cached.get("_fetched") != _agent_fetched_at:
-                cached = _cache[key] = _build_agent(branch, problem)
-                cached["_fetched"] = _agent_fetched_at
+            if cached is None or cached.get("_fetched") != _agent_fetched[repo]:
+                cached = _cache[key] = _build_agent(repo, branch, problem)
+                cached["_fetched"] = _agent_fetched[repo]
         else:
             running = _running_branch()
             if branch is None or branch == running:
