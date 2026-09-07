@@ -32,7 +32,7 @@ from typing import Any, Iterable, Sequence
 
 log = logging.getLogger("culprit.db")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 ROLES = ("viewer", "operator", "admin")
 
@@ -230,7 +230,13 @@ CREATE TABLE IF NOT EXISTS agents (
     -- the pin is cleared or the node is explicitly updated again. The ref
     -- is the commit that version resolved to at the time.
     pinned_version   TEXT,
-    pinned_ref       TEXT
+    pinned_ref       TEXT,
+    -- "linux" or "windows", from the agent's own report meta, persisted so
+    -- an offline node still shows what it is and the update path (which
+    -- repository's version feed, which mirror) is chosen right. NULL until
+    -- the first report; a Linux agent older than the platform field is
+    -- treated as linux.
+    platform         TEXT
 );
 """
 
@@ -1075,7 +1081,12 @@ class History:
     def list_agents(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self._query(
             "SELECT name, enabled, created_at, last_seen, last_addr, "
-            "last_auto_update, pinned_version, pinned_ref FROM agents ORDER BY name")]
+            "last_auto_update, pinned_version, pinned_ref, platform FROM agents ORDER BY name")]
+
+    def set_agent_platform(self, name: str, platform: str | None) -> bool:
+        """Remember which agent this is (linux / windows), from its report."""
+        return self._execute("UPDATE agents SET platform = ? WHERE name = ?",
+                             (platform, name)) > 0
 
     def set_agent_pin(self, name: str, version: str | None, ref: str | None) -> bool:
         """Pin an agent to a version (an operator moved it there on purpose)
@@ -1172,7 +1183,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         except sqlite3.Error:
             pass  # column already there (partial earlier migration)
         # v7: the version pin (an operator's explicit downgrade).
-        for column in ("pinned_version TEXT", "pinned_ref TEXT"):
+        # v8: the agent's platform.
+        for column in ("pinned_version TEXT", "pinned_ref TEXT", "platform TEXT"):
             try:
                 conn.execute(f"ALTER TABLE agents ADD COLUMN {column}")
             except sqlite3.Error:
