@@ -74,7 +74,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].cpu", "nodes[].memory", "nodes[].disk_busy",
             "nodes[].disk_latency_ms", "nodes[].net_down", "nodes[].net_up",
             "nodes[].findings", "nodes[].headline", "nodes[].hostname",
-            "nodes[].uptime_seconds", "nodes[].process_count",
+            "nodes[].uptime_seconds", "nodes[].process_count", "nodes[].platform",
             # Findings active on several nodes at once (one shared cause).
             "shared",
         ],
@@ -371,6 +371,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].update_refs", "nodes[].pinned_version", "nodes[].pinned_ref",
             "nodes[].update_branch", "nodes[].remote_branch", "nodes[].update_self_broken",
             "nodes[].branch_switch_supported",
+            # linux / windows: which agent this is (the badge, the update feed).
+            "nodes[].platform",
         ],
     },
     "trends": {
@@ -430,6 +432,8 @@ OPTIONAL = {
     "system.machine.bios_version",
     "sessions.timeline[].end_inferred",
     "crashes.events[].detail",
+    # Host-added after ingest (Expectations); a Windows agent's sections
+    # carry every other key, None where the platform cannot measure it.
     "clients[].detail",               # only present when a client is detected
     "clients[].source",
     # Patch notes exist only on a host running from a git checkout; the
