@@ -564,19 +564,13 @@
   background: var(--bg-2); border: 1px solid var(--line-2); border-radius: var(--r);
   box-shadow: var(--shadow);
   animation: dialogin var(--t) var(--ease);
-  overflow: hidden; /* the body's scrollbar clips to the rounded corners, never outside them */
 }
 @keyframes dialogin { from { opacity: 0; transform: translateY(6px); } }
 .dialog--narrow { width: min(460px, 100%); }
 .dialog__head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex: 0 0 auto; }
 .dialog__title { font-size: 14px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dialog__close { margin-left: auto; flex: 0 0 auto; }
-/* The body is the scroll container. Its vertical margin keeps the scrollbar
-   track short of the head/foot rules and the corners (the track spans the
-   whole scroll box, so the margin is the only way to shorten it); the
-   padding makes up the same 16px of breathing room. */
-.dialog__body { margin: 4px 0; padding: 12px 16px; overflow-y: auto; }
-.dialog__body::-webkit-scrollbar-thumb { border-color: var(--bg-2); }
+.dialog__body { padding: 16px; overflow-y: auto; }
 .dialog__foot { display: flex; align-items: center; gap: 8px; padding: 11px 16px; border-top: 1px solid var(--line); flex: 0 0 auto; }
 .dialog__foot[hidden] { display: none; }
 .spacer { margin-left: auto; }
