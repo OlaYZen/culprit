@@ -313,6 +313,38 @@ export function freeDeletedFile(entry) {
   });
 }
 
+/* ══ Platform ══════════════════════════════════════════════════════════
+ * Which agent the selected node runs: "linux" or "windows", from the node
+ * meta the host attaches to every snapshot (persisted for offline nodes),
+ * else from the snapshot's own system section. The views read this to
+ * pick their vocabulary -- a Windows box has services, an event log and
+ * TerminateProcess where a Linux one has units, a journal and SIGTERM --
+ * and to say plainly which panels Windows cannot fill. */
+export function nodePlatform() {
+  const meta = store.state.node_meta || {};
+  const system = store.state.system || {};
+  return meta.platform || system.platform || "linux";
+}
+export function isWindows() { return nodePlatform() === "windows"; }
+
+const OS_WORDS = {
+  linux: { unit: "unit", units: "units", Unit: "Unit", Units: "Units", log: "journal", Log: "Journal",
+    manager: "systemd", killSignal: "SIGTERM", logCommand: (name) => `journalctl -u ${name} -e` },
+  windows: { unit: "service", units: "services", Unit: "Service", Units: "Services", log: "event log", Log: "Event log",
+    manager: "the Service Control Manager", killSignal: "TerminateProcess",
+    logCommand: (name) => `Get-WinEvent -LogName System | ? Message -match '${name}'` },
+};
+/** A platform word: osw("unit") is "unit" on Linux and "service" on Windows. */
+export function osw(key) {
+  const words = OS_WORDS[nodePlatform()] || OS_WORDS.linux;
+  return words[key] ?? OS_WORDS.linux[key] ?? key;
+}
+/** The badge a node list shows next to a Windows node; null for Linux
+ *  (the default needs no badge). */
+export function platformPill(platform) {
+  return platform === "windows" ? pill("Windows", "info") : null;
+}
+
 /* ══ Roles ═════════════════════════════════════════════════════════════
  * The server is the real gate (a hidden button here is convenience, not
  * security -- every mutating endpoint re-checks the role itself). Auth off
@@ -668,9 +700,11 @@ function buildProcessFooter(footer, detail) {
 
   // Throttle: cap the whole unit (cgroup) the process runs in -- reversible,
   // survives forks, and the right verb for a backup that should be slowed
-  // rather than killed. Only offered when a unit owns the process.
+  // rather than killed. Only offered when a unit owns the process (on
+  // Windows: always, through a Job Object on the process itself).
   const throttle = detail.unit
-    ? el("button.btn.btn--sm", { type: "button", title: `Cap the CPU and IO of ${detail.unit.name}` },
+    ? el("button.btn.btn--sm", { type: "button", title: detail.unit.manager === "job"
+        ? `Cap the CPU of ${detail.name} with a Job Object` : `Cap the CPU and IO of ${detail.unit.name}` },
       [detail.unit.throttled ? "Throttled…" : "Throttle…"])
     : null;
   throttle?.addEventListener("click", () => openThrottleDialog(detail));
@@ -678,10 +712,16 @@ function buildProcessFooter(footer, detail) {
   const end = el("button.btn.btn--danger.btn--sm", { type: "button" }, ["End task"]);
   end.addEventListener("click", () => {
     let outcome = null;
+    const windows = isWindows();
     confirmAction({
       title: `End ${detail.name}?`,
-      message: `This sends SIGTERM to ${detail.name} (PID ${detail.pid}).`,
-      detail: "Unsaved work in this process may be lost. SIGTERM asks it to exit; "
+      message: windows
+        ? `This calls TerminateProcess on ${detail.name} (PID ${detail.pid}).`
+        : `This sends SIGTERM to ${detail.name} (PID ${detail.pid}).`,
+      detail: windows
+        ? "Unsaved work in this process is lost: Windows has no polite request to exit that a process can "
+          + "honour from outside, so the process is ended outright."
+        : "Unsaved work in this process may be lost. SIGTERM asks it to exit; "
         + "if it ignores the signal, a second attempt with force sends SIGKILL, which nothing can catch.",
       confirmLabel: "End task",
       onConfirm: async () => {
@@ -707,27 +747,45 @@ const THROTTLE_TEXT = {
   quarter: "Cap the unit at a quarter of the machine's CPU and a near-idle IO weight — the background setting.",
   release: "Remove the cap: unlimited CPU and the default IO weight again.",
 };
+// On Windows the cap is a Job Object's CPU rate control on the process
+// itself (and whatever it starts from then on); there is no IO weight.
+const THROTTLE_TEXT_JOB = {
+  half: "Cap the process at half the machine's CPU (a hard cap: the scheduler stops running it once it has used its share of each interval).",
+  quarter: "Cap the process at a quarter of the machine's CPU — the background setting.",
+  release: "Remove the cap: the process runs unlimited again.",
+};
 
 function openThrottleDialog(detail) {
   const unit = detail.unit;
+  const job = unit.manager === "job";
+  const texts = job ? THROTTLE_TEXT_JOB : THROTTLE_TEXT;
   let level = unit.throttled ? "release" : "quarter";
   const result = el("div.result");
-  const explain = el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" }, text: THROTTLE_TEXT[level] });
+  const explain = el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" }, text: texts[level] });
   const picker = segmented({ label: "Level", options: THROTTLE_OPTIONS, value: level,
-    onChange: (v) => { level = v; explain.textContent = THROTTLE_TEXT[v]; } });
+    onChange: (v) => { level = v; explain.textContent = texts[v]; } });
   const count = fmt.isNum(unit.process_count) ? unit.process_count : null;
-  const scope = el("p", {}, [
-    "This acts on the whole unit ",
-    el("code.code", { text: unit.name }),
-    count !== null ? ` — every one of its ${count} process${count === 1 ? "" : "es"}, not only ${fmt.imageName(detail.name)}.` : ".",
-  ]);
+  const scope = job
+    ? el("p", {}, [
+      "This acts on ",
+      el("code.code", { text: fmt.imageName(detail.name) }),
+      " and everything it starts from now on (a Job Object), not on other processes of the same program.",
+    ])
+    : el("p", {}, [
+      "This acts on the whole unit ",
+      el("code.code", { text: unit.name }),
+      count !== null ? ` — every one of its ${count} process${count === 1 ? "" : "es"}, not only ${fmt.imageName(detail.name)}.` : ".",
+    ]);
   const body = el("div", {}, [
     scope,
-    unit.name.startsWith("session-") ? note("warn", "This unit is a login session: throttling it slows everything that person is running.", { margin: true }) : null,
+    !job && unit.name.startsWith("session-") ? note("warn", "This unit is a login session: throttling it slows everything that person is running.", { margin: true }) : null,
     unit.manager === "system" ? note("info", "A system unit: the agent needs root (or a polkit rule for org.freedesktop.systemd1.manage-units) to change its limits. If it lacks that, the answer below says so.", { margin: true }) : null,
+    job ? note("info", "Another user's process needs the agent elevated (the SYSTEM task has that). If it lacks that, the answer below says so.", { margin: true }) : null,
     el("div", { style: { marginTop: "12px" } }, [picker]),
     explain,
-    el("div.faint.small", { style: { marginTop: "8px" }, text: "Runtime only: a reboot or daemon-reload clears it. Nothing is written to the unit file." }),
+    el("div.faint.small", { style: { marginTop: "8px" }, text: job
+      ? "Runtime only: the cap lasts until the process exits or the agent restarts. Nothing is written anywhere."
+      : "Runtime only: a reboot or daemon-reload clears it. Nothing is written to the unit file." }),
   ]);
   const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
   const apply = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" } }, ["Apply"]);
@@ -744,7 +802,8 @@ function openThrottleDialog(detail) {
       const after = outcome.after || {};
       const text = level === "release"
         ? `${outcome.unit} released.`
-        : `${outcome.unit} capped: CPU ${fmt.isNum(after.cpu_quota_pct) ? `${after.cpu_quota_pct}%` : "unchanged"}, IO weight ${after.io_weight ?? "not applied"}.`;
+        : `${outcome.unit} capped: CPU ${fmt.isNum(after.cpu_quota_pct) ? `${after.cpu_quota_pct}%` : "unchanged"}`
+          + (job ? "." : `, IO weight ${after.io_weight ?? "not applied"}.`);
       inlineResult(result, text, "ok");
       if (outcome.note) body.append(note("info", fmt.esc(outcome.note), { margin: true }));
       setBusy(apply, false, "Apply");

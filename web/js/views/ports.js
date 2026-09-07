@@ -70,10 +70,11 @@ export function createPorts() {
     nodes.section = section({
       title: "Listening ports", meta: nodes.meta,
       body: el("div.tblwrap", {}, [table]),
-      foot: "“Kill” terminates the process holding the port (SIGTERM), the same guarded action as End task — PID 1, "
-          + "kernel threads and critical services (sshd, systemd, dbus…) are refused. On a remote node it is relayed "
-          + "to the agent, which runs it locally. “Backlog” is the accept queue against its maximum: full means the "
-          + "kernel is dropping new connections to that port because the service is not accepting fast enough.",
+      foot: "“Kill” terminates the process holding the port (SIGTERM on Linux, TerminateProcess on Windows), the same "
+          + "guarded action as End task — the init process, kernel threads and critical system processes (sshd, systemd, "
+          + "dbus; csrss, lsass, services.exe) are refused. On a remote node it is relayed to the agent, which runs it "
+          + "locally. “Backlog” is the accept queue against its maximum: full means the kernel is dropping new "
+          + "connections to that port because the service is not accepting fast enough (Linux only).",
     });
     pendingSlot(figSlot, skeletonFigures(7));
     pendingSlot(tableSlot, skeletonSection("Listening ports", 10));
@@ -281,6 +282,7 @@ function shortReason(reason) {
   if (text.includes("kernel thread")) return "kernel thread";
   if (text.includes("critical system process")) return "critical process";
   if (text.includes("no longer exists")) return "gone";
+  if (text.includes("elevated")) return "needs admin";
   if (text.includes("root") || text.includes("access denied") || text.includes("cap_sys_ptrace")) return "needs root";
   return "can’t kill";
 }

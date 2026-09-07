@@ -12,7 +12,9 @@ import * as fmt from "../util/format.js";
 import { createChart } from "../charts.js";
 import { store, api } from "../stream.js";
 import { emptyState, note, pendingSlot, readySlot, skeletonFigures, skeletonSection } from "../ui.js";
-import { canOperate, containerPill, figures, freeDeletedFile, kv, kvs, legend, meter, openProcessModal, pill, section, viewHead } from "./shared.js";
+import {
+  canOperate, containerPill, figures, freeDeletedFile, isWindows, kv, kvs, legend, meter, openProcessModal, pill, section, viewHead,
+} from "./shared.js";
 
 export function createStorage() {
   const root = el("div.view", { dataset: { view: "storage" } });
@@ -174,7 +176,10 @@ export function createStorage() {
           forecastLine(volume),
           writersBlock(volume),
           freePct <= 10
-            ? note("warn", "Nearly full. Free space here is what a <em>user</em> can write (f_bavail) — ext4 reserves "
+            ? note("warn", isWindows()
+              ? "Nearly full. A full volume fails writes, breaks Windows Update and the page file's growth, and NTFS "
+                + "slows down as it fragments the last free space."
+              : "Nearly full. Free space here is what a <em>user</em> can write (f_bavail) — ext4 reserves "
               + "~5% on top for root. Full filesystems fail writes, break package upgrades, and journald starts dropping history.",
             { margin: true })
             : null,
@@ -185,7 +190,7 @@ export function createStorage() {
         + "the mount and a non-zero write rate. A file's own rate is "
         + (payload.files_method || "its descriptor's offset between samples")
         + " — a file with none listed may be written through mmap. Deleted-but-open files keep their space until the holder closes them.";
-      readySlot(volumeSlot, section({ title: "Volumes", meta: `${volumes.length} mounted`, body: grid, foot }));
+      readySlot(volumeSlot, section({ title: "Volumes", meta: `${volumes.length} ${isWindows() ? "volumes" : "mounted"}`, body: grid, foot }));
     }
 
     if (media.length) {

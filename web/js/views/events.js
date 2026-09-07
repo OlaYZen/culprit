@@ -16,16 +16,28 @@ import {
   checkTree, copyButton, emptyState, icons, note, openModal, pendingSlot, readySlot, segmented, skeletonFigures,
   skeletonSection,
 } from "../ui.js";
-import { changeList, figures, kv, kvs, logItem, pill, section, subhead, viewHead } from "./shared.js";
+import {
+  changeList, figures, isWindows, kv, kvs, logItem, osw, pill, section, subhead, viewHead,
+} from "./shared.js";
 
+// Source keys from both agents. The Linux ones come from the journal, the
+// Windows-only ones (bugcheck, app_hang, dotnet, low_memory, the policy
+// and time-sync sources) from the event log; keys the two share mean the
+// same thing on both. A key not listed here would be filtered out.
 const GROUPS = [
   { label: "Crashes and stability", key: "crash", children: [
-    ["oom_kill", "OOM kills"], ["unclean_shutdown", "Unclean shutdowns"], ["mce", "Hardware errors"],
-    ["app_crash", "Crashes / core dumps"], ["hung_task", "Hung kernel tasks"], ["disk_error", "Disk errors"],
-    ["service_fail", "Unit failures"],
+    ["oom_kill", "OOM kills"], ["low_memory", "Low virtual memory"], ["unclean_shutdown", "Unclean shutdowns"],
+    ["bugcheck", "Bluescreens"], ["mce", "Hardware errors"],
+    ["app_crash", "Crashes / core dumps"], ["app_hang", "Application hangs"], ["dotnet", ".NET runtime errors"],
+    ["hung_task", "Hung kernel tasks"], ["disk_error", "Disk errors"],
+    ["service_fail", "Service failures"],
   ] },
   { label: "Updates", key: "update", children: [["update_ok", "Package operations"], ["update_fail", "Failed operations"]] },
-  { label: "Security and logging", key: "policy", children: [["auth_fail", "Failed sign-ins"], ["journal_ratelimit", "Journal rate limiting"]] },
+  { label: "Security and logging", key: "policy", children: [
+    ["auth_fail", "Failed sign-ins"], ["lockout", "Account lockouts"], ["journal_ratelimit", "Journal rate limiting"],
+    ["policy_error", "Group Policy errors"], ["policy_apply", "Group Policy applied"], ["time_sync", "Time sync problems"],
+    ["netlogon", "Domain connectivity"], ["dns_client", "Name resolution"],
+  ] },
 ];
 const ALL_SOURCES = GROUPS.flatMap((g) => g.children.map(([key]) => key));
 
@@ -199,14 +211,14 @@ export function createEvents() {
       render(nodes.dumps, el("div", {}, [
         kvs(files.map((file) => kv(el("span.trunc", { text: file.name, title: file.path }),
           `${fmt.bytes(file.size)} · ${fmt.ago(file.modified)}`))),
-        el("div", { style: { marginTop: "8px" } }, [copyButton("/var/crash", "Copy crash folder path")]),
+        el("div", { style: { marginTop: "8px" } }, [copyButton(isWindows() ? "C:\\Windows\\Minidump" : "/var/crash", "Copy crash folder path")]),
       ]));
     }
     patchText(nodes.dumpMeta, `${dumps.count ?? files.length} file(s)`);
 
     const journal = payload.journal || {};
-    patchText(nodes.lead, `${events.length} events from the journal over the last ${days} days`
-      + `${journal.readable === false ? " — journal access is gated" : ""}`
+    patchText(nodes.lead, `${events.length} events from the ${osw("log")} over the last ${days} days`
+      + `${journal.readable === false ? ` — ${osw("log")} access is gated` : ""}`
       + `${journal.persistent === false ? " · journal is volatile: history dies at reboot" : ""}`);
   }
 
@@ -266,9 +278,9 @@ function showEventModal(event) {
       .map(([key, value]) => kv(key.replace(/_/g, " "), String(value), { mono: true }))));
   }
   if (event.service?.name) {
-    body.append(subhead("Unit"));
+    body.append(subhead(osw("Unit")));
     body.append(kvs([kv("Name", event.service.name, { mono: true })]));
-    body.append(note("info", `The unit's own output is in its journal: <code>journalctl -u ${fmt.esc(event.service.name)} -e</code>`, { margin: true }));
+    body.append(note("info", `The ${osw("unit")}'s own output is in its ${osw("log")}: <code>${fmt.esc(osw("logCommand")(event.service.name))}</code>`, { margin: true }));
   }
   const rawEntries = Object.entries(event.data || {}).filter(([key]) => key !== "_values");
   if (rawEntries.length) {

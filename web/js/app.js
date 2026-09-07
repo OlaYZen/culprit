@@ -125,7 +125,7 @@ function updateNodePicker(state) {
 
   const wanted = nodes.map((node) => ({
     value: node.name,
-    label: `${node.name}${node.online ? "" : node.enabled === false ? " · revoked" : " · offline"}`,
+    label: `${node.name}${node.platform === "windows" ? " · Windows" : ""}${node.online ? "" : node.enabled === false ? " · revoked" : " · offline"}`,
   }));
   const signature = wanted.map((o) => `${o.value}|${o.label}`).join(";");
   if (nodePicker.dataset.signature !== signature) {

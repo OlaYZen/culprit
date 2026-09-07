@@ -11,7 +11,9 @@ import { el, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { store } from "../stream.js";
 import { emptyState, gatedState, note, pendingSlot, readySlot, skeletonFigures, skeletonSection } from "../ui.js";
-import { figures, kv, kvs, logItem, section, viewHead } from "./shared.js";
+import {
+  figures, isWindows, kv, kvs, logItem, section, viewHead,
+} from "./shared.js";
 
 export function createSessions() {
   const root = el("div.view", { dataset: { view: "sessions" } });
@@ -45,13 +47,16 @@ export function createSessions() {
       title: "Session history", meta: nodes.tlMeta, body: nodes.timeline,
       foot: "Bars are drawn to scale across the observed window. Green means still open; hatched bars ended at a "
           + "reboot rather than a recorded sign-out — the session cannot have outlived the reboot, but the exact "
-          + "sign-out time is not in the journal.",
+          + (isWindows() ? "sign-out time is not in the event log." : "sign-out time is not in the journal."),
     });
     nodes.bottom = [
       section({ title: "Boots and shutdowns", meta: nodes.bootMeta, body: nodes.boots }),
       section({
         title: "Current sessions", meta: nodes.curMeta, body: nodes.current,
-        foot: "Lock state comes from logind's LockedHint and needs no privilege. logind keeps no lock history, "
+        foot: isWindows()
+          ? "Lock state is inferred from a lock screen (LogonUI.exe) running in the session, which needs no privilege; "
+            + "lock and unlock history is in the Security event log when the agent runs elevated."
+          : "Lock state comes from logind's LockedHint and needs no privilege. logind keeps no lock history, "
             + "so only the current state is shown.",
       }),
     ];
@@ -88,16 +93,31 @@ export function createSessions() {
       { label: "Total signed-in time", value: fmt.duration(summary.total_seconds, { units: 2 }) },
       { label: "Boots", value: String(summary.boots ?? 0) },
       { label: "Shutdowns", value: String(summary.shutdowns ?? 0) },
-      { label: "Locked now", value: (sessions.current || []).some((s) => s.locked) ? "yes" : "no", hint: "from logind LockedHint" },
+      { label: "Locked now", value: (sessions.current || []).some((s) => s.locked) ? "yes" : "no",
+        hint: isWindows() ? "a lock screen (LogonUI) in the session" : "from logind LockedHint" },
     ]));
 
-    if (sessions.requires_elevation) {
+    head.leadNode.textContent = isWindows()
+      ? "Who is signed in now from the session table, and sign-in / sign-out history from the event log."
+      : "Sign-in and sign-out history from systemd-logind, corroborated by the journal.";
+    if (sessions.requires_elevation && isWindows()) {
+      readySlot(noticeSlot, gatedState({
+        title: "Exact session history needs administrator rights",
+        body: sessions.note || "Sign-ins, sign-outs, lock/unlock and failed sign-ins live in the Security event log, "
+          + "which returns access denied to a standard user. The times below come from the User Profile Service log "
+          + "and are approximate. Current sessions still come from the session table.",
+        command: "Run agent.ps1 from an Administrator PowerShell (the SYSTEM task)",
+      }));
+    } else if (sessions.requires_elevation) {
       readySlot(noticeSlot, gatedState({
         title: "Session history needs journal access",
         body: sessions.note || "History comes from systemd-logind's journal, which is readable by the systemd-journal "
           + "(or adm) group. Current sessions below still come from loginctl.",
         command: "sudo usermod -aG systemd-journal $USER",
       }));
+    } else if (isWindows()) {
+      readySlot(noticeSlot, note("ok", "<strong>Exact times.</strong> Sessions below come from the Security event log "
+        + "(sign-in 4624, sign-out 4634/4647, lock 4800/4801), paired on their logon id."));
     } else {
       readySlot(noticeSlot, note("ok", "<strong>Exact times.</strong> Sessions below come from systemd-logind's journal, "
         + "paired on session id, so start and end times are the ones logind recorded."));

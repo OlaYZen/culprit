@@ -19,7 +19,7 @@ import {
   combobox, emptyState, pendingSlot, readySlot, searchField, segmented, skeletonFigures, skeletonSection,
   switchControl,
 } from "../ui.js";
-import { containerLabelMode, containerPill, figures, openProcessModal, pill, section, viewHead } from "./shared.js";
+import { containerLabelMode, containerPill, figures, isWindows, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const COLUMNS = [
   { key: "tree", label: "", sortable: false, width: "10px" },
@@ -38,8 +38,8 @@ const COLUMNS = [
   { key: "io_bytes_sec", label: "Disk I/O", cls: "n", sort: (p) => p.io_bytes_sec },
   { key: "gpu", label: "GPU %", cls: "n", sort: (p) => p.gpu },
   { key: "threads", label: "Thr", cls: "n", sort: (p) => p.threads },
-  { key: "handles", label: "FDs", cls: "n", sort: (p) => p.handles,
-    title: "Open file descriptors — readable for your own processes; an em dash means it needs CAP_SYS_PTRACE, not zero" },
+  { key: "handles", label: "Handles", cls: "n", sort: (p) => p.handles,
+    title: "Open file descriptors on Linux, kernel handles on Windows — an em dash means not readable (CAP_SYS_PTRACE), not zero" },
   { key: "page_faults_sec", label: "Faults/s", cls: "n", sort: (p) => p.page_faults_sec,
     title: "Page faults per second — high values mean memory churn" },
   { key: "elapsed_seconds", label: "Uptime", cls: "n", sort: (p) => p.elapsed_seconds },
@@ -150,16 +150,24 @@ export function createProcesses() {
     const all = payload.processes || [];
     const totals = payload.totals || {};
 
+    const windows = isWindows();
     readySlot(figSlot, figures([
       { label: "Processes", value: fmt.count(totals.count) },
       { label: "Threads", value: fmt.count(totals.threads) },
-      { label: "Kernel threads", value: fmt.count(totals.kernel_threads) },
-      { label: "D-state", value: fmt.count(totals.d_state), hint: "uninterruptible sleep",
-        tone: totals.stuck > 0 ? "crit" : totals.d_state > 2 ? "warn" : null },
+      ...(windows ? [
+        { label: "Handles", value: fmt.count(totals.handles), hint: "kernel handles held" },
+        { label: "Not responding", value: fmt.count(totals.hung), hint: "windows not pumping messages",
+          tone: totals.hung > 0 ? "crit" : null },
+      ] : [
+        { label: "Kernel threads", value: fmt.count(totals.kernel_threads) },
+        { label: "D-state", value: fmt.count(totals.d_state), hint: "uninterruptible sleep",
+          tone: totals.stuck > 0 ? "crit" : totals.d_state > 2 ? "warn" : null },
+      ]),
       { label: "Resident memory", value: fmt.bytes(totals.working_set), hint: "sum of resident sets" },
       { label: "Disk I/O", value: fmt.rate(totals.read_bytes_sec + totals.write_bytes_sec),
         hint: totals.io_unreadable ? `${totals.io_unreadable} not readable` : null },
-      { label: "Sample cost", value: fmt.ms(payload.sample_ms), hint: "direct /proc scan" },
+      { label: "Sample cost", value: fmt.ms(payload.sample_ms),
+        hint: payload.mode === "pdh" ? "Process V2 counters" : payload.mode === "psutil" ? "psutil fallback (slow)" : "direct /proc scan" },
     ]));
 
     const userCounts = new Map();

@@ -580,7 +580,7 @@ export function createSettings() {
           fieldRow({ id: hostInput.id, label: "Host address agents report to", unit: "URL or IP:port", input: hostInput,
             help: "The address the deploy command tells an agent to POST reports to. Leave blank to use the address you reached this dashboard on." }),
           fieldRow({ id: cmdInput.id, label: "Runner command", unit: "prepended to the command", input: cmdInput,
-            help: "What runs the agent bundle. Use “sudo ./agent.sh” so the agent installs as a system service running as root, which unlocks full port and process attribution; plain ./agent.sh makes a user service." }),
+            help: "What runs the Linux agent bundle. Use “sudo ./agent.sh” so the agent installs as a system service running as root, which unlocks full port and process attribution; plain ./agent.sh makes a user service. The Windows command (.\\agent.ps1) is fixed and shown next to it." }),
         ]),
         el("div", {}, [
           subhead("Deploy command preview"),
@@ -961,7 +961,7 @@ export function createSettings() {
     for (const node of list) {
       const seen = node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported";
       const status = node.enabled === false ? "revoked" : node.online ? "online" : "offline";
-      rows.push(kv(node.name, `${status} · ${seen}${node.hostname ? ` · ${node.hostname}` : ""}${node.agent_version ? ` · agent v${node.agent_version}` : ""}`,
+      rows.push(kv(node.name, `${status} · ${seen}${node.platform === "windows" ? " · Windows" : ""}${node.hostname ? ` · ${node.hostname}` : ""}${node.agent_version ? ` · agent v${node.agent_version}` : ""}`,
         { tone: node.enabled === false ? null : node.online ? "ok" : "crit" }));
     }
     const foot = el("span");

@@ -14,7 +14,9 @@ import { el, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { store } from "../stream.js";
 import { emptyState, note, pendingSlot, readySlot, skeletonSection, skeletonStatus } from "../ui.js";
-import { kv, kvs, pill, section, viewHead } from "./shared.js";
+import {
+  kv, kvs, osw, pill, section, viewHead,
+} from "./shared.js";
 
 const STATUS_META = {
   up_to_date: { label: "Up to date", tone: "ok", sev: "ok" },
@@ -104,7 +106,7 @@ export function createSync() {
         const rows = [kv("Status", client.detail || clientMeta.label), kv("Read from", client.source || fmt.dash)];
         const unit = client.unit;
         if (unit) {
-          rows.push(kv("systemd unit", `${unit.active || "?"} (${unit.sub || "?"})`,
+          rows.push(kv(`${osw("manager")} unit`, `${unit.active || "?"} (${unit.sub || "?"})`,
             { tone: unit.active === "active" ? "ok" : unit.active === "failed" ? "crit" : null }));
           if (Number(unit.restarts) > 0) rows.push(kv("Unit restarts", String(unit.restarts), { tone: "warn", mono: true }));
         }
@@ -123,6 +125,13 @@ export function createSync() {
 
     const inotify = payload.inotify || {};
     const pct = inotify.percent;
+    if (inotify.available === false) {
+      // A Windows agent: ReadDirectoryChangesW has no watch quota, and the
+      // section says so instead of showing five dashes.
+      readySlot(inotifySlot, section({ title: "inotify file watches",
+        body: emptyState("Not applicable here", inotify.reason || "This platform has no inotify watch limit.") }));
+      return;
+    }
     readySlot(inotifySlot, section({
       title: "inotify file watches",
       body: el("div", {}, [

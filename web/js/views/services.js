@@ -17,7 +17,9 @@ import {
   combobox, copyButton, emptyState, icons, note, pendingSlot, readySlot, searchField, segmented,
   skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { containerPill, figures, kv, kvs, openProcessModal, pill, section, viewHead } from "./shared.js";
+import {
+  containerPill, figures, isWindows, kv, kvs, openProcessModal, pill, section, viewHead,
+} from "./shared.js";
 
 const STATUS_TONE = {
   running: "ok", exited: null, stopped: null, waiting: "info",
@@ -64,18 +66,20 @@ export function createServices() {
     nodes.tbody = el("tbody");
     const table = el("table.tbl");
     table.innerHTML = `<thead><tr>
-      <th>Unit</th><th>Status</th><th>Start</th>
-      <th class="r" title="CPU share since the previous slow tick, from the unit's cgroup">CPU %</th>
-      <th class="r" title="memory.current from the unit's cgroup">Memory</th>
-      <th class="r" title="Time tasks in this unit stalled on any resource (worst of cpu/mem/io PSI avg10)">Stall %</th>
+      <th>Service</th><th>Status</th><th>Start</th>
+      <th class="r" title="CPU share since the previous slow tick, from the unit's cgroup (Linux only)">CPU %</th>
+      <th class="r" title="memory.current from the unit's cgroup (Linux only)">Memory</th>
+      <th class="r" title="Time tasks in this unit stalled on any resource (worst of cpu/mem/io PSI avg10; Linux only)">Stall %</th>
       <th class="r">PID</th><th>Scope</th>
     </tr></thead>`;
     table.append(nodes.tbody);
     nodes.meta = el("span");
     nodes.section = section({
-      title: "All units", meta: nodes.meta,
+      title: "All services", meta: nodes.meta,
       body: el("div.tblwrap", {}, [table]),
-      foot: "CPU, memory and stall time come from each unit's own cgroup (cgroup v2), so they are exact attribution, not estimates.",
+      foot: "On Linux, CPU, memory and stall time come from each unit's own cgroup (cgroup v2), so they are exact "
+          + "attribution, not estimates. Windows keeps no per-service accounting, so those columns stay blank there "
+          + "and the process table names what each host process (svchost) hosts.",
     });
     pendingSlot(figSlot, skeletonFigures(7));
     pendingSlot(problemsSlot, skeletonSection("Unit health", 2));
@@ -118,10 +122,11 @@ export function createServices() {
     readySlot(figSlot, figures([
       { label: "Units", value: fmt.count(summary.total) },
       { label: "Running", value: fmt.count(summary.status_running), tone: "ok" },
-      { label: "Exited", value: fmt.count(summary.status_exited), hint: "oneshots, done" },
+      { label: "Exited", value: fmt.count(summary.status_exited), hint: isWindows() ? "no such state on Windows" : "oneshots, done" },
       { label: "Failed", value: fmt.count(summary.status_failed ?? 0), tone: summary.status_failed ? "crit" : "ok" },
       { label: "Enabled", value: fmt.count(summary.start_enabled) },
-      { label: "User units", value: fmt.count(summary.user_units), hint: payload.user_bus ? "--user bus included" : "user bus unreachable" },
+      { label: isWindows() ? "Per-user services" : "User units", value: fmt.count(summary.user_units),
+        hint: isWindows() ? "none on Windows (scheduled tasks instead)" : payload.user_bus ? "--user bus included" : "user bus unreachable" },
       { label: "Problems", value: fmt.count(problems.length), tone: problems.length ? "warn" : "ok", hint: "failed, looping, or not started" },
     ]));
 
@@ -146,7 +151,11 @@ export function createServices() {
         title: `${problems.length} unit problem${problems.length === 1 ? "" : "s"}`,
         tone: problems.some((p) => p.severity === "critical") ? "crit" : "warn",
         body: list,
-        foot: "Derived from unit properties — a oneshot that legitimately exits is recognised by its Type and never "
+        foot: isWindows()
+          ? "Automatic services that are not running, minus the ones Windows itself stops after their work "
+            + "(Software Protection, Windows Update between scans, …). A non-zero exit code from the Service Control "
+            + "Manager is the failure reason."
+          : "Derived from unit properties — a oneshot that legitimately exits is recognised by its Type and never "
             + "flagged. systemd's Result field names why a unit failed (oom-kill, timeout, exit-code, watchdog).",
       }));
     } else if (payload.degraded) {
@@ -285,7 +294,8 @@ export function createServices() {
     ));
     return section({
       title,
-      body: units.length ? kvs(rows) : emptyState("No cgroup data", "Per-unit attribution needs cgroup v2."),
+      body: units.length ? kvs(rows) : emptyState(isWindows() ? "Not capable in Windows" : "No cgroup data",
+        isWindows() ? "Windows keeps no per-service CPU or memory accounting; the process table shows what each svchost hosts." : "Per-unit attribution needs cgroup v2."),
       foot,
     });
   }

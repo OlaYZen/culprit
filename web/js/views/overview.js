@@ -27,7 +27,9 @@ import {
   emptyState, note, pendingSlot, readySlot, skeletonFacts, skeletonFleet, skeletonMetric,
   skeletonSection, skeletonStatus,
 } from "../ui.js";
-import { figure, legend, logItem, meter, offenderRow, pill, section, viewHead } from "./shared.js";
+import {
+  figure, isWindows, legend, logItem, meter, offenderRow, pill, platformPill, section, viewHead,
+} from "./shared.js";
 
 const RING_KEEP = 900;
 
@@ -354,6 +356,11 @@ export function createOverview() {
         { critical: "crit", warn: "warn", info: "info" }[severity] || "ok"];
     patchText(card._pill, pillText);
     patchAttr(card._pill, "data-tone", pillTone);
+    // A Windows node is badged once; Linux is the default and needs none.
+    if (node.platform === "windows" && !card._os) {
+      card._os = platformPill("windows");
+      card.firstElementChild.insertBefore(card._os, card._pill);
+    }
     if (!node.online) {
       fleetCardBody(card, "offline");
       patchText(card._dead, node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported");
@@ -565,18 +572,32 @@ export function createOverview() {
       patchText(gauge.pctNode, `${Math.round(value)}`);
     }
 
+    // The Linux-only kernel signals (iowait, steal, the load average,
+    // D-state) have no Windows counterpart; a Windows node shows what it
+    // does have instead -- the commit charge, interrupt+DPC time, turbo.
+    const windows = isWindows();
     render(nodes.signals, [
       fact("Ready threads / core", fmt.fixed(cpu.queue_per_core, 2), { tone: cpu.queue_per_core >= 1 ? "warn" : null }),
       fact("Hard faults / s", fmt.count(mem.hard_faults_sec), { tone: mem.hard_faults_sec > 500 ? "crit" : null }),
       fact("Soft faults / s", fmt.count(mem.page_faults_sec)),
       fact("Disk latency", fmt.ms(disk.latency_ms), { tone: disk.latency_ms > 25 ? "crit" : null }),
       fact("Disk queue depth", fmt.fixed(disk.queue_length, 2)),
-      fact("I/O wait", fmt.pct(cpu.iowait), { tone: cpu.iowait > 20 ? "warn" : null }),
-      fact("CPU steal", fmt.pct(cpu.steal), { tone: cpu.steal > 5 ? "warn" : null }),
-      fact("Swap in use", fmt.pct(mem.swap_percent)),
-      fact("Load average (1m)", fmt.fixed(cpu.load_1, 2)),
-      fact("Context switches / s", fmt.count(cpu.context_switches)),
-      fact("Uninterruptible tasks", fmt.count(cpu.blocked), { tone: cpu.blocked > 3 ? "warn" : null }),
+      ...(windows ? [
+        fact("Commit charge", fmt.pct(mem.commit_percent), { tone: mem.commit_percent > 90 ? "crit" : null }),
+        fact("Interrupt + DPC time", fmt.pct(cpu.interrupt), { tone: cpu.interrupt > 10 ? "warn" : null }),
+        fact("Page file in use", fmt.pct(mem.pagefile_percent ?? mem.swap_percent)),
+        fact("Clock vs base", fmt.isNum(cpu.performance_pct) ? `${Math.round(cpu.performance_pct)}%` : fmt.dash,
+          { title: "% Processor Performance — above 100 is turbo" }),
+        fact("Context switches / s", fmt.count(cpu.context_switches)),
+        fact("Power plan", cpu.governor || fmt.dash),
+      ] : [
+        fact("I/O wait", fmt.pct(cpu.iowait), { tone: cpu.iowait > 20 ? "warn" : null }),
+        fact("CPU steal", fmt.pct(cpu.steal), { tone: cpu.steal > 5 ? "warn" : null }),
+        fact("Swap in use", fmt.pct(mem.swap_percent)),
+        fact("Load average (1m)", fmt.fixed(cpu.load_1, 2)),
+        fact("Context switches / s", fmt.count(cpu.context_switches)),
+        fact("Uninterruptible tasks", fmt.count(cpu.blocked), { tone: cpu.blocked > 3 ? "warn" : null }),
+      ]),
     ]);
   }
 
@@ -628,10 +649,11 @@ export function createOverview() {
     const access = system.access || {};
     const pro = system.ubuntu_pro;
     const model = `${machine.manufacturer || ""} ${machine.model || ""}`.trim();
+    const windows = isWindows();
     render(nodes.identity, [
       fact("Name", system.hostname || fmt.dash),
-      fact("Operating system", os.product || "Linux", { wide: true }),
-      fact("Kernel", os.build_full || fmt.dash, { mono: true, wide: true }),
+      fact("Operating system", os.product || (windows ? "Windows" : "Linux"), { wide: true }),
+      fact(windows ? "Build" : "Kernel", os.build_full || fmt.dash, { mono: true, wide: true }),
       fact("Model", model || fmt.dash, { wide: !!model && model.length > 22 }),
       fact("Processor", cpu.name || fmt.dash, { wide: true }),
       fact("Cores", `${cpu.physical_cores ?? "?"} physical · ${cpu.logical_cores ?? "?"} logical`),
@@ -641,9 +663,11 @@ export function createOverview() {
         ? `${system.container} container` : system.virtualization ? `${system.virtualization} guest` : "bare metal",
       { tone: system.container ? "warn" : null,
         title: system.container ? `${system.container} container — /proc numbers may be the host's` : null }),
-      fact("Pressure source", system.psi_available ? "kernel PSI" : "derived (no PSI)", { tone: system.psi_available ? "ok" : null }),
-      fact("Signed in as", system.user || fmt.dash),
-      fact("Journal access", (access.journal || {}).ok ? "yes" : `needs ${(access.journal || {}).needs || "group membership"}`,
+      fact("Pressure source", system.psi_available ? "kernel PSI" : windows ? "derived (Windows has no PSI)" : "derived (no PSI)",
+        { tone: system.psi_available ? "ok" : null, title: windows ? system.psi_reason || null : null }),
+      fact(windows ? "Running as" : "Signed in as", system.user || fmt.dash),
+      fact(windows ? "Security log access" : "Journal access",
+        (access.journal || {}).ok ? "yes" : `needs ${(access.journal || {}).needs || "group membership"}`,
         { tone: (access.journal || {}).ok ? "ok" : null }),
       fact("Booted", system.boot_time ? fmt.dateTime(system.boot_time) : fmt.dash),
       fact("Uptime", fmt.duration(system.uptime_seconds, { units: 3 })),

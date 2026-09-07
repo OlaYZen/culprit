@@ -211,30 +211,32 @@ export function createCoroner() {
           title: entry.unit || "?", text: entry.message,
         }))));
       }
+      const logWord = evidence.platform === "windows" ? "event log" : "journal";
       if (!markers.length && !tail.length) {
-        body.append(emptyState("Nothing from the journal", evidence.journal?.reason || "The previous boot's journal had no entries in the window."));
+        body.append(emptyState(`Nothing from the ${logWord}`, evidence.journal?.reason || `The previous boot's ${logWord} had no entries in the window.`));
       }
-      parts.push(section({ title: "The journal", body,
-        meta: evidence.journal?.readable ? (evidence.journal.persistent ? "persistent journal" : "volatile journal") : "not readable" }));
+      parts.push(section({ title: evidence.platform === "windows" ? "The event log" : "The journal", body,
+        meta: evidence.journal?.readable ? (evidence.journal.persistent ? `persistent ${logWord}` : "volatile journal") : "not readable" }));
     }
 
     // The agent's own unit, when only the agent died.
     const agent = evidence.agent;
     if (agent) {
+      const supervisor = evidence.platform === "windows" ? "Task Scheduler" : "systemd";
       const rows = [
-        kv("Unit", agent.unit || "not a service", { mono: true }),
+        kv(evidence.platform === "windows" ? "Task" : "Unit", agent.unit || (evidence.platform === "windows" ? "not a task" : "not a service"), { mono: true }),
         agent.code ? kv("Exit", `${agent.code}, status ${agent.status}`, { mono: true, tone: "warn" }) : null,
-        agent.result ? kv("systemd result", agent.result, { mono: true }) : null,
+        agent.result ? kv(`${supervisor} result`, agent.result, { mono: true }) : null,
         kv("OOM-killed", agent.oom ? "yes" : "no", { tone: agent.oom ? "crit" : null }),
       ].filter(Boolean);
       const body = el("div", {}, [kvs(rows)]);
       if (agent.note) body.append(el("div.faint.small", { style: { marginTop: "6px" }, text: agent.note }));
       if ((agent.events || []).length) {
         body.append(el("div.log.log--compact", { style: { marginTop: "8px" } }, agent.events.map((event) => logItem({
-          ts: event.ts, title: "systemd", text: event.message,
+          ts: event.ts, title: supervisor, text: event.message,
         }))));
       }
-      parts.push(section({ title: "The agent's unit", body }));
+      parts.push(section({ title: evidence.platform === "windows" ? "The agent's task" : "The agent's unit", body }));
     }
 
     // Host context: what changed before, packages, pstore.

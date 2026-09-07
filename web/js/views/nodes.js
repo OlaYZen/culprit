@@ -16,7 +16,9 @@ import {
   combobox, confirmAction, emptyState, inlineResult, note, openModal, pendingSlot, readySlot, setBusy,
   skeletonFigures, skeletonSection,
 } from "../ui.js";
-import { canAdminister, canOperate, codeRow, figures, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
+import {
+  canAdminister, canOperate, codeRow, figures, kv, kvs, pill, platformPill, section, subhead, viewHead,
+} from "./shared.js";
 
 export function createNodes() {
   const root = el("div.view", { dataset: { view: "nodes" } });
@@ -103,7 +105,7 @@ export function createNodes() {
         el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" },
           text: "Runs the agent privileged in the host's namespaces (full port attribution) and auto-updates on "
               + "re-run. Some managed hosts (e.g. TrueNAS SCALE) disallow privileged/host mounts — there, use the native install below." }),
-        subhead("Or native (agent.sh bundle)"),
+        subhead("Or native Linux (agent.sh bundle)"),
         codeRow("git clone https://github.com/OlaYZen/culprit-agent.git && cd culprit-agent", "Copy clone"),
         codeRow(payload.deploy_command, "Copy command"),
         el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" },
@@ -112,6 +114,16 @@ export function createNodes() {
               + "systemd service that starts on boot. Run it under sudo for a system service as root (full process "
               + "and port attribution); without sudo it becomes a user service. Adjust the URL if agents reach "
               + "this host by a different address; add --insecure for a self-signed certificate." }),
+        subhead("Or Windows (agent.ps1)"),
+        codeRow("git clone https://github.com/OlaYZen/culprit-agent-windows.git; cd culprit-agent-windows", "Copy clone"),
+        codeRow(payload.deploy_command_windows || "", "Copy command"),
+        el("div.faint.small", { style: { marginTop: "8px", lineHeight: "1.5" },
+          text: "Clone the Windows agent repo on that machine, then run the command in PowerShell inside it. "
+              + "agent.ps1 creates a venv (psutil + pywin32), checks the host accepts the token, saves both, and "
+              + "offers to set itself up as a scheduled task that starts on boot. Run it from an Administrator "
+              + "PowerShell for a SYSTEM task (the Security event log, other users' processes); unelevated it runs "
+              + "as you at sign-in and can see your windows, so \"not responding\" detection works. Add -Insecure "
+              + "for a self-signed certificate." }),
       ]),
     }));
     revealSlot.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -383,9 +395,10 @@ export function createNodes() {
     const available = node.update_available === true;
 
     patchText(entry.nameLabel, node.name);
-    if (entry.flags.docker !== isDocker) {
-      entry.flags.docker = isDocker;
-      entry.dockerBadge.replaceChildren(isDocker ? pill("Docker", "info") : "");
+    const badges = `${isDocker}|${node.platform || "linux"}`;
+    if (entry.flags.docker !== badges) {
+      entry.flags.docker = badges;
+      entry.dockerBadge.replaceChildren(...[isDocker ? pill("Docker", "info") : null, platformPill(node.platform)].filter(Boolean));
     }
 
     const statusKey = revoked ? "revoked" : node.online ? "online" : "offline";
@@ -592,7 +605,8 @@ export function createNodes() {
         kv("Auth", "per-node bearer token, SHA-256-hashed at rest, constant-time checked, revocable here"),
         kv("Transport", "use https:// in the deploy command when crossing an untrusted network (self-signed: add --insecure)"),
         kv("Commands", "full parity — process detail, End task, renice and port kills are queued here and run on the agent's next report (~1s), same guards as the host"),
-        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd, and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings. Agents on v0.18.0-b or older cannot update themselves (that build's updater was broken; v0.18.1-b fixed it): re-run agent.sh on the machine once, after which they update from here. Update all and the schedule leave them out and the row says so"),
+        kv("Updates", "git-pull + restart, native installs only — the Update button is disabled with a reason for Docker nodes, dirty checkouts, or agents not running under systemd (Linux) or the scheduled task (Windows), and stays disabled while a node is already up to date; a schedule can also apply these automatically, see Settings. Linux agents on v0.18.0-b or older cannot update themselves (that build's updater was broken; v0.18.1-b fixed it): re-run agent.sh on the machine once, after which they update from here. Update all and the schedule leave them out and the row says so"),
+        kv("Platforms", "A Linux and a Windows agent report the same shapes to this host, each from its own repository with its own version line (culprit-agent, culprit-agent-windows); the badge says which a node is, and its updates, version picker and Patch notes read the right repository. The branch setting applies to both"),
         kv("Versions", "Version… moves an agent to any version the agent repository has shipped, older ones included: the host resolves it to the commit that shipped it and the agent resets to that commit. Anything but the published version pins the node, so the schedule and Update all leave it alone until it is unpinned or updated again"),
         kv("Branch", "Settings › Automatic agent updates names the branch of the agent repository agents follow (main by default). Every update moves an agent to that branch; one on another branch shows it here and counts as having an update. Switching is the agent's doing and needs a v0.21.0-b build: an older agent pulls the branch its checkout is already on, and the row says so when the setting is not main. The repository is never chosen from here — an agent only pulls from its own origin"),
       ], { wide: true }),

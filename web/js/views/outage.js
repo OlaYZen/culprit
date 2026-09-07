@@ -16,7 +16,9 @@ import { el, patchAttr, patchText, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { confirmAction, emptyState, icons, pendingSlot, readySlot, skeletonFacts, skeletonSection, skeletonStatus } from "../ui.js";
 import { api, store } from "../stream.js";
-import { canOperate, changeList, codeRow, kv, pill, section, viewHead, watchVerdict } from "./shared.js";
+import {
+  canOperate, changeList, codeRow, isWindows, kv, pill, section, viewHead, watchVerdict,
+} from "./shared.js";
 
 const KIND_WORD = {
   unit: "unit", listener: "listener", certificate: "certificate", clock: "clock", dns: "DNS",
@@ -25,12 +27,21 @@ const KIND_WORD = {
 const TONE = { critical: "crit", warn: "warn", info: "info" };
 const VERB_WORD = { restart: "Restart", start: "Start", "reload-or-restart": "Reload or restart", "reset-failed": "Reset failed state" };
 const VERB_CONSEQUENCE = {
-  restart: "Restarting stops the unit and starts it again: every connection it holds is dropped and its processes are replaced. "
+  restart: "Restarting stops the service and starts it again: every connection it holds is dropped and its processes are replaced. "
     + "If it fails again straight away, the cause is upstream of it and the verdict will say so.",
-  start: "Starting an enabled unit that is not running. If it stops again, its journal says why.",
-  "reload-or-restart": "Reloads the unit if it supports it (configuration re-read, connections kept), otherwise restarts it.",
+  start: "Starting an enabled service that is not running. If it stops again, its log says why.",
+  "reload-or-restart": "Reloads the service if it supports it (configuration re-read, connections kept), otherwise restarts it.",
   "reset-failed": "Clears the failed state only; nothing is started or stopped.",
 };
+/** What the agent will actually run for an action, for the button title and
+ *  the confirmation: systemctl on Linux, the Service Control Manager on Windows. */
+function actionCommand(action) {
+  if (isWindows()) {
+    const cmdlet = action.verb === "start" ? "Start-Service" : "Restart-Service";
+    return `${cmdlet} '${action.unit}'`;
+  }
+  return `systemctl${action.manager === "user" ? " --user" : ""} ${action.verb} ${action.unit}`;
+}
 const RECORD_TTL_MS = 5 * 60_000;
 const OUTCOME_WORD = { fixed: "fixed", recurred: "came back", partial: "partly", no_change: "no change", moot: "nothing to verify", unknown: "unknown", pending: "watching" };
 
@@ -172,7 +183,7 @@ export function createOutage() {
       const row = el("div.row", { style: { gap: "8px", flexWrap: "wrap", alignItems: "center" } });
       actions.forEach((action, index) => {
         const button = el(`button.btn.btn--sm${index === 0 ? ".btn--primary" : ""}`, { type: "button",
-          title: `systemctl${action.manager === "user" ? " --user" : ""} ${action.verb} ${action.unit}` }, [action.label || `${VERB_WORD[action.verb] || action.verb} ${action.unit}`]);
+          title: actionCommand(action) }, [action.label || `${VERB_WORD[action.verb] || action.verb} ${action.unit}`]);
         button.addEventListener("click", () => runUnitAction(item, action));
         row.append(button);
       });
@@ -206,7 +217,7 @@ export function createOutage() {
     let outcome = null;
     confirmAction({
       title: `${word} ${action.unit}?`,
-      message: `This runs systemctl${action.manager === "user" ? " --user" : ""} ${action.verb} ${action.unit} on ${node}`
+      message: `This runs ${actionCommand(action)} on ${node}`
         + `${action.unit !== item.unit ? ` — the root of "${item.title}"` : ""}.`,
       detail: VERB_CONSEQUENCE[action.verb] || "",
       confirmLabel: word,
