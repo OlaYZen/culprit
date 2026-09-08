@@ -200,6 +200,10 @@ class Config:
     # operator with an always-on array can turn this on; an operator with an
     # archive shelf must not have it on by accident.
     prognosis_wake_disks: bool = False
+    # The wear table's own retention (host only). Deliberately neither
+    # retention_days nor pulse_retention_days: an endurance forecast is fitted
+    # over months, and one row per device per day is nothing to keep.
+    wear_retention_days: int = 400
 
     # --- ui ---
     ui: dict[str, Any] = field(default_factory=dict)
@@ -263,7 +267,7 @@ EDITABLE = {
     "pulse_enabled", "pulse_retention_days", "pulse_quiet_ratio",
     "pulse_hold_minutes", "pulse_timer_grace_minutes",
     "prognosis_enabled", "prognosis_smart_interval_minutes",
-    "prognosis_wake_disks",
+    "prognosis_wake_disks", "wear_retention_days",
 }
 
 # Text fields with a shape: the validator returns the cleaned value or
@@ -360,6 +364,7 @@ LIMITS: dict[str, tuple[float, float]] = {
     "pulse_hold_minutes": (10, 240),
     "pulse_timer_grace_minutes": (1, 1440),
     "prognosis_smart_interval_minutes": (5, 1440),
+    "wear_retention_days": (60, 3650),
 }
 
 
