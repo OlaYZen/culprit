@@ -172,7 +172,6 @@ class NodePulse:
     outage_keys: list[dict[str, Any]] = field(default_factory=list)
     platform: str = "linux"
     intermittent: bool = False
-    offline_at: float | None = None
     # The last judgement, and what it takes to reach the next one.
     last_judged: float = 0.0
     judged_at: float = 0.0
@@ -184,6 +183,9 @@ class NodePulse:
     status: str = "learning"
     severity: str = "ok"
     held: set = field(default_factory=set)
+    # item key -> when its quiet run began, kept while the item holds: the
+    # ring is only forty minutes deep and a silence can be much older.
+    since: dict = field(default_factory=dict)
     vanished: list = field(default_factory=list)
 
 
@@ -289,7 +291,6 @@ class Pulse:
             state.gaps.append({"from": state.last_report, "until": now,
                                "reason": "offline"})
             del state.gaps[:-MAX_GAPS]
-            state.offline_at = state.last_report
             state.online_since = now
             # A gap means the rings hold two runs with a hole between them;
             # only what has been observed since counts.
@@ -456,8 +457,8 @@ class Pulse:
             last_report, online_since = state.last_report, state.online_since
             boot_time, gaps = state.boot_time, list(state.gaps)
             platform, intermittent = state.platform, state.intermittent
-            offline_at = state.offline_at
             held_keys = set(state.held)
+            since_seen = dict(state.since)
             available = {
                 "services": (state.services_available, state.services_reason,
                              state.cgroup_attribution),
@@ -482,7 +483,7 @@ class Pulse:
         else:
             subjects = self._subjects(services, listeners)
             settled = self._settled(now, online_since, boot_time, intermittent,
-                                    offline_at, checks)
+                                    gaps, checks)
             grace = float(getattr(cfg, "pulse_timer_grace_minutes", 15)) * 60.0
             items += judge_timers(timers, services, outage, now, grace, platform)
             if settled:
@@ -495,9 +496,11 @@ class Pulse:
                     if why:
                         checks["suppressed"].append({"subject": subject.id, "reason": why})
                         continue
+                    item_key = f"went_quiet:{subject.kind}:{subject.id}"
                     item = judge_subject(subject, rings.get(key) or [],
                                          baselines.get(key) or Baseline(), now, ratio, hold,
-                                         held=f"went_quiet:{subject.kind}:{subject.id}" in held_keys)
+                                         held=item_key in held_keys,
+                                         since_hint=since_seen.get(item_key))
                     if item is not None:
                         items.append(item)
                 items, folded = fold_machine_quiet(items)
@@ -545,6 +548,11 @@ class Pulse:
                               if k not in keys and self._subject_gone(k, services, listeners, timers)]
             was = set(state.held)
             state.held = keys
+            # When a run started is remembered while it lasts, so a silence
+            # older than the ring is still stated as one number. Forgotten
+            # the moment the item clears -- the next one is a new run.
+            state.since = {i["key"]: float(i["since"]) for i in items
+                           if i.get("kind") != "timer" and i.get("since") is not None}
             state.items = items
             state.folded = folded
             state.checks = checks
@@ -569,7 +577,7 @@ class Pulse:
         return False
 
     def _settled(self, now: float, online_since: float | None, boot_time: float | None,
-                 intermittent: bool, offline_at: float | None,
+                 intermittent: bool, gaps: list[dict[str, Any]],
                  checks: dict[str, Any]) -> bool:
         """Whether a "went quiet" verdict may be reached at all.
 
@@ -589,9 +597,13 @@ class Pulse:
                 f"the machine booted {_duration(now - boot_time)} ago")
             checks["window"]["boot_gap"] = True
             return False
-        if intermittent and offline_at and now - offline_at < 3600:
+        back = float(gaps[-1].get("until") or 0) if gaps else 0.0
+        if intermittent and back and now - back < 3600:
+            # Measured from when it came *back*: a desktop that was off until
+            # forty minutes ago has not had a normal hour yet, and the
+            # operator already said its absences are expected.
             checks["window"]["reason"] = (
-                "this machine is marked not always on and was off within the hour")
+                "this machine is marked not always on and came back within the hour")
             return False
         return True
 
@@ -1059,7 +1071,8 @@ def sentence(kind: str, subject: Subject, baseline: Baseline, now_mean: float,
 
 def judge_subject(subject: Subject, ring: list[tuple], baseline: Baseline,
                   now: float, quiet_ratio: float, hold_s: float,
-                  held: bool = False) -> dict[str, Any] | None:
+                  held: bool = False,
+                  since_hint: float | None = None) -> dict[str, Any] | None:
     """One subject against its own baseline, or None when there is nothing to
     say. Pure: the tool drives it with synthetic rings.
 
@@ -1091,8 +1104,10 @@ def judge_subject(subject: Subject, ring: list[tuple], baseline: Baseline,
         return None
 
     # How long this has been going on: walk back while samples stay under the
-    # line. A run that reaches the start of the ring is "at least this long",
-    # never a claim about a time nobody watched.
+    # line. The ring is forty minutes deep, so a run that reaches its start is
+    # "at least this long" -- unless the caller remembers watching the same
+    # run begin earlier, which is the only way a three-hour silence can be
+    # stated as one. Never a claim about a time nobody watched.
     since = now
     capped = True
     for stamp, value, _b, _active in reversed(ring):
@@ -1100,6 +1115,8 @@ def judge_subject(subject: Subject, ring: list[tuple], baseline: Baseline,
             capped = False
             break
         since = stamp
+    if since_hint is not None and since_hint < since:
+        since, capped = since_hint, False
     held_s = now - since
     if not held and held_s < hold_s:
         return None
