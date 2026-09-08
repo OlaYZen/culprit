@@ -377,7 +377,39 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             # The operator's word that the machine is not always on: an
             # offline node with this set is expected off, not a problem.
             "nodes[].intermittent",
+            # The Pulse's last verdict, so the badge, the fleet card and the
+            # Nodes row need no second request.
+            "nodes[].pulse_status", "nodes[].pulse_severity", "nodes[].pulse_count",
         ],
+    },
+    "pulse": {
+        # Host-computed at read time, like the Map: the view polls it rather
+        # than following the stream, because the verdict moves on the host's
+        # sweep and not on the agent's report.
+        "/api/pulse?node=<node>": [
+            "available", "node", "generated_at", "enabled", "status", "severity",
+            "count", "items", "folded",
+            "checks.baseline.mode", "checks.baseline.days", "checks.baseline.buckets",
+            "checks.baseline.needs_days",
+            "checks.sources.listeners.available", "checks.sources.listeners.subjects",
+            "checks.sources.units.available", "checks.sources.units.subjects",
+            "checks.sources.timers.available", "checks.sources.timers.count",
+            "checks.sources.machine.available",
+            "checks.window.online_for_s", "checks.window.reason", "checks.window.boot_gap",
+            "checks.gaps", "checks.suppressed",
+            # Only present on a machine that has something to say; an empty
+            # list is reported as unverifiable, not as a missing field.
+            "items[].key", "items[].kind", "items[].subject", "items[].label",
+            "items[].severity", "items[].title", "items[].detail", "items[].since",
+            "items[].since_capped", "items[].now", "items[].baseline",
+            "items[].evidence", "items[].culprits", "items[].changes",
+            "items[].actions", "items[].external",
+        ],
+        "/api/pulse/rhythm?node=<node>": [
+            "node", "subjects", "weeks", "kind", "subject", "cells",
+            "subjects[].kind", "subjects[].subject", "subjects[].buckets",
+        ],
+        "/api/pulse/fleet": ["nodes"],
     },
     "trends": {
         "/api/history/stats": ["available", "size_bytes", "rows.samples",
@@ -407,6 +439,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.notify_smtp_from", "config.notify_smtp_to",
             "config.notify_smtp_tls", "config.notify_min_severity",
             "config.notify_resolved", "config.notify_offline",
+            "config.pulse_enabled", "config.pulse_retention_days",
+            "config.pulse_quiet_ratio", "config.pulse_hold_minutes",
+            "config.pulse_timer_grace_minutes",
             "access.client", "access.peer", "access.host", "access.scheme",
             "access.via_proxy", "access.runtime_proxies", "access.always_hosts",
             "config.cpu_high", "config.cpu_queue_per_core",
@@ -429,6 +464,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
 OPTIONAL = {
     "items[].actions",                # only unit / listener items carry verbs
     "items[].manager",
+    # Only a timer item has these, and only a subject with a baseline has a
+    # `now` -- an item list holding just one kind cannot show the others.
+    "items[].now", "items[].baseline", "items[].since_capped", "items[].label",
     "system.ubuntu_pro.available",    # only on Ubuntu
     "system.ubuntu_pro.attached",
     "system.ubuntu_pro.enabled",
@@ -508,6 +546,9 @@ def main() -> int:
             return 1
 
     def fetch(path: str):
+        # "<node>" in an endpoint is the agent the metric views are validated
+        # against, so a read-time host endpoint can be listed by name.
+        path = path.replace("<node>", node or "")
         # "node:<section>" resolves against the chosen agent's snapshot subtree
         # (empty section = the whole snapshot) -- that is where the metric views
         # now read their data, since the host stopped monitoring itself.

@@ -18,7 +18,8 @@ tool asks two questions the other scanners only touch:
    rollup, deep nesting, huge strings, garbage command results, intervals
    that would make a dashboard request wait forever, unbounded growth from
    made-up section names -- must be rejected or absorbed. After each one the
-   endpoints every viewer depends on (`/api/nodes`, `/api/fleet`, the node's
+   endpoints every viewer depends on (`/api/nodes`, `/api/fleet`, the Pulse,
+   the node's
    snapshot, the SSE stream's first frame) must still answer 200 with
    *strict* JSON, and the host must still be healthy. A 5xx on the ingest is
    HIGH (the agent hurt itself); a 5xx or invalid JSON on a read endpoint is
@@ -224,7 +225,8 @@ def readback(ctx: Ctx, node: str) -> list[str]:
         problems.append(f"/api/healthz -> {r.status if r else 'no answer'}")
     if not ctx.cookie:
         return problems
-    for target in ("/api/nodes", "/api/fleet", f"/api/nodes/{node}/snapshot", "/api/snapshot"):
+    for target in ("/api/nodes", "/api/fleet", f"/api/nodes/{node}/snapshot", "/api/snapshot",
+                   f"/api/pulse?node={node}", f"/api/pulse/rhythm?node={node}", "/api/pulse/fleet"):
         # A node snapshot may legitimately approach the 8 MB report cap.
         r = safe_req(ctx, "GET", target, cookie=ctx.cookie, timeout=20.0, max_read=12_000_000)
         if r is None or r.status >= 500:
@@ -355,6 +357,30 @@ def check_poisoning(ctx: Ctx, node: str, token: str) -> None:
                                                                             "title": ["t"], "root": "r"}]}), None),
         ("outage huge", snap(outage={"items": [{"key": "k" * 5000, "severity": "critical", "title": "t" * 100000,
                                                 "detail": "d" * 500000}] * 300}), None),
+        # The Pulse folds `services`, `ports` and `network` into its rings at
+        # ingest and judges them on the host's sweep, so a hostile shape here
+        # must not reach a ring, break a verdict, or 5xx /api/pulse.
+        ("services timers wrong types", snap(services={"available": True, "timers": "x",
+                                                       "services": "x", "cgroup_attribution": 5}), None),
+        ("timers list of garbage", snap(services={"available": True, "timers": [
+            None, 5, "x", [], {"unit": None}, {"unit": {"a": 1}, "next": "soon"},
+            {"unit": "t.timer", "next": float("1e308"), "last": -(10 ** 40)},
+            {"unit": "u" * 5000, "activates": ["x"], "last_result": "bad"}]}), None),
+        ("10k timers", snap(services={"available": True, "timers": [
+            {"unit": f"t{i}.timer", "activates": f"t{i}.service", "next": 1.0, "last": 0.0}
+            for i in range(10_000)]}), None),
+        ("services rows with garbage rates", snap(services={"available": True, "services": [
+            None, 5, "x", {"name": None}, {"name": ["n"], "status": "running"},
+            {"name": "a.service", "status": "running", "cpu_percent": "hot", "io_bytes_sec": [1]},
+            {"name": "b.service", "status": "running", "cpu_percent": 1e308},
+            {"name": "c" * 5000, "status": "running", "cpu_percent": -5}]}), None),
+        ("ports rows with garbage counts", snap(ports={"available": True, "ports": [
+            None, 5, "x", {"port": "http"}, {"port": -1, "connections": 5},
+            {"port": 99999, "connections": 5}, {"port": 443, "protocols": "tcp",
+                                                "connections": "many"},
+            {"port": 443, "protocols": ["t" * 5000], "connections": 1e308,
+             "processes": "x"}]}), None),
+        ("network totals wrong types", snap(network={"total": "x"}), None),
         ("plain text content-type", snap(system={"hostname": "sectest"}), {"Content-Type": "text/plain"}),
         ("multipart content-type", snap(system={"hostname": "sectest"}),
          {"Content-Type": "multipart/form-data; boundary=x"}),
