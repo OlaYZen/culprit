@@ -92,6 +92,12 @@ async def _sweep_loop() -> None:
                         if notifier is not None:
                             notifier.drop(node, f"pulse:{key}")
                     registry.renotify(node)
+                # Every node, not only the changed ones: a watch needs to see
+                # the judgements where nothing moved as much as the ones where
+                # something did -- that is what "still quiet" is made of.
+                if verifier is not None:
+                    for node, items in pulse.all_items().items():
+                        verifier.observe_pulse(node, items, time.time())
                 # Its own retention, rate-limited to once an hour inside
                 # History -- the rhythm outlives the metric history.
                 pulse.prune()
@@ -769,6 +775,7 @@ async def api_node_unit_action(
     request: Request, name: str, unit: str, verb: str,
     manager: str = Body("system", embed=True),
     confirm: bool = Body(False, embed=True),
+    origin: str = Body("outage", embed=True),
 ) -> dict[str, Any]:
     """Relayed to the agent, which runs `systemctl <verb> <unit>` with the
     same guards the process actions have (never init, journald, logind,
@@ -793,14 +800,26 @@ async def api_node_unit_action(
         raise HTTPException(422, "not a unit name")
     if not confirm:
         raise HTTPException(400, "confirm must be true for a unit action")
-    baseline = (registry.get_snapshot(name) or {}).get("outage") or {}
+    if origin not in ("outage", "pulse"):
+        raise HTTPException(422, "origin must be outage or pulse")
+    # Which doctor the button was pressed in decides what the verdict is
+    # watched against: an outage item clears when the unit runs again, a Pulse
+    # item only when the subject is doing what it normally does. Watching the
+    # wrong set would answer a question nobody asked.
+    from_pulse = origin == "pulse" and pulse is not None
+    baseline = ([] if from_pulse else
+                (registry.get_snapshot(name) or {}).get("outage") or {})
+    pulse_baseline = pulse.items(name) if from_pulse else []
     result = await _agent_command(name, "unit_action",
                                   {"unit": unit, "verb": verb, "manager": manager},
                                   timeout_override=UNIT_TIMEOUT_S)
     result = dict(result) if isinstance(result, dict) else {"result": result}
     try:
-        verify_id = verifier.start_outage(name, verb, unit, result, baseline,
+        verify_id = (verifier.start_pulse(name, verb, unit, result, pulse_baseline,
                                           getattr(request.state, "user", None))
+                     if from_pulse else
+                     verifier.start_outage(name, verb, unit, result, baseline,
+                                           getattr(request.state, "user", None)))
     except Exception:  # noqa: BLE001 -- the action succeeded; say so regardless
         log.exception("could not start outage verdict watch")
         verify_id = None

@@ -886,6 +886,12 @@ class Pulse:
             state = self._nodes.get(node)
             return list(state.items) if state else []
 
+    def all_items(self) -> dict[str, list[dict[str, Any]]]:
+        """Every node's current items, for the observers that need to see a
+        judgement even when it said the same thing as the last one."""
+        with self._lock:
+            return {node: list(state.items) for node, state in self._nodes.items()}
+
     def take_vanished(self, node: str) -> list[str]:
         """Keys whose subject stopped existing since the last judgement --
         the notifier must forget these rather than announce a recovery."""

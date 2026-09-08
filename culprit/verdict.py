@@ -407,6 +407,124 @@ def _names_unit(item: dict[str, Any], unit: str) -> bool:
     return root.get("unit") == unit
 
 
+# A Pulse verdict is a slower question than an outage one: "is it busy again"
+# is read from a trailing window, so the answer cannot exist until enough of
+# that window has passed since the action.
+PULSE_JUDGEMENTS = 3       # sweep judgements to watch (~3 min at one a minute)
+PULSE_MIN_SECONDS = 300.0
+PULSE_MAX_SECONDS = 2700.0
+
+
+class _PulseWatch:
+    """Same shape as _Watch, fed the Pulse's items after each sweep.
+
+    The question it answers is different from the outage one. An outage item
+    clears the moment the unit is running again; a Pulse item clears only when
+    the subject is *doing what it normally does*, which is a statement about
+    the next half hour. So this watch is slower, and its outcome words say
+    which of the two happened: the thing came back, or it is still quiet.
+    """
+
+    def __init__(self, action_id: int, node: str, verb: str, unit: str,
+                 baseline: list[dict[str, Any]], result: dict[str, Any]) -> None:
+        self.id = action_id
+        self.node = node
+        self.action = f"unit_{verb}"
+        self.verb = verb
+        self.pid = None
+        self.name = unit
+        self.unit = unit
+        self.result = result
+        self.started = time.time()
+        self.samples: list[tuple[float, list[dict[str, Any]]]] = []
+        self.done = False
+        self.verdict: dict[str, Any] | None = None
+        self.finished_at: float | None = None
+        self.targets: list[dict[str, Any]] = [
+            {"key": item.get("key"), "title": item.get("title"),
+             "kind": item.get("kind")}
+            for item in baseline
+            if isinstance(item, dict) and item.get("severity") in _ACTIVE
+            and not item.get("expected") and _pulse_names_unit(item, unit)
+        ]
+        self.cleared_at: dict[str, float] = {}
+        self.recurred: set[str] = set()
+
+    def observe(self, items: list[dict[str, Any]], now: float) -> None:
+        self.samples.append((now, items))
+        active = {str(i.get("key")) for i in items
+                  if isinstance(i, dict) and i.get("severity") in _ACTIVE
+                  and not i.get("expected")}
+        for target in self.targets:
+            key = str(target["key"])
+            if key not in active:
+                self.cleared_at.setdefault(key, now)
+            elif key in self.cleared_at:
+                self.cleared_at.pop(key, None)
+                self.recurred.add(key)
+        if len(self.samples) >= PULSE_JUDGEMENTS and now - self.started >= PULSE_MIN_SECONDS:
+            self.finish(now)
+
+    def progress(self) -> dict[str, Any]:
+        return {
+            "samples": len(self.samples), "of": PULSE_JUDGEMENTS,
+            "elapsed": round(time.time() - self.started, 1),
+            "pressures": {},
+            "cleared": sorted(self.cleared_at),
+            "watching": [t["title"] for t in self.targets],
+        }
+
+    def finish(self, now: float, reason: str | None = None) -> None:
+        if self.done:
+            return
+        self.done = True
+        self.finished_at = now
+        self.verdict = self._judge(now, reason)
+
+    def _judge(self, now: float, reason: str | None) -> dict[str, Any]:
+        elapsed = round(now - self.started)
+        word = _OUTAGE_WORD.get(self.verb, self.verb).lower()
+        if not self.targets:
+            return {"outcome": "moot", "elapsed": elapsed,
+                    "text": (f"Nothing the Pulse had said about {self.unit} was active "
+                             "when you acted, so there is nothing to verify against.")}
+        if not self.samples:
+            return {"outcome": "unknown", "elapsed": elapsed,
+                    "text": reason or (f"{self.node} produced no judgement in {elapsed} s; "
+                                       "whether it is busy again is unknown.")}
+        cleared = [t for t in self.targets if str(t["key"]) in self.cleared_at]
+        still = [t for t in self.targets if str(t["key"]) not in self.cleared_at]
+        recurred = [t for t in self.targets if str(t["key"]) in self.recurred]
+        if recurred:
+            return {"outcome": "went_quiet_again", "elapsed": elapsed,
+                    "text": (f"It came back and went quiet again: {_list_titles(recurred)} "
+                             f"picked up after the {word} and stopped within {elapsed} s. "
+                             "Whatever stops it is still doing so."),
+                    "cleared": [t["title"] for t in cleared]}
+        if cleared and not still:
+            when = max(self.cleared_at[str(t["key"])] - self.started for t in cleared)
+            return {"outcome": "came_back", "elapsed": elapsed,
+                    "text": (f"It is busy again: {_list_titles(cleared)} reached what it "
+                             f"normally does within {when:.0f} s of the {word} and stayed "
+                             f"there for the rest of the {elapsed} s watch."),
+                    "cleared": [t["title"] for t in cleared]}
+        if cleared:
+            return {"outcome": "partial", "elapsed": elapsed,
+                    "text": (f"Partly: {_list_titles(cleared)} is busy again, but "
+                             f"'{still[0]['title']}' is still quiet after {elapsed} s."),
+                    "cleared": [t["title"] for t in cleared]}
+        return {"outcome": "still_quiet", "elapsed": elapsed,
+                "text": (f"Still quiet after {elapsed} s: '{still[0]['title']}' is doing no "
+                         f"more than before the {word}. Whatever stopped reaching it, or "
+                         "stopped it working, is not inside this unit.")}
+
+
+def _pulse_names_unit(item: dict[str, Any], unit: str) -> bool:
+    """Whether a Pulse item is about this unit -- its own, or the unit behind
+    a listener, or the service a timer activates."""
+    return unit in (item.get("unit"), item.get("activates"), item.get("subject"))
+
+
 class ActionVerifier:
     def __init__(self, history: History) -> None:
         self.history = history
@@ -454,6 +572,33 @@ class ActionVerifier:
             if watch.done:
                 self._persist(watch)
 
+    def start_pulse(self, node: str, verb: str, unit: str, result: dict[str, Any],
+                    baseline_items: list[dict[str, Any]], username: str | None) -> int:
+        """A unit action taken from a Pulse item: judged against the Pulse's
+        own items rather than the outage list, because "it is broken again" and
+        "it is still doing nothing" are different answers. Same actions table
+        (`unit_<verb>`, `unit` set), so one track record covers both."""
+        action_id = self.history.record_action(node, f"unit_{verb}", None, None, unit,
+                                               result, username)
+        if not action_id:
+            action_id = -int(time.time() * 1000) % 2_000_000_000
+        watch = _PulseWatch(action_id, node, verb, unit, baseline_items, result)
+        if not watch.targets:
+            watch.finish(time.time())
+            self._persist(watch)
+        with self._lock:
+            self._watches[action_id] = watch
+        return action_id
+
+    def observe_pulse(self, node: str, items: list[dict[str, Any]], now: float) -> None:
+        with self._lock:
+            watches = [w for w in self._watches.values()
+                       if w.node == node and not w.done and isinstance(w, _PulseWatch)]
+        for watch in watches:
+            watch.observe(items, now)
+            if watch.done:
+                self._persist(watch)
+
     def observe_outage(self, node: str, outage: dict[str, Any], now: float) -> None:
         with self._lock:
             watches = [w for w in self._watches.values()
@@ -469,7 +614,8 @@ class ActionVerifier:
         with self._lock:
             watches = list(self._watches.values())
         for watch in watches:
-            limit = OUTAGE_MAX_SECONDS if isinstance(watch, _OutageWatch) else MAX_SECONDS
+            limit = (PULSE_MAX_SECONDS if isinstance(watch, _PulseWatch) else
+                     OUTAGE_MAX_SECONDS if isinstance(watch, _OutageWatch) else MAX_SECONDS)
             if not watch.done and now - watch.started > limit:
                 watch.finish(now, reason=f"{watch.node} stopped reporting before "
                                          "the verdict window closed.")
