@@ -336,7 +336,8 @@ class Sampler:
                                       kernel=kernel, changes=self.changes,
                                       ceilings=self.store.get("ceilings"),
                                       ports=self.store.get("ports"),
-                                      memory_forecast=memory_forecast)
+                                      memory_forecast=memory_forecast,
+                                      prognosis=self.store.get("prognosis"))
 
         # Annotate unit main processes with the units they belong to.
         service_map = (self.store.get("services") or {}).get("by_pid") or {}
@@ -435,7 +436,7 @@ class Sampler:
         # events tick), so it runs after the rest and never re-collects.
         payload["outage"] = self.outage.sample(
             services, ports, volumes, self.store.get("events"), net_detail,
-            system, changes=self.changes)
+            system, changes=self.changes, prognosis=self.store.get("prognosis"))
         self.store.merge(payload)
         self.broker.publish("slow", payload)
 
