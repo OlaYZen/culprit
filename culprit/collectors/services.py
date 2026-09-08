@@ -53,6 +53,16 @@ _BOOT_TARGETS = frozenset({"sysinit.target", "basic.target", "local-fs.target",
                            "emergency.target", "initrd.target", "shutdown.target"})
 _FINISHED_LINE = r"Finished |Deactivated successfully|Succeeded\."
 
+# Per-unit journal rate: a trailing window read on the slow tick, overlapping
+# on purpose -- a rate over 20 s of a unit that logs once a minute is noise,
+# and the Pulse compares this with the same window from other days. Measured
+# on the dev box (1.3 GB journal, a hammered sshd): ~10 ms warm.
+_JOURNAL_WINDOW_S = 120
+# Above this many lines in the window the counts stop being per-unit truth
+# (journalctl returns the newest N, so a chatty unit hides a quiet one), and
+# the whole source reports unavailable rather than inventing a silence.
+_JOURNAL_MAX_LINES = 8000
+
 
 class ServiceCollector:
     def __init__(self) -> None:
@@ -96,6 +106,16 @@ class ServiceCollector:
                 service["started_at"], service["exited_at"] = self._exit_cache[name]
             elif service.get("active_state") != "inactive":
                 self._exit_cache.pop(str(service["name"]), None)
+        rates, rates_reason = _journal_rates()
+        for service in services:
+            if rates is None:
+                service["lines_sec"] = None
+                continue
+            key = (f"user:{service['name']}" if service.get("scope") == "user"
+                   else str(service["name"]))
+            # A unit with no lines in the window logged nothing: that is a
+            # zero, not a gap. `None` is reserved for "not readable".
+            service["lines_sec"] = rates.get(key, 0.0)
         problems = _find_problems(services, boot_time=boot_time)
         problems.sort(key=lambda p: (0 if p["severity"] == "critical" else 1,
                                      str(p["display_name"] or p["name"])))
@@ -132,6 +152,10 @@ class ServiceCollector:
             "by_pid": by_pid,
             "timers": _timer_rows(listed_timers, services),
             "cgroup_attribution": linux.cgroup_version() == 2,
+            # Whether services[].lines_sec means anything, and why not.
+            "journal_rate": rates is not None,
+            "journal_rate_reason": rates_reason,
+            "journal_rate_window_s": _JOURNAL_WINDOW_S,
             "user_bus": user["available"],
             "user_bus_reason": user["reason"],
         }
@@ -309,6 +333,46 @@ class ServiceCollector:
             timeout=10)
         return [t for t in (listed if isinstance(listed, list) else [])
                 if isinstance(t, dict)]
+
+
+def _journal_rates() -> tuple[dict[str, float] | None, str | None]:
+    """Journal lines per second per unit over the trailing window.
+
+    The one signal that says an application *stopped working* while its unit
+    stays perfectly active: a daemon that deadlocks keeps its PID, its port
+    and its cgroup, and goes quiet in the log. Only the unit field is
+    requested, so the messages themselves are never read here -- nothing is
+    parsed, only counted.
+    """
+    entries = linux.journalctl_json(
+        ["--since", f"-{_JOURNAL_WINDOW_S}s",
+         "--output-fields=_SYSTEMD_UNIT,_SYSTEMD_USER_UNIT"],
+        timeout=15, max_entries=_JOURNAL_MAX_LINES)
+    if not entries:
+        # An empty window is not proof of a readable journal: a gated one
+        # returns nothing too. `journal` in sysinfo's access map is the place
+        # that says which, so this only reports the honest ambiguity.
+        access = linux.journal_access()
+        if access.get("readable"):
+            return {}, None          # a genuinely silent two minutes
+        return None, str(access.get("reason")
+                         or "the system journal is not readable by this agent")
+    if len(entries) >= _JOURNAL_MAX_LINES:
+        return None, (f"more than {_JOURNAL_MAX_LINES} lines in {_JOURNAL_WINDOW_S}s: "
+                      "the newest are all journalctl returns, so a quiet unit "
+                      "cannot be told from one crowded out")
+    # A user unit and a system unit can share a name (dbus.service is both),
+    # so user lines are counted under their own key -- one unit must never be
+    # credited with another's log.
+    counts: dict[str, int] = {}
+    for entry in entries:
+        user_unit = entry.get("_SYSTEMD_USER_UNIT")
+        unit = entry.get("_SYSTEMD_UNIT")
+        key = (f"user:{user_unit}" if isinstance(user_unit, str) and user_unit
+               else unit if isinstance(unit, str) and unit else None)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return {unit: round(n / _JOURNAL_WINDOW_S, 4) for unit, n in counts.items()}, None
 
 
 # --------------------------------------------------------------------- timers
