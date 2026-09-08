@@ -16,6 +16,7 @@ import { banner, combobox, dismissBanner, initModal, initScrollTop, wireCopy } f
 import { createOverview } from "./views/overview.js";
 import { createDoctor } from "./views/doctor.js";
 import { createOutage } from "./views/outage.js";
+import { createPulse } from "./views/pulse.js";
 import { createProcesses } from "./views/processes.js";
 import { createServices } from "./views/services.js";
 import { createStorage } from "./views/storage.js";
@@ -37,6 +38,7 @@ const FACTORIES = {
   overview: createOverview,
   doctor: createDoctor,
   outage: createOutage,
+  pulse: createPulse,
   processes: createProcesses,
   services: createServices,
   storage: createStorage,
@@ -55,7 +57,8 @@ const FACTORIES = {
 };
 
 const TITLES = {
-  overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", processes: "Processes",
+  overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", pulse: "The Pulse",
+  processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
   ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
   trends: "Trends", compare: "Compare", nodes: "Nodes", changelog: "Patch notes", settings: "Settings",
@@ -192,6 +195,11 @@ function updateBadges(state) {
   const brokenItems = (outage.items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
   setBadge("badge-outage", brokenItems.length || null,
     brokenItems.some((i) => i.severity === "critical") ? null : "warn");
+
+  // The Pulse judges on the host's own sweep, so its count rides the node
+  // list rather than a section of the snapshot.
+  const me = (state.nodes || []).find((n) => n.name === store.node) || {};
+  setBadge("badge-pulse", me.pulse_count || null, me.pulse_severity === "critical" ? null : "warn");
 
   const processes = state.process_table || {};
   patchText(bind["badge-processes"], processes.totals?.count ? String(processes.totals.count) : "");

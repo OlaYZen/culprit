@@ -117,11 +117,16 @@ function updateBadges(state) {
   const sync = (state.sync || {}).problems || [];
   const lowSpace = (((state.volumes || {}).volumes) || []).filter((v) => (100 - v.percent) <= 10).length;
 
+  // The Pulse's count comes from the node list: it is judged on the host's
+  // sweep, not carried in a section of the snapshot.
+  const quiet = ((state.nodes || []).find((n) => n.name === store.node) || {}).pulse_count || 0;
+
   badge("badge-services-m", services.length);
   badge("badge-outage-m", broken.length);
+  badge("badge-pulse-m", quiet);
   badge("badge-events-m", eventsCrit);
   badge("badge-nodes-m", offline);
-  dot("botnav-more-dot", (services.length || broken.length || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
+  dot("botnav-more-dot", (services.length || broken.length || quiet || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
 }
 
 function dot(bind, severity) {

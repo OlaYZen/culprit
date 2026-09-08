@@ -40,9 +40,9 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav, switchControl,
+  combobox, confirmAction, emptyState, icons, inlineResult, note, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav, switchControl,
 } from "../ui.js";
-import { canAdminister, canOperate, kv, kvs, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
 
 const SAVE_LABEL = "Save changes";
 
@@ -129,12 +129,13 @@ const PAGES = [
   { key: "account", label: "Account", icon: icons.user },
   { key: "users", label: "Users", icon: icons.user },
   { key: "network", label: "Network", icon: icons.shield },
+  { key: "pulse", label: "The Pulse", icon: icons.timer },
   { key: "notifications", label: "Notifications", icon: icons.bell },
   { key: "expected", label: "Expected findings", icon: icons.calendar },
 ];
 
 // Pages that edit configuration get the form + Save bar; the rest act.
-const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications"]);
+const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications", "pulse"]);
 
 const ROLE_HINT = {
   viewer: "Read-only: sees every dashboard and history view, no actions.",
@@ -170,6 +171,7 @@ export function createSettings() {
     account: el("div"), users: el("div"),
     trust: el("div"), nodes: el("div"),
     notify: el("div"), delivery: el("div"),
+    pulse: el("div"), pulseNodes: el("div"),
     expect: el("div"),
   };
   const LAYOUT = {
@@ -180,6 +182,7 @@ export function createSettings() {
     users: [slots.users],
     network: [slots.trust, slots.nodes],
     notifications: [slots.notify, slots.delivery],
+    pulse: [slots.pulse, slots.pulseNodes],
     expected: [slots.expect],
   };
   const pages = {};
@@ -409,6 +412,8 @@ export function createSettings() {
     pendingSlot(slots.users, skeletonSection("Users", 4));
     pendingSlot(slots.trust, skeletonSection("Network trust", 5));
     pendingSlot(slots.nodes, skeletonSection("Nodes and access", 3));
+    pendingSlot(slots.pulse, skeletonSection("The Pulse", 5));
+    pendingSlot(slots.pulseNodes, skeletonSection("What each node has learned", 3));
     pendingSlot(slots.notify, skeletonSection("Notifications", 6));
     pendingSlot(slots.delivery, skeletonSection("Delivery", 3));
     pendingSlot(slots.expect, skeletonSection("Expected findings", 3));
@@ -426,6 +431,7 @@ export function createSettings() {
       renderUsers();
       renderTrust();
       renderNodes();
+      renderPulse();
       renderNotify();
       renderExpectations();
       for (const page of Object.values(pages)) if (page.bar) { page.bar.node.hidden = false; touch(page); }
@@ -535,6 +541,80 @@ export function createSettings() {
       ]),
       foot: "This is the copy-paste command the Nodes view shows when you enroll or rotate an agent. Changing it here does not affect agents already running.",
     }));
+  }
+
+  /* ── The Pulse ───────────────────────────────────────────────────── */
+  function renderPulse() {
+    const page = pages.pulse;
+    // The ratio is a fraction on the wire and a percentage in the form: "a
+    // quarter of the quietest normal hour" is what the operator is choosing,
+    // and 0.25 is not how anyone says that.
+    const percentInput = el("input", {
+      type: "text", inputmode: "decimal", id: "set-pulse_quiet_ratio", autocomplete: "off", spellcheck: "false",
+      value: String(Math.round((config.pulse_quiet_ratio ?? 0.25) * 100)), "aria-describedby": "help-set-pulse_quiet_ratio",
+    });
+    const percentError = el("div.field__err", { id: "err-pulse_quiet_ratio", hidden: true });
+    const limit = limits.pulse_quiet_ratio || [0.05, 0.9];
+    register(page, "pulse_quiet_ratio", {
+      input: percentInput, error: percentError,
+      read: () => Number((Number(percentInput.value.trim()) / 100).toFixed(4)),
+      validate: () => {
+        const number = Number(percentInput.value.trim()) / 100;
+        if (!Number.isFinite(number)) return `“${percentInput.value.trim()}” is not a number.`;
+        if (number < limit[0] || number > limit[1]) return `Must be between ${limit[0] * 100} and ${limit[1] * 100} percent.`;
+        return "";
+      },
+      synced: () => { percentInput.value = String(Math.round((config.pulse_quiet_ratio ?? 0.25) * 100)); },
+    });
+
+    readySlot(slots.pulse, section({
+      title: "The Pulse",
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [
+          el("div.checkgroup", { style: { marginBottom: "12px" } }, [
+            boolField(page, "pulse_enabled", {
+              label: "Say when something stops happening",
+              title: "Off: the hourly rhythm is still recorded, but no verdict is reached and no item is shown or notified",
+            }),
+          ]),
+          numberField(page, "pulse_hold_minutes", { label: "Quiet must hold for", unit: "minutes", help: "Before it is said out loud." }),
+          numberField(page, "pulse_timer_grace_minutes", { label: "A schedule may be late by", unit: "minutes", help: "Past that, it did not fire." }),
+        ]),
+        el("div", {}, [
+          fieldRow({
+            id: "set-pulse_quiet_ratio", label: "Quiet means below", unit: "% of the quietest normal hour",
+            input: percentInput, error: percentError,
+            help: `Compared with the baseline's 10th percentile, so a busy port and a sleepy one are judged on their own scale. Allowed: ${limit[0] * 100} to ${limit[1] * 100}`,
+          }),
+          numberField(page, "pulse_retention_days", { label: "Keep the rhythm for", unit: "days",
+            help: "Its own retention: a weekday baseline needs weeks where the metric history needs days." }),
+        ]),
+      ]),
+      foot: "The Pulse compares each listener, running service and the machine's network with what that same "
+          + "machine did at this hour on this weekday. It needs two same weekdays (or seven days) before it says "
+          + "anything at all, and it says which of the two it used. Schedules are judged from facts and need none.",
+    }));
+    renderPulseNodes();
+  }
+
+  function renderPulseNodes() {
+    const body = el("div");
+    readySlot(slots.pulseNodes, section({
+      title: "What each node has learned", body,
+      foot: "Buckets are one hour per subject. Until a node has enough of them the Pulse stays silent about it and says so on its own page.",
+    }));
+    api("/api/pulse/fleet").then((payload) => {
+      const rows = Object.entries(payload.nodes || {});
+      if (!rows.length) {
+        render(body, note("info", "No agent has reported yet, so there is no rhythm to learn from."));
+        return;
+      }
+      render(body, el("div.kvs", {}, rows.map(([name, entry]) => kv(name, el("span", {}, [
+        pill(entry.status || "?", entry.status === "quiet" ? (entry.severity === "critical" ? "crit" : "warn")
+          : entry.status === "ok" ? "ok" : null),
+        entry.count ? el("span.faint.small", { text: ` ${entry.count} item${entry.count === 1 ? "" : "s"}` }) : null,
+      ].filter(Boolean))))));
+    }).catch((error) => render(body, note("warn", `The Pulse could not be read: ${fmt.esc(error.message)}`)));
   }
 
   function renderAutoUpdate() {

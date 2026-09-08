@@ -105,6 +105,10 @@ export function createOverview() {
 
   const fleetSlot = el("div");
   const statusSlot = el("div");
+  // One line under the verdict when the Pulse has something: it belongs on
+  // the Overview because "nothing is wrong" is exactly the state in which a
+  // thing that stopped happening goes unnoticed.
+  const pulseSlot = el("div");
   const metricGrid = el("div.cells.cells--metrics");
   const pairRow = el("div.cols.cols--2.cols--stretch");
   const loadSlot = el("div");
@@ -112,7 +116,7 @@ export function createOverview() {
   const identitySlot = el("div");
   const incidentsSlot = el("div");
   root.append(el("div.stack", {}, [
-    fleetSlot, statusSlot, metricGrid, pairRow, loadSlot, signalsSlot, identitySlot, incidentsSlot,
+    fleetSlot, statusSlot, pulseSlot, metricGrid, pairRow, loadSlot, signalsSlot, identitySlot, incidentsSlot,
   ]));
 
   /* ── Build once, then only patch ─────────────────────────────────────── */
@@ -390,6 +394,14 @@ export function createOverview() {
         text: `${node.findings} finding${node.findings === 1 ? "" : "s"} · ${fmt.imageName(node.offender.name)}`,
         title: `${fmt.imageName(node.offender.name)} leads ${node.findings} finding${node.findings === 1 ? "" : "s"}`,
       };
+    } else if (node.pulse_count) {
+      // Nothing is loading this machine, which is exactly when something
+      // having stopped goes unnoticed: the card says it in the same slot.
+      alert = {
+        info: node.pulse_severity !== "critical",
+        text: `${node.pulse_count} quiet`,
+        title: `${node.pulse_count} thing${node.pulse_count === 1 ? "" : "s"} stopped happening — see The Pulse`,
+      };
     } else if (node.offender && (node.offender.lag_score || 0) >= 10) {
       alert = {
         info: true,
@@ -619,6 +631,17 @@ export function createOverview() {
     }[diagnosis.status] || "Healthy");
     patchText(nodes.statusLine, diagnosis.headline || "No sustained pressure.");
 
+    // The Pulse's count comes with the node list (judged on the host's
+    // sweep), so it is here rather than in a section of the snapshot.
+    const me = (state.nodes || []).find((n) => n.name === store.node) || {};
+    if (me.pulse_count) {
+      const link = el("a", { href: "#pulse", text: `${me.pulse_count} thing${me.pulse_count === 1 ? " has" : "s have"} stopped happening` });
+      render(pulseSlot, note(me.pulse_severity === "critical" ? "crit" : "warn",
+        el("div", {}, [link, document.createTextNode(" — a listener, service or schedule that is doing less than this machine normally does at this hour.")])));
+    } else {
+      render(pulseSlot, []);
+    }
+
     const offenders = diagnosis.offenders || [];
     patchText(nodes.offMeta, offenders.length
       ? `top ${Math.min(8, offenders.length)} of ${offenders.length} · ranked by share of resources under pressure`
@@ -726,7 +749,7 @@ export function createOverview() {
   root.subscriptions = [
     store.on("resume", () => { if (root.isActive) refreshFleet(); }),
     store.on(["cpu", "memory", "gpu", "disk", "network", "pressures"], () => { if (root.isActive) updateFast(store.state); }),
-    store.on("diagnosis", () => { if (root.isActive) updateDiagnosis(store.state); }),
+    store.on(["diagnosis", "nodes"], () => { if (root.isActive) updateDiagnosis(store.state); }),
     store.on(["system", "volumes"], () => { if (root.isActive) updateSlow(store.state); }),
     store.on("events", () => { if (root.isActive) updateEvents(store.state); }),
     // Node switch: clear the previous machine's traces rather than blending two.

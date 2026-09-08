@@ -14,12 +14,9 @@ import * as fmt from "../util/format.js";
 import { drawGauge } from "../charts.js";
 import { api, store } from "../stream.js";
 import {
-  checkbox, emptyState, icons, inlineResult, openModal, pendingSlot, readySlot, segmented, setBusy, skeletonSection,
-  skeletonStatus,
+  emptyState, icons, pendingSlot, readySlot, skeletonSection, skeletonStatus,
 } from "../ui.js";
-import { canOperate, changeList, containerPill, culpritRow, freeDeletedFile, gaugeRow, meter, offenderRow, openProcessModal, pill, section, viewHead } from "./shared.js";
-
-const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+import { canOperate, changeList, containerPill, culpritRow, freeDeletedFile, gaugeRow, meter, offenderRow, openExpectDialog, openProcessModal, pill, section, viewHead } from "./shared.js";
 
 const PRESSURE_EXPLAIN = {
   cpu: "Kernel-measured stall time: the fraction of wall time runnable tasks spent waiting "
@@ -519,117 +516,6 @@ export function createDoctor() {
       setBusy(button, false, "Unmark");
       button.title = error.message;
     }
-  }
-
-  /** "This is normal": reason, scope, optional culprit, optional daily window. */
-  function openExpectDialog(finding, suggestion = null) {
-    const lead = (finding.culprits || [])[0];
-    const leadName = suggestion?.culprit || (lead ? fmt.imageName(lead.name) : null);
-    const state = {
-      node: store.node, culprit: leadName, window: Boolean(suggestion),
-      days: new Set(suggestion?.days || []),
-      start: suggestion?.start || "02:00", end: suggestion?.end || "03:00",
-    };
-
-    const reason = el("input", { type: "text", id: "exp-reason", "data-autofocus": "", autocomplete: "off",
-      placeholder: "e.g. nightly borg backup", "aria-describedby": "exp-reason-help" });
-    const reasonErr = el("div.field__err", { hidden: true });
-    const scope = segmented({ label: "Applies to",
-      options: [{ value: store.node, label: `This node (${store.node})` }, { value: "*", label: "All nodes" }],
-      value: store.node, onChange: (v) => { state.node = v; } });
-    // Checkboxes, not switches: these apply when Mark as expected is pressed.
-    const culpritSwitch = leadName ? checkbox({
-      label: `Only when ${leadName} leads it`, checked: true,
-      title: "Off: any process may lead it and it is still expected",
-      onChange: (v) => { state.culprit = v ? leadName : null; },
-    }) : null;
-
-    const timeRow = el("div.row", { style: { gap: "10px", alignItems: "center" } });
-    const startIn = el("input", { type: "time", value: state.start, "aria-label": "Window start" });
-    const endIn = el("input", { type: "time", value: state.end, "aria-label": "Window end" });
-    startIn.addEventListener("input", () => { state.start = startIn.value; });
-    endIn.addEventListener("input", () => { state.end = endIn.value; });
-    timeRow.append(el("div.input", { style: { width: "110px" } }, [startIn]), el("span.faint", { text: "to" }),
-      el("div.input", { style: { width: "110px" } }, [endIn]));
-    const days = el("div.daypick", { role: "group", "aria-label": "Days" });
-    DAY_NAMES.forEach((name, index) => {
-      const btn = el("button.btn.btn--sm", { type: "button", "aria-pressed": "false" }, [name]);
-      btn.addEventListener("click", () => {
-        if (state.days.has(index)) state.days.delete(index); else state.days.add(index);
-        btn.setAttribute("aria-pressed", state.days.has(index) ? "true" : "false");
-      });
-      days.append(btn);
-    });
-    DAY_NAMES.forEach((name, index) => {
-      const btn = days.children[index];
-      if (btn && state.days.has(index)) btn.setAttribute("aria-pressed", "true");
-    });
-    const windowBody = el("div", { hidden: !state.window, style: { marginTop: "8px" } }, [
-      timeRow,
-      el("div.faint.small", { style: { margin: "8px 0 4px" }, text: "On these days (none selected = every day). Times are the host's local clock." }),
-      days,
-    ]);
-    const windowSwitch = checkbox({
-      label: "Only during a daily window", checked: state.window,
-      onChange: (v) => { state.window = v; windowBody.hidden = !v; },
-    });
-    if (suggestion) reason.value = `Recurring: seen on ${suggestion.days_seen} days around ${suggestion.start}`;
-
-    const body = el("div", {}, [
-      el("p", {}, [
-        document.createTextNode("Mark "),
-        el("b", { text: finding.title }),
-        document.createTextNode(" as expected. It stays visible with its evidence, but reads as normal instead of as a problem — until it runs past its window."),
-      ]),
-      el("div.field", { style: { marginTop: "12px" } }, [
-        el("label.field__label", { for: "exp-reason" }, [el("span", { text: "Reason" })]),
-        el("div.input", {}, [reason]),
-        el("div.field__help", { id: "exp-reason-help", text: "Shown next to the finding, so say what is running." }),
-        reasonErr,
-      ]),
-      el("div", { style: { marginTop: "12px" } }, [scope]),
-      culpritSwitch ? el("div", { style: { marginTop: "10px" } }, [culpritSwitch]) : null,
-      el("div", { style: { marginTop: "10px" } }, [windowSwitch]),
-      windowBody,
-    ]);
-    const result = el("div.result");
-    const cancel = el("button.btn", { type: "button", dataset: { role: "cancel" } }, ["Cancel"]);
-    const save = el("button.btn.btn--primary", { type: "button", dataset: { role: "confirm" } }, ["Mark as expected"]);
-    const handle = openModal({
-      title: "Mark as expected", body, narrow: true,
-      footer: el("div", { style: { display: "contents" } }, [result, el("span.spacer"), cancel, save]),
-    });
-    if (!handle) return;
-    cancel.addEventListener("click", () => handle.close());
-    const submit = async () => {
-      reasonErr.hidden = true;
-      reason.closest(".input")?.classList.remove("is-invalid");
-      setBusy(save, true, "Saving…");
-      try {
-        await api("/api/expectations", {
-          method: "POST",
-          body: JSON.stringify({
-            node: state.node, key: finding.key, culprit: state.culprit, reason: reason.value,
-            days: state.window ? [...state.days].sort() : [],
-            start: state.window ? state.start : null, end: state.window ? state.end : null,
-          }),
-        });
-        inlineResult(result, "Saved — reads as expected from the next sample.", "ok");
-        setTimeout(() => handle.close(), 900);
-      } catch (error) {
-        const errors = error.payload?.field_errors || {};
-        if (errors.reason) {
-          reasonErr.textContent = errors.reason;
-          reasonErr.hidden = false;
-          reason.closest(".input")?.classList.add("is-invalid");
-          reason.focus();
-        }
-        inlineResult(result, errors.reason ? "See the field above." : (errors.start || errors.end || errors.days || error.message), "error");
-        setBusy(save, false, "Mark as expected");
-      }
-    };
-    save.addEventListener("click", submit);
-    reason.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } });
   }
 
   root.mount = () => { if (!built) build(); update(store.state); };

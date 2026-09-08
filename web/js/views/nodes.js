@@ -274,6 +274,9 @@ export function createNodes() {
     const nameLabel = el("span.strong");
     const dockerBadge = el("span");
     const statusPill = el("span");
+    // The Pulse's verdict for this node, beside its online state: "quiet" is
+    // a different fact from "offline", and the row should not conflate them.
+    const pulsePill = el("span");
     // The operator's word that this machine is not always on (a desktop that
     // sleeps at night). Immediate, hence a switch: off = its absences are
     // expected, so they are not badged, not counted and not notified.
@@ -294,7 +297,7 @@ export function createNodes() {
         }
       },
     });
-    const statusCell = el("td", {}, [el("div.row", { style: { gap: "10px" } }, [statusPill, alwaysOn])]);
+    const statusCell = el("td", {}, [el("div.row", { style: { gap: "10px" } }, [statusPill, pulsePill, alwaysOn])]);
     const hostCell = el("td.faint");
     const versionText = el("span.mono.faint");
     const versionBadge = el("span");
@@ -321,7 +324,7 @@ export function createNodes() {
         addrCell,
         el("td", {}, [el("div.actions", {}, [rotate, update, version, unpin, revoke, remove])]),
       ]),
-      nameLabel, dockerBadge, statusCell, statusPill, alwaysOn, hostCell, versionText, versionBadge, lastCell, addrCell,
+      nameLabel, dockerBadge, statusCell, statusPill, pulsePill, alwaysOn, hostCell, versionText, versionBadge, lastCell, addrCell,
       rotate, update, version, unpin, revoke, remove, pinBadge, brokenBadge, node: null, flags: {},
     };
 
@@ -435,6 +438,13 @@ export function createNodes() {
       entry.statusPill.replaceChildren(statusKey === "revoked" ? pill("revoked", "crit")
         : statusKey === "online" ? pill("online", "ok")
         : statusKey === "expected-off" ? pill("off · expected", null) : pill("offline", "warn"));
+    }
+    const quiet = node.online ? Number(node.pulse_count || 0) : 0;
+    if (entry.flags.quiet !== quiet) {
+      entry.flags.quiet = quiet;
+      entry.pulsePill.replaceChildren(quiet
+        ? pill(`${quiet} quiet`, node.pulse_severity === "critical" ? "crit" : "warn") : "");
+      if (quiet) entry.pulsePill.title = "Things that stopped happening — see The Pulse";
     }
     if (entry.flags.intermittent !== !!node.intermittent) {
       entry.flags.intermittent = !!node.intermittent;
