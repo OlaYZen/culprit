@@ -1484,14 +1484,65 @@ def _critical_timer(*names: Any) -> bool:
 def _timer_actions(timer: str, activates: str | None,
                    manager: str = "system") -> list[dict[str, Any]]:
     """The verbs the dashboard may offer. Only what the agent's own guard
-    accepts, so the host renders data rather than inventing a command."""
+    accepts, so the host renders data rather than inventing a command.
+
+    Cron has no verbs at all -- there is nothing to restart, only a schedule
+    and a command -- so a cron job is offered none.
+    """
     out: list[dict[str, Any]] = []
+    if manager not in ("system", "user"):
+        return out
     for unit, verb in ((activates, "start"), (timer, "restart")):
         if not isinstance(unit, str) or unit in PROTECTED_UNITS or unit.startswith("user@"):
             continue
         out.append({"verb": verb, "unit": unit, "manager": manager,
                     "label": f"{verb.capitalize()} {unit}"})
     return out
+
+
+def _cron_item(row: dict[str, Any], name: str, nxt: float | None, last: float | None,
+               now: float, grace_s: float) -> dict[str, Any] | None:
+    """A cron job that did not run when its own schedule said it would.
+
+    cron keeps no state, so "did not fire" cannot be read off a `next` the way
+    it can from systemd: the only honest test is the time the schedule last
+    came round against the last line cron logged. Three things make a job
+    unjudgeable and each says so rather than firing: an `@reboot` job (no
+    schedule to be late against), a journal that does not reach back as far as
+    the job's own interval, and a cron that logs no job lines at all.
+    """
+    if row.get("reboot") or row.get("last_reason"):
+        return None
+    due = _num(row.get("expected_last"))
+    if due is None or now - due <= grace_s:
+        return None
+    if last is not None and last >= due - 60:
+        return None                            # it ran when it should have
+    command = str(row.get("command") or "")[:120]
+    user = str(row.get("user") or "root")
+    ran = (f"cron last logged it {_stamp(last)}" if last
+           else "cron has logged it running at no point this journal covers")
+    return {
+        "key": f"schedule_overdue:{name}", "kind": "timer", "subject": name,
+        "label": f"cron: {command.split()[0] if command else name}",
+        "unit": name, "activates": None, "manager": "cron",
+        "port": None, "proto": None, "scope": None,
+        "severity": "critical" if _critical_timer(command) else "warn",
+        "title": f"a cron job did not run ({user})",
+        "detail": (f"`{command}` was due {_stamp(due)}, {_duration(now - due)} ago; "
+                   f"{ran}. Its schedule is `{row.get('schedule')}` in "
+                   f"{row.get('source')}."),
+        "since": due, "since_capped": False, "last": last, "next": nxt,
+        "now": None, "baseline": None,
+        "evidence": [{"label": "due", "value": _stamp(due)},
+                     {"label": "last ran", "value": _stamp(last)},
+                     {"label": "schedule", "value": str(row.get("schedule"))},
+                     {"label": "in", "value": str(row.get("source"))}],
+        "culprits": [], "changes": [], "actions": [],
+        "fix": f"journalctl -t CRON --since=-2d | grep -F {command.split()[0] if command else name!r}",
+        "external": False,
+        "runs": [], "run_stats": {"runs": 0, "median_s": None, "median_io": None},
+    }
 
 
 def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any]],
@@ -1525,7 +1576,13 @@ def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any
             continue                       # the Outage Doctor already has it
         nxt, last = _num(row.get("next")), _num(row.get("last"))
         service = services.get(activates or "") or {}
-        manager = "system" if service.get("scope") != "user" else "user"
+        manager = str(row.get("manager") or ("system" if service.get("scope") != "user"
+                                             else "user"))
+        if manager == "cron":
+            item = _cron_item(row, name, nxt, last, now, grace_s)
+            if item is not None:
+                out.append(item)
+            continue
         late = (now - nxt) if nxt and nxt > 0 else 0.0
         if late > grace_s:
             severity = "critical" if _critical_timer(name, activates) else "warn"

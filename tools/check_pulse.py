@@ -440,6 +440,90 @@ def main() -> int:
     check("nor one whose ring starts after the run did",
           P.Pulse._io_over(late, "backup.service", began, began + 1800) is None)
 
+    # ------------------------------------------------------------------ cron
+    section("Cron -- the schedule it kept, against the schedule it has")
+
+    def cron_row(**over):
+        row = {"unit": "cron:sysstat:6", "manager": "cron", "activates": None,
+               "command": "debian-sa1 1 1", "user": "root",
+               "schedule": "5-55/10 * * * *", "source": "/etc/cron.d/sysstat",
+               "next": NOW + 300, "last": NOW - 600, "expected_last": NOW - 300,
+               "last_reason": None, "reboot": False, "run": None}
+        row.update(over)
+        return row
+
+    check("a cron job that ran when it should have says nothing",
+          not P.judge_timers([cron_row(last=NOW - 290)], {}, [], NOW, 900.0))
+    late = P.judge_timers([cron_row(expected_last=NOW - 4000, last=NOW - 90000)],
+                          {}, [], NOW, 900.0)
+    check("one that has not run since long before its last due time is overdue",
+          len(late) == 1 and late[0]["key"] == "schedule_overdue:cron:sysstat:6",
+          late[0]["detail"] if late else "")
+    check("... and the sentence carries the command, the schedule and the file",
+          late and "debian-sa1" in late[0]["detail"]
+          and "5-55/10" in late[0]["detail"] and "/etc/cron.d/sysstat" in late[0]["detail"])
+    check("... and offers no verb, because cron has none to offer",
+          late and late[0]["actions"] == [])
+    check("inside the grace it is not late yet",
+          not P.judge_timers([cron_row(expected_last=NOW - 300, last=NOW - 90000)],
+                             {}, [], NOW, 900.0))
+    check("an @reboot job has no schedule to be late against",
+          not P.judge_timers([cron_row(reboot=True, expected_last=None, last=None)],
+                             {}, [], NOW, 900.0))
+    check("a journal that cannot reach back that far proves nothing",
+          not P.judge_timers([cron_row(expected_last=NOW - 90000, last=None,
+                                       last_reason="the journal reaches back 3 h")],
+                             {}, [], NOW, 900.0))
+    never = P.judge_timers([cron_row(expected_last=NOW - 90000, last=None)],
+                           {}, [], NOW, 900.0)
+    check("no line at all, with a readable journal, is the finding it looks like",
+          len(never) == 1 and "at no point" in never[0]["detail"])
+
+    section("Cron -- the parser")
+    from culprit.collectors import cron as cron_mod
+    cases = [
+        ("5-55/10 * * * *", {"minute": set(range(5, 56, 10))}),
+        ("0 3 * * 0", {"hour": {3}, "dow": {0}}),
+        ("@daily", {"hour": {0}, "minute": {0}}),
+        ("0 0 1 jan *", {"month": {1}, "dom": {1}}),
+        ("0 0 * * 7", {"dow": {0}}),            # cron accepts 7 for Sunday
+        ("*/15 * * * mon-fri", {"minute": {0, 15, 30, 45}, "dow": {1, 2, 3, 4, 5}}),
+    ]
+    for expression, expected in cases:
+        spec = cron_mod.parse_schedule(expression)
+        ok = spec is not None and all(spec.get(field) == values
+                                      for field, values in expected.items())
+        check(f"`{expression}` parses to what it means", ok,
+              "" if ok else str(spec))
+    for bad in ("* * * *", "60 * * * *", "* * * * xyz", "*/0 * * * *", "5-1 * * * *"):
+        check(f"`{bad}` is refused rather than guessed",
+              cron_mod.parse_schedule(bad) is None)
+    both = cron_mod.parse_schedule("0 0 13 * fri")
+    day = time.localtime(cron_mod.occurrence(both, NOW, forward=True))
+    check("with both day-of-month and day-of-week set, cron runs on either",
+          day.tm_mday == 13 or day.tm_wday == 4,
+          time.strftime("%a %d %H:%M", day))
+    hourly = cron_mod.parse_schedule("17 * * * *")
+    ahead = cron_mod.occurrence(hourly, NOW, forward=True)
+    behind = cron_mod.occurrence(hourly, NOW, forward=False)
+    check("next and previous straddle now, seventeen past the hour",
+          behind < NOW < ahead and time.localtime(ahead).tm_min == 17
+          and time.localtime(behind).tm_min == 17)
+    check("an @reboot job has no occurrence at all",
+          cron_mod.occurrence(cron_mod.parse_schedule("@reboot"), NOW, True) is None)
+
+    section("Cron -- this machine's own crontabs")
+    real, gap = cron_mod.jobs()
+    check("the real /etc/crontab and /etc/cron.d parse without raising",
+          isinstance(real, list), f"{len(real)} job(s)")
+    check("every job carries a schedule, a command and where it came from",
+          all(j["schedule"] and j["command"] and j["source"] for j in real))
+    check("a job's next run is in the future and its last due time is not",
+          all((j["next"] is None or j["next"] > NOW)
+              and (j["expected_last"] is None or j["expected_last"] <= NOW) for j in real))
+    check("per-user crontabs are named as a gap, not skipped in silence",
+          gap is None or "crontab" in gap, gap or "readable here")
+
     # --------------------------------------------------- accumulate and store
     section("Accumulation -- fold once, per report, per gap")
     tmp = Path(tempfile.mkdtemp())
