@@ -17,6 +17,10 @@
  *   Expected findings) have no Save bar; each action is a plain button next
  *   to its inputs with its own inline result. The primary button on any
  *   page is therefore always the Save bar, or absent.
+ * - **Unsaved changes are visible.** As soon as a field differs from what
+ *   the server holds, the Save bar says "Unsaved changes" and the page's
+ *   tab carries a dot, until Save or Reload -- otherwise a page whose
+ *   controls look live reads as applying on its own.
  * - **The Save button is never disabled before submission.** Validation
  *   happens on submit and failures come back as inline messages next to the
  *   offending field, with `aria-invalid` and `aria-describedby` wired up.
@@ -187,6 +191,10 @@ export function createSettings() {
       page.bar.node.hidden = true;
       page.node.append(page.bar.node);
       page.node.addEventListener("submit", (event) => { event.preventDefault(); savePage(page); });
+      // Typing and native change events reach the form; the custom controls
+      // (switches, segmented, the branch picker) call `touch` themselves.
+      page.node.addEventListener("input", () => touch(page));
+      page.node.addEventListener("change", () => touch(page));
     } else {
       page.node = el("div.stack", {}, children);
     }
@@ -199,10 +207,36 @@ export function createSettings() {
    *  whole page as its containing block. */
   function saveBar() {
     const result = el("div.result");
+    const dirty = el("span.savebar__dirty", { hidden: true, text: "Unsaved changes" });
     const button = el("button.btn.btn--primary", { type: "submit" }, [SAVE_LABEL]);
     const revert = el("button.btn", { type: "button" }, ["Reload from server"]);
     revert.addEventListener("click", () => { result.replaceChildren(); load(); });
-    return { node: el("div.savebar", {}, [button, revert, result]), button, result };
+    return { node: el("div.savebar", {}, [button, revert, dirty, result]), button, result, dirty };
+  }
+
+  /** Does anything on the page differ from what the server holds? Shown in
+   *  the bar and on the tab; a save attempt shows its result instead until
+   *  the next edit. */
+  function isDirty(page) {
+    for (const [key, field] of page.fields) {
+      if (!same(field.read(), config[key])) return true;
+    }
+    return false;
+  }
+  function touch(page) {
+    if (!page.bar || !config) return;
+    const dirty = isDirty(page);
+    page.bar.dirty.hidden = !dirty;
+    page.bar.result.hidden = dirty;
+    const tab = tabs.querySelector(`[data-page="${page.key}"]`);
+    if (tab) {
+      if (dirty) tab.dataset.dirty = "";
+      else delete tab.dataset.dirty;
+    }
+  }
+  function showResult(page) {
+    page.bar.dirty.hidden = true;
+    page.bar.result.hidden = false;
   }
 
   let current = "general";
@@ -288,14 +322,14 @@ export function createSettings() {
 
   function boolField(page, key, { label, title, checked, read = null }) {
     let value = checked ?? !!config[key];
-    const node = switchControl({ label, title, checked: value, onChange: (v) => { value = v; } });
+    const node = switchControl({ label, title, checked: value, onChange: (v) => { value = v; touch(page); } });
     register(page, key, { read: read ? () => read(value) : () => value, synced: () => { value = !!config[key]; node.setChecked(value); } });
     return node;
   }
 
   function choiceField(page, key, { label, options }) {
     let value = config[key];
-    const node = segmented({ label, options, value, onChange: (v) => { value = v; } });
+    const node = segmented({ label, options, value, onChange: (v) => { value = v; touch(page); } });
     register(page, key, { read: () => value, synced: () => { value = config[key]; node.setValue(value); } });
     return node;
   }
@@ -304,6 +338,7 @@ export function createSettings() {
   async function savePage(page) {
     const { bar, fields } = page;
     bar.result.replaceChildren();
+    showResult(page);
     const patch = {};
     let firstBad = null;
     for (const [key, field] of fields) {
@@ -332,6 +367,8 @@ export function createSettings() {
       store.ingest({ config: payload.config }, ["config"]);
       for (const field of fields.values()) field.synced?.();
       page.after?.(patch);
+      touch(page);
+      showResult(page);
       const n = Object.keys(patch).length;
       inlineResult(bar.result, `Saved ${n} change${n === 1 ? "" : "s"}.`, "ok");
     } catch (error) {
@@ -391,7 +428,7 @@ export function createSettings() {
       renderNodes();
       renderNotify();
       renderExpectations();
-      for (const page of Object.values(pages)) if (page.bar) page.bar.node.hidden = false;
+      for (const page of Object.values(pages)) if (page.bar) { page.bar.node.hidden = false; touch(page); }
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
@@ -535,7 +572,7 @@ export function createSettings() {
               + (!listing.branches.includes(name) ? " · not in the repository" : ""),
           })),
           value: branchChoice,
-          onChange: (value) => { branchChoice = value; clearFieldError(branchField); },
+          onChange: (value) => { branchChoice = value; clearFieldError(branchField); touch(page); },
         });
         picker.id = "set-agent_update_branch";
         picker.classList.add("combo--wide");

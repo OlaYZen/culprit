@@ -363,6 +363,9 @@
   background: linear-gradient(transparent, var(--bg) 35%);
 }
 .savebar[hidden] { display: none; }
+.savebar__dirty { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--warn); }
+.savebar__dirty::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+.savebar__dirty[hidden], .savebar .result[hidden] { display: none; }
 
 /* ── Sub-navigation (pages inside one view) ────────────────────────────── */
 .subnav {
@@ -388,6 +391,8 @@
 .subnav__item:hover { color: var(--fg-1); }
 .subnav__item.is-on { color: var(--fg-1); border-bottom-color: var(--accent); }
 .subnav__item.is-on > svg { opacity: 1; color: var(--accent-1); }
+/* A page with unsaved changes carries a dot on its tab, so leaving the page never hides them. */
+.subnav__item[data-dirty]::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: 0 0 auto; }
 .subnav__item:focus-visible { outline-offset: -2px; border-radius: 0; }
 
 /* ── Combobox (searchable select) ──────────────────────────────────────── */
