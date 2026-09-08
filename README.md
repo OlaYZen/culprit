@@ -287,24 +287,46 @@ of its own**.
 ```
 
 **2. Deploy the agent** from its own self-contained repo,
-**[culprit-agent](https://github.com/OlaYZen/culprit-agent)**, or, for a
-container host, the prebuilt image:
+**[culprit-agent](https://github.com/OlaYZen/culprit-agent)**:
 
 ```bash
-# native
 git clone https://github.com/OlaYZen/culprit-agent.git
 cd culprit-agent && sudo ./agent.sh      # asks for the host URL + token, then sets up the service
+```
 
-# docker (monitors the host it runs on)
+Or run the prebuilt image, which is the whole installer. The agent monitors the
+**host** it runs on, so it runs privileged in the host's PID and network
+namespaces, and the mounts are what let it see the host rather than the
+container (login names, the journal, systemd and logind, the OS identity, and
+the Docker socket that lets it **name** the containers its culprits run in):
+
+```bash
 docker run -d --name culprit-agent --restart unless-stopped --pull always \
   --privileged --pid host --network host \
-  -e CULPRIT_HOST=http://<host>:8787 -e CULPRIT_TOKEN=web-01.<secret> \
+  -e CULPRIT_HOST=http://192.168.1.1:8787 \
+  -e CULPRIT_TOKEN=web-01.your-secret-here \
+  -v /etc/passwd:/etc/passwd:ro \
+  -v /etc/group:/etc/group:ro \
+  -v /etc/os-release:/etc/os-release:ro \
+  -v /var/lib/ubuntu-advantage:/var/lib/ubuntu-advantage:ro \
+  -v /var/log/journal:/var/log/journal:ro \
+  -v /etc/machine-id:/etc/machine-id:ro \
+  -v /run/systemd:/run/systemd:ro \
+  -v /run/dbus:/run/dbus:ro \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   ghcr.io/olayzen/culprit-agent:latest
 ```
 
-(The read-only Docker socket is what lets the agent *name* the containers its
-culprits run in; without it they show as `docker <id>` with a note saying so.)
+Only `CULPRIT_HOST` and `CULPRIT_TOKEN` are required (`CULPRIT_TOKEN_FILE`
+reads the token from a mounted file or Docker secret); `CULPRIT_INTERVAL`,
+`CULPRIT_INSECURE=1` (self-signed host certificate) and `CULPRIT_LOG_LEVEL` are
+optional. For an **NVIDIA GPU** add `--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all`
+(needs the NVIDIA Container Toolkit on the host); Intel and AMD GPUs surface
+through `/dev/dri`, which `--privileged` already exposes. To update, re-run the
+same command: `--pull always` fetches the latest image. Every flag and mount,
+and what each one unlocks, is explained in the
+[agent's README](https://github.com/OlaYZen/culprit-agent#docker); leave one
+out and the panel it feeds says so rather than showing a zero.
 
 **Windows machines** run the Windows agent from its own repo,
 **[culprit-agent-windows](https://github.com/OlaYZen/culprit-agent-windows)**
