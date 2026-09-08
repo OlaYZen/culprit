@@ -84,6 +84,10 @@ def _d(value: Any) -> dict[str, Any]:
 # cadence -- see AGENTS.md's "Agent self-update".
 REMOTE_VERSION_URL = "https://raw.githubusercontent.com/OlaYZen/culprit-agent/{branch}/version.json"
 REMOTE_VERSION_REFRESH_S = 1800.0
+# The shortest gap an explicit "check now" can produce. The scheduled window
+# exists so the host is not a nuisance to GitHub; this exists so a person
+# clicking the button is not one either.
+FORCE_REFRESH_FLOOR_S = 15.0
 # The two agents are two repositories with two version lines. A node's
 # platform (from its report meta) picks the feed it is measured against;
 # an agent too old to say is linux, the only kind there was.
@@ -341,6 +345,10 @@ class NodeRegistry:
         self._remote_version: str | None = None
         self._remote_version_windows: str | None = None
         self._remote_version_checked = 0.0
+        # Wall clock of the last *successful* read, for saying how old the
+        # answer is; _remote_version_checked is monotonic (it paces the
+        # attempts) and cannot be shown to anyone.
+        self._remote_version_at: float | None = None
         # The operator's "not always on" marks, mirrored in memory so the
         # ingest path never queries SQLite for one. Seeded at startup and
         # updated by the availability route (set_intermittent).
@@ -603,17 +611,27 @@ class NodeRegistry:
         out.sort(key=lambda n: str(n["name"]))
         return out
 
-    def refresh_remote_version(self, branch: str = "main") -> None:
+    def refresh_remote_version(self, branch: str = "main",
+                               force: bool = False) -> bool:
         """Fetch the branch's version.json if it has been more than
         REMOTE_VERSION_REFRESH_S since the last attempt, or at once when the
         configured branch changed (the old value describes another line and
         would mislabel every node until the window elapsed). Blocking (a
         plain urllib GET) -- callers off the event loop thread (main.py runs
-        this via run_in_executor). Never raises."""
+        this via run_in_executor). Never raises.
+
+        `force` is the operator asking now, from the Nodes view: it skips the
+        window but not FORCE_REFRESH_FLOOR_S, so a held-down button cannot
+        turn into a request-per-click at GitHub.
+
+        Returns whether it actually asked -- "we did not ask" and "we asked
+        and got nothing" are different answers, and the button says which.
+        """
         now = time.monotonic()
         changed = branch != getattr(self, "_remote_branch", None)
-        if not changed and now - self._remote_version_checked < REMOTE_VERSION_REFRESH_S:
-            return
+        floor = FORCE_REFRESH_FLOOR_S if force else REMOTE_VERSION_REFRESH_S
+        if not changed and now - self._remote_version_checked < floor:
+            return False
         self._remote_version_checked = now
         if changed:
             self._remote_branch = branch
@@ -623,6 +641,10 @@ class NodeRegistry:
             with urllib.request.urlopen(remote_version_url(branch), timeout=5) as response:
                 data = json.loads(response.read())
             self._remote_version = str(data["version"])
+            # Only on a real answer: this stamp says when the host last *knew*,
+            # not when it last tried, so a run of failures reads as an ageing
+            # number rather than a fresh one.
+            self._remote_version_at = time.time()
         except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
             log.warning("could not check the agent's published version: %s", exc)
         # The Windows agent's line, only when a Windows node is enrolled: no
@@ -635,6 +657,19 @@ class NodeRegistry:
                 self._remote_version_windows = str(data["version"])
             except (urllib.error.URLError, ValueError, KeyError, TypeError) as exc:
                 log.warning("could not check the Windows agent's published version: %s", exc)
+        return True
+
+    def remote_version_state(self) -> dict[str, Any]:
+        """What the host currently believes the published version is, and when
+        it last managed to ask. The Nodes view shows both, because "no update
+        available" means something different when the answer is an hour old."""
+        return {
+            "branch": getattr(self, "_remote_branch", "main"),
+            "linux": self._remote_version,
+            "windows": getattr(self, "_remote_version_windows", None),
+            "checked_at": getattr(self, "_remote_version_at", None),
+            "every_seconds": REMOTE_VERSION_REFRESH_S,
+        }
 
     def _has_platform(self, platform: str) -> bool:
         """Whether any node -- live this run, or enrolled and persisted --

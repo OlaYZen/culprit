@@ -975,6 +975,43 @@ async def api_nodes_update_all(request: Request) -> dict[str, Any]:
     return {"targets": targets, "results": results, "skipped": skipped}
 
 
+@app.post("/api/nodes/check-updates",
+          summary="Ask GitHub now what version the agents should be on",
+          dependencies=[Depends(require_role("operator"))])
+async def api_nodes_check_updates() -> dict[str, Any]:
+    """The scheduled check runs at most every half hour, which is right for a
+    background task and wrong for someone who has just pushed a release and is
+    looking at the Nodes page. This is that same check, now.
+
+    It fetches one version.json for the whole fleet (two when a Windows node
+    is enrolled), never one per agent, and re-publishes the node list so every
+    open dashboard sees the new verdict without a reload. A floor of a few
+    seconds sits under it so the button cannot become a request per click.
+    """
+    assert registry is not None
+    before = registry.remote_version_state()
+    branch = config_module.get().agent_update_branch
+    # Blocking urllib, like the sweep's own call: off the event loop thread.
+    asked = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: registry.refresh_remote_version(branch, force=True))
+    state = registry.remote_version_state()
+    nodes = registry.status_list()
+    broker.publish("nodes", nodes)
+    available = [n["name"] for n in nodes if n.get("update_available") is True]
+    return {
+        "published": state, "previous": before,
+        "changed": (state.get("linux"), state.get("windows"))
+                   != (before.get("linux"), before.get("windows")),
+        # Three outcomes, not two: it asked and got an answer, it asked and
+        # got nothing (the last known value is being kept), or it did not ask
+        # because someone clicked twice. The view says which.
+        "asked": bool(asked),
+        "reached": bool(asked) and state.get("checked_at") is not None
+                   and state.get("checked_at") != before.get("checked_at"),
+        "update_available": available,
+    }
+
+
 @app.get("/api/nodes/{name}/actions/{action_id}",
          summary="Progress and verdict of an action taken on this node")
 async def api_node_action(name: str, action_id: int) -> dict[str, Any]:
@@ -990,7 +1027,10 @@ async def api_node_action(name: str, action_id: int) -> dict[str, Any]:
 @app.get("/api/nodes", summary="Enrolled agent nodes and their status")
 async def api_nodes() -> dict[str, Any]:
     assert registry is not None
-    return {"nodes": registry.status_list()}
+    # `published` is one fact about the host, not one per node: which version
+    # the agents are measured against, and how old that answer is.
+    return {"nodes": registry.status_list(),
+            "published": registry.remote_version_state()}
 
 
 @app.get("/api/fleet", summary="Headline numbers for every node at once")
