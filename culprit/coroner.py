@@ -303,7 +303,20 @@ def judge(death: dict[str, Any], host: dict[str, Any] | None = None) -> dict[str
     if unverified:
         confidence = "medium" if because else "low"
     if verdict_class in ("abrupt_stop", "agent_died"):
-        confidence = "low" if unverified else "medium"
+        # These two classes claim only that the stop was not orderly. A
+        # recorder that ran to the end with no clean stop marked is proof of
+        # exactly that -- an orderly shutdown stops the agent first and the
+        # agent marks the file -- so a hypervisor's hard stop earns the class
+        # on the recorder alone. An unreadable journal (which could have held
+        # a panic or a machine check that would change the class) lowers it
+        # one step; the floor is a recorder that is missing or stopped well
+        # before the death, where the record cannot even say it was abrupt.
+        if not _recorded_to_end(frames, died_at):
+            confidence = "low"
+        elif unverified:
+            confidence = "medium"
+        else:
+            confidence = "high"
     return {
         "class": verdict_class,
         "severity": severity,
@@ -466,8 +479,14 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
                 None)
 
     # --- no shutdown record: read the recorder ----------------------------
-    because.append(f"no shutdown record in the journal; the previous boot's last entry is at "
-                   f"{_clock(((evidence.get('boots') or {}).get('previous') or {}).get('last') or died_at)}")
+    # Only a readable journal can say there was no shutdown record; without
+    # one the recorder's own end is the fact, and the sentence says so.
+    if journal_readable(evidence):
+        because.append(f"no shutdown record in the journal; the previous boot's last entry is at "
+                       f"{_clock(((evidence.get('boots') or {}).get('previous') or {}).get('last') or died_at)}")
+    else:
+        because.append(f"the recorder's last frame is at {_clock(died_at)} with no clean stop marked; "
+                       "the journal could not be read, so whether a shutdown was recorded is unknown")
     if _memory_death(frames, by_kind):
         cause = _memory_cause(frames, by_kind)
         for marker in (by_kind.get("oom_kill") or [])[:3]:
@@ -512,7 +531,10 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
         and (frames.get("psi_cpu_some_last") or 0) < 50
     return ("abrupt_stop", "warn",
             "Stopped without warning" + (" while healthy" if healthy else ""),
-            f"{hostname} stopped writing its journal at {when} with no shutdown record and "
+            (f"{hostname} stopped writing its journal at {when} with no shutdown record and "
+             if journal_readable(evidence) else
+             f"{hostname}'s recorder ends at {when} with no clean stop, its journal could not be "
+             "read to say whether a shutdown was ordered, and there was ")
             + ("nothing wrong in its last minute. " if healthy else "signs of strain in its last minute. ")
             + "That is what a power cut, a hypervisor reset or a hard lockup all look like from "
               "inside; the record cannot tell them apart, so this verdict does not either."
@@ -522,6 +544,17 @@ def _judge_machine(death: dict[str, Any], evidence: dict[str, Any], frames: dict
 
 def journal_readable(evidence: dict[str, Any]) -> bool:
     return bool((evidence.get("journal") or {}).get("readable"))
+
+
+def _recorded_to_end(frames: dict[str, Any], died_at: float) -> bool:
+    """Did the flight recorder run right up to the death? The file is flushed
+    every 5 s, so a last frame within half a minute of the end means the agent
+    was alive and recording until the machine stopped under it; a wider gap
+    means the recorder stopped first, and the death could have been orderly
+    for all the frames can say."""
+    last = frames.get("last_frame_at")
+    return bool(frames.get("frames")) and isinstance(last, (int, float)) \
+        and died_at - float(last) <= 30.0
 
 
 def _judge_agent(death: dict[str, Any], evidence: dict[str, Any], frames: dict[str, Any],
