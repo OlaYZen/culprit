@@ -97,6 +97,10 @@ METRICS: dict[str, Metric] = {
     # Above ARP / NTP / an idle SSH session.
     "machine": Metric("machine", "recv_bytes_sec", "sent_bytes_sec",
                       32 * 1024, 32 * 1024, 128 * 1024, "B/s in"),
+    # A daemon that deadlocks keeps its PID, its port and its cgroup, and
+    # goes quiet in the log. Three lines a minute is a heartbeat; half a line
+    # a second is a unit that genuinely talks.
+    "journal": Metric("journal", "lines_sec", None, 0.05, 0.0, 0.5, "lines/min"),
 }
 
 
@@ -163,6 +167,8 @@ class NodePulse:
     services_available: bool | None = None
     services_reason: str | None = None
     cgroup_attribution: bool | None = None
+    journal_rate: bool | None = None
+    journal_rate_reason: str | None = None
     timers: list[dict[str, Any]] = field(default_factory=list)
     timers_reason: str | None = None
     # timer -> the newest run seen, and the runs not yet written. A run is
@@ -270,9 +276,14 @@ class Pulse:
                     if row.get("status") != "running":
                         continue        # only a living unit can be quiet
                     cpu, io = _num(row.get("cpu_percent")), _num(row.get("io_bytes_sec"))
-                    if cpu is None:
-                        continue        # no cgroup attribution: nothing to fold
-                    self._fold(state, "unit", subject, cpu, io or 0.0, now)
+                    if cpu is not None:
+                        self._fold(state, "unit", subject, cpu, io or 0.0, now)
+                    # What it says in the log is its own subject: a unit can
+                    # be busy and mute (a wedged worker spinning) or idle and
+                    # talkative, and neither is the other's evidence.
+                    lines = _num(row.get("lines_sec"))
+                    if lines is not None:
+                        self._fold(state, "journal", subject, lines, 0.0, now)
             if "ports" in sections:
                 for subject, row in state.listeners.items():
                     conns = _num(row.get("connections"))
@@ -321,6 +332,8 @@ class Pulse:
         state.services_available = bool(services.get("available"))
         state.services_reason = services.get("reason") if not services.get("available") else None
         state.cgroup_attribution = services.get("cgroup_attribution")
+        state.journal_rate = services.get("journal_rate")
+        state.journal_rate_reason = services.get("journal_rate_reason")
         rows = services.get("services")
         keep: dict[str, dict[str, Any]] = {}
         for row in rows if isinstance(rows, list) else []:
@@ -514,6 +527,7 @@ class Pulse:
                 "listeners": (state.listeners_available, state.listeners_reason),
                 "machine": state.machine_available,
                 "timers_reason": state.timers_reason,
+                "journal": (state.journal_rate, state.journal_rate_reason),
             }
 
         # Runs first: the judgement two lines below reads them back.
@@ -730,6 +744,13 @@ class Pulse:
                 continue
             name = str(row.get("name") or subject)
             pid = row.get("pid") if isinstance(row.get("pid"), int) else None
+            if _num(row.get("lines_sec")) is not None:
+                out[("journal", subject)] = Subject(
+                    kind="journal", id=subject, label=name, unit=name,
+                    manager="user" if row.get("scope") == "user" else "system",
+                    culprits=([{"pid": pid, "name": name.rsplit(".", 1)[0], "unit": name,
+                                "container": None, "resource": "activity",
+                                "share": "the unit that stopped logging"}] if pid else []))
             out[("unit", subject)] = Subject(
                 kind="unit", id=subject, label=name, unit=name,
                 manager="user" if row.get("scope") == "user" else "system",
@@ -844,6 +865,12 @@ class Pulse:
                 "machine": {"available": bool(available["machine"]),
                             "reason": None if available["machine"]
                             else "no network section in the last report"},
+                "journal": {"available": bool(available["journal"][0]),
+                            "reason": available["journal"][1] or (
+                                None if available["journal"][0]
+                                else "this agent does not report per-unit log rates"),
+                            "subjects": sum(1 for r in services.values()
+                                            if r.get("lines_sec") is not None)},
             },
             "window": {"online_for_s": round(now - online_since) if online_since else 0,
                        "quiet_period_s": QUIET_PERIOD_S,
@@ -1133,6 +1160,8 @@ def _fmt_rate(value: float, metric: Metric) -> str:
         return f"{value:.0f} connection{'' if round(value) == 1 else 's'}"
     if metric.kind == "unit":
         return f"{value:.1f}% CPU"
+    if metric.kind == "journal":
+        return f"{value * 60:.1f} log lines a minute"
     return f"{value / 1024:.0f} KiB/s in"
 
 
@@ -1164,6 +1193,13 @@ def sentence(kind: str, subject: Subject, baseline: Baseline, now_mean: float,
         title = f"Nobody is reaching {subject.label}"
         detail = (f"{_fmt_rate(now_mean, metric)} for {lasted}; "
                   f"{when} saw {band}, median {baseline.median:.0f}.")
+    elif kind == "journal":
+        band = f"{baseline.p10 * 60:.0f}–{baseline.p90 * 60:.0f}"
+        title = f"{subject.label} has stopped logging"
+        detail = (f"{_fmt_rate(now_mean, metric)} for {lasted} while the unit stays "
+                  f"active; {when} saw {band} a minute. A process that has stopped "
+                  "logging while it is still running is usually stuck, not finished.")
+        return title, detail
     elif kind == "unit":
         band = f"{baseline.p10:.1f}–{baseline.p90:.1f}"
         title = f"{subject.label} is running but idle"
@@ -1255,7 +1291,9 @@ def judge_subject(subject: Subject, ring: list[tuple], baseline: Baseline,
             {"label": "now", "value": f"{_fmt_rate(mean, metric)} "
                                       f"({_duration(WINDOW_S)} mean)"},
             {"label": "normal here",
-             "value": (f"{baseline.p10 / 1024:.0f}–{baseline.p90 / 1024:.0f} KiB/s"
+             "value": (f"{baseline.p10 * 60:.0f}–{baseline.p90 * 60:.0f} lines a minute"
+                       if subject.kind == "journal"
+                       else f"{baseline.p10 / 1024:.0f}–{baseline.p90 / 1024:.0f} KiB/s"
                        if subject.kind == "machine"
                        else f"{baseline.p10:.1f}–{baseline.p90:.1f}%" if subject.kind == "unit"
                        else f"{baseline.p10:.0f}–{baseline.p90:.0f}, "

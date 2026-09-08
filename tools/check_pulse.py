@@ -194,6 +194,28 @@ def main() -> int:
         check(f"'{probe['title']}' hedges nothing",
               not any(word in text for word in ("probably", "likely", "maybe", "seems")))
 
+    # -------------------------------------------------------- stopped logging
+    section("Stopped logging -- busy and mute is not the same as idle")
+    talker = P.Subject(kind="journal", id="app.service", label="app.service",
+                       unit="app.service", manager="system",
+                       culprits=[{"pid": 900, "name": "app"}])
+    chatty = rows(5, 0.6, weekday=LT.tm_wday)          # 36 lines a minute
+    item = judge(talker, ring([0.0] * 120, floor=0.05), chatty)
+    check("a unit that stops logging while it stays active is a finding",
+          item is not None and item["key"] == "went_quiet:journal:app.service",
+          item["detail"] if item else "")
+    check("... and the sentence is in lines a minute, not lines a second",
+          item and "lines a minute" in item["detail"] and "36" in item["detail"],
+          item["detail"] if item else "")
+    check("... and it says being stuck is the usual reason, not finished",
+          item and "stuck" in item["detail"])
+    quiet_unit = P.baseline_of(rows(5, 0.004, weekday=LT.tm_wday),
+                               P.METRICS["journal"], LT.tm_wday)
+    check("a unit that barely logs at the best of times is left alone",
+          not quiet_unit.usable and "rhythm" in (quiet_unit.reason or ""))
+    check("a unit still logging its usual amount says nothing",
+          judge(talker, ring([0.6] * 120, floor=0.05), chatty) is None)
+
     # ----------------------------------------------------------- suppression
     section("Suppression -- one cause, one item")
     check("a unit that is not running is a change, not a silence",
@@ -531,7 +553,12 @@ def main() -> int:
           payload["checks"]["baseline"]["mode"] in ("seasonal", "daily")
           and payload["checks"]["baseline"]["days"] > 7)
     check("every source reports its own availability",
-          set(payload["checks"]["sources"]) == {"listeners", "units", "timers", "machine"})
+          set(payload["checks"]["sources"]) == {"listeners", "units", "timers",
+                                                "machine", "journal"},
+          ", ".join(sorted(payload["checks"]["sources"])))
+    check("an agent that reports no log rates says so rather than showing zero",
+          payload["checks"]["sources"]["journal"]["available"] is False
+          and "does not report" in (payload["checks"]["sources"]["journal"]["reason"] or ""))
 
     boot_pulse = P.Pulse(hist2)
     for i in range(135):
