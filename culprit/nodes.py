@@ -332,6 +332,7 @@ class NodeRegistry:
         self.verifier: Any = None        # culprit.verdict.ActionVerifier
         self.notifier: Any = None        # culprit.notify.Notifier
         self.coroner: Any = None         # culprit.coroner.Coroner
+        self.pulse: Any = None           # culprit.pulse.Pulse
         # Fleet-wide, not per-node: the version.json GitHub publishes for the
         # agent's main branch, refreshed at most every REMOTE_VERSION_REFRESH_S
         # by main.py's sweep loop (a blocking call, so it runs off the event
@@ -340,6 +341,10 @@ class NodeRegistry:
         self._remote_version: str | None = None
         self._remote_version_windows: str | None = None
         self._remote_version_checked = 0.0
+        # The operator's "not always on" marks, mirrored in memory so the
+        # ingest path never queries SQLite for one. Seeded at startup and
+        # updated by the availability route (set_intermittent).
+        self._intermittent: dict[str, bool] = {}
 
     # ----------------------------------------------------------------- ingest
     def ingest(self, name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -427,6 +432,17 @@ class NodeRegistry:
                 self.coroner.record(name, deaths)
             except Exception:  # noqa: BLE001 -- the coroner catches its own, but never trust that here
                 log.exception("coroner failed for %s", name)
+        if self.pulse is not None:
+            # The rhythm of this machine, folded from the sections this
+            # report actually carried (a merged-but-unchanged section was
+            # folded when it arrived). Never raises into ingest.
+            try:
+                self.pulse.observe(name, snapshot.keys(), merged,
+                                   {"platform": node.platform,
+                                    "intermittent": self._intermittent.get(name, False)},
+                                   now)
+            except Exception:  # noqa: BLE001
+                log.exception("pulse observer failed for %s", name)
         self._accumulate(node, merged, now)
         if self.history.ready and "events" in snapshot:
             # Only when the events section was actually in this report --
@@ -450,6 +466,12 @@ class NodeRegistry:
         if dropped:
             reply["dropped"] = dropped[:20]
         return reply
+
+    def set_intermittent(self, name: str, intermittent: bool) -> None:
+        """Mirror the operator's word for the ingest path (the Pulse reads
+        it: a machine that is expected to be off has no rhythm to fall out
+        of while it is off)."""
+        self._intermittent[name] = bool(intermittent)
 
     def set_node_settings(self, name: str,
                           patch: dict[str, float]) -> dict[str, float]:
@@ -689,6 +711,8 @@ class NodeRegistry:
             nodes = list(self._nodes.values())
         for node in nodes:
             self._flush(node)
+        if self.pulse is not None:
+            self.pulse.flush()
 
 
 class CommandBroker:

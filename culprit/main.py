@@ -40,6 +40,7 @@ from . import nodes as nodes_module
 from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
 from . import changelog, portnames
 from .notify import Notifier
+from .pulse import Pulse
 from .verdict import ActionVerifier
 from .sampler import LIVE_KEYS, Sampler
 from .state import Broker, Store
@@ -59,6 +60,7 @@ verifier: ActionVerifier | None = None
 notifier: Notifier | None = None
 coroner: Coroner | None = None
 fleetmap: FleetMap | None = None
+pulse: Pulse | None = None
 
 
 async def _sweep_loop() -> None:
@@ -78,6 +80,10 @@ async def _sweep_loop() -> None:
                 # itself no-ops until REMOTE_VERSION_REFRESH_S has passed.
                 await asyncio.get_running_loop().run_in_executor(
                     None, registry.refresh_remote_version, config_module.get().agent_update_branch)
+            if pulse is not None:
+                # Its own retention, rate-limited to once an hour inside
+                # History -- the rhythm outlives the metric history.
+                pulse.prune()
             _maybe_auto_update()
         except Exception:  # noqa: BLE001 -- housekeeping must not die
             log.exception("sweep failed")
@@ -131,7 +137,7 @@ async def _run_scheduled_update(name: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global history, auth, registry, commands, expectations, verifier, notifier, coroner, fleetmap
+    global history, auth, registry, commands, expectations, verifier, notifier, coroner, fleetmap, pulse
     cfg = config_module.load()
     logging.basicConfig(
         level=logging.INFO,
@@ -160,6 +166,7 @@ async def lifespan(app: FastAPI):
     # table; the notifier must know them before its first sweep, or a node
     # that is off at startup would be reported as gone.
     for agent in history.list_agents():
+        registry.set_intermittent(str(agent["name"]), bool(agent.get("intermittent")))
         if agent.get("intermittent"):
             notifier.set_intermittent(str(agent["name"]), True)
     coroner = Coroner(history, notifier)
@@ -167,6 +174,8 @@ async def lifespan(app: FastAPI):
     registry.verifier = verifier
     registry.notifier = notifier
     registry.coroner = coroner
+    pulse = Pulse(history, expectations)
+    registry.pulse = pulse
     fleetmap = FleetMap(registry)
     sweeper = asyncio.get_running_loop().create_task(_sweep_loop())
     # This host is an aggregator + dashboard only: it ingests external agents
@@ -901,6 +910,7 @@ async def api_node_availability(request: Request, name: str,
         raise HTTPException(404, f"no agent named '{name}'")
     if notifier is not None:
         notifier.set_intermittent(name, flag)
+    registry.set_intermittent(name, flag)
     log.info("node '%s' marked %s by %s", name,
              "not always on" if flag else "always on", getattr(request.state, "user", "?"))
     broker.publish("nodes", registry.status_list())
@@ -1100,6 +1110,9 @@ async def api_agent_delete(name: str, request: Request) -> dict[str, Any]:
              getattr(request.state, "user", "?"))
     if notifier is not None:
         notifier.forget_node(name)
+    if pulse is not None:
+        pulse.forget(name)
+    registry.set_intermittent(name, False)
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name,
             "note": "stored history for this node is kept"}
