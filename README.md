@@ -390,7 +390,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before, and for units a **Restart / Start / Reload button** whose outcome is verified against the next samples |
-| **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire**, and -- from the run each scheduled job records -- one that **failed**, one **taking far longer than it takes**, one that **started before the last finished**, and one that **succeeded without doing anything** (exited 0 in a fifth of its usual time, having moved none of its usual bytes). Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
+| **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire**, and -- from the run each scheduled job records -- one that **failed**, one **taking far longer than it takes**, one that **started before the last finished**, and one that **succeeded without doing anything** (exited 0 in a fifth of its usual time, having moved none of its usual bytes). **Cron** is judged the same way from its own schedules and journal lines, and a unit that **stopped writing to the log** while it stays active is its own signal -- the shape a deadlocked daemon has. Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -757,6 +757,32 @@ Administrator task, so without one the duration is `null` with the reason
 named -- and the task's *result* still comes through, because the scheduler
 reports that to anyone.
 
+**It watches the log, too.** A daemon that deadlocks keeps its PID, its port,
+its cgroup and its memory; what it stops doing is *talking*. Each unit's
+journal line rate is its own subject with its own baseline -- kept apart from
+its CPU, because a unit can be busy and mute (a worker spinning on a wedged
+lock) or idle and talkative, and neither is evidence for the other. The lines
+are counted, never read.
+
+**And cron, which keeps no state at all.** No `last`, no `next`, no result: a
+cron job that stopped running leaves no trace except a missing line. So both
+facts are reconstructed -- when it *should* have run, from a five-field parser
+that honours cron's union rule for day-of-month and day-of-week, and when it
+*did*, from cron's own `(user) CMD (...)` lines. A job whose interval is longer
+than the journal reaches back, an `@reboot` job, and a cron started with `-L 0`
+are each reported as unjudgeable with that as the reason.
+
+**Acting on one is verified, in the Pulse's own terms.** Restarting a unit
+from here asks a different question from restarting it from the Outage Doctor:
+an outage item clears the moment systemd says the unit is up, but a Pulse item
+clears only when the subject is *doing what it normally does*. So the watch is
+slower (three judgements, five minutes) and its answers are **it came back**,
+**still quiet** -- *whatever stopped it is not inside this unit* -- **it came
+back and went quiet again**, or partly. Verdicts are stored beside the other
+doctors', so a card shows *"Restart before: it came back 2 of 3, last 2 h ago"*
+before offering the button again, and each item becomes an **incident** on the
+Trends timeline once it clears.
+
 **What it refuses to do** is the point:
 
 - **Nothing is claimed without a baseline, and the baseline is in the
@@ -895,6 +921,14 @@ Culprit tells you what it *can't* do as plainly as what it can:
   that `/proc`-derived numbers may be the host's unless lxcfs is mounted.
 - **Journal persistence matters:** with a volatile-only journal, event history
   dies at reboot, and the Events view says which kind this machine has.
+- **Cron can only be checked as far back as its journal reaches.** The last-run
+  lines are read newest-first with a cap (cheap on a large journal, but
+  bounded), so a weekly or monthly job on a busy machine may be beyond it --
+  the job then says so instead of being called late. Per-user crontabs are
+  `1730 root:crontab` and invisible to an unprivileged agent, which is named as
+  a gap. On **Windows**, how long a scheduled task ran comes from the Task
+  Scheduler's Operational log, which needs an Administrator task; without one
+  the duration is absent (its result is not).
 - **The Pulse needs history:** seven days at an hour before it says anything
   about that hour, two same weekdays before it compares like with like. Until
   then it is silent and says how much it has -- except for schedules, which are
