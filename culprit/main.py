@@ -1488,6 +1488,43 @@ async def api_map_radius(
     return fleetmap.radius(node, pid)
 
 
+# ------------------------------------------------------------------- pulse
+@app.get("/api/pulse", summary="The Pulse: what stopped happening on this node")
+async def api_pulse(
+    node: str = Query(..., min_length=1, max_length=64),
+) -> dict[str, Any]:
+    """Computed on the host once a minute per node from the activity every
+    report already carries -- no agent traffic, no probe. Each item names the
+    baseline it was judged against; while there is not enough history the
+    status is `learning` and says how much there is, rather than an empty
+    page implying health."""
+    if pulse is None:
+        raise HTTPException(503, "the pulse is not initialised")
+    return pulse.payload(node)
+
+
+@app.get("/api/pulse/rhythm", summary="One subject's 7 x 24 rhythm, and today")
+async def api_pulse_rhythm(
+    node: str = Query(..., min_length=1, max_length=64),
+    kind: str | None = Query(None, pattern="^(listener|unit|machine)$"),
+    subject: str | None = Query(None, max_length=160),
+    weeks: int = Query(5, ge=1, le=5),
+) -> dict[str, Any]:
+    """Without `subject`, the list of subjects this node has any rhythm for
+    (the picker). With one, the grid: a cell with no buckets is *not
+    observed*, never zero."""
+    if pulse is None:
+        raise HTTPException(503, "the pulse is not initialised")
+    return pulse.rhythm(node, kind, subject, weeks)
+
+
+@app.get("/api/pulse/fleet", summary="Each node's Pulse status in one line")
+async def api_pulse_fleet() -> dict[str, Any]:
+    if pulse is None:
+        raise HTTPException(503, "the pulse is not initialised")
+    return {"nodes": pulse.fleet(), "ts": time.time()}
+
+
 # ------------------------------------------------------------------ deaths
 @app.get("/api/deaths", summary="How nodes died: the Coroner's verdicts")
 async def api_deaths(

@@ -573,6 +573,7 @@ class NodeRegistry:
                 "update_self_broken": None, "branch_switch_supported": None,
                 "remote_version": self._remote_version_for(agent.get("platform") or "linux"),
                 "remote_branch": getattr(self, "_remote_branch", "main"),
+                "pulse_status": None, "pulse_severity": None, "pulse_count": 0,
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -679,7 +680,22 @@ class NodeRegistry:
             # The Nodes view badges only containerised agents.
             "container": _short(system.get("container")),
             "severity": _short(_d(node.snapshot.get("diagnosis")).get("severity")),
+            # The Pulse's last verdict for this node, read from memory: the
+            # sidebar badge, the fleet card and the Nodes row all want it,
+            # and none of them should pay for a second request.
+            **self._pulse_meta(node.name),
         }
+
+    def _pulse_meta(self, name: str) -> dict[str, Any]:
+        if self.pulse is None:
+            return {"pulse_status": None, "pulse_severity": None, "pulse_count": 0}
+        try:
+            entry = self.pulse.fleet().get(name) or {}
+        except Exception:  # noqa: BLE001
+            return {"pulse_status": None, "pulse_severity": None, "pulse_count": 0}
+        return {"pulse_status": entry.get("status"),
+                "pulse_severity": entry.get("severity"),
+                "pulse_count": int(entry.get("count") or 0)}
 
     def fleet(self) -> list[dict[str, Any]]:
         """Compact per-agent summaries for the all-nodes overview grid.
