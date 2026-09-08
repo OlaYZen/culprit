@@ -59,6 +59,10 @@ class Notifier:
         self._active: dict[tuple[str, str], dict[str, Any]] = {}
         self._node_seen: dict[str, float] = {}
         self._node_offline: set[str] = set()
+        # Nodes the operator marked as not always on: their going quiet and
+        # coming back are never sent (the state is still tracked, so a later
+        # change of mind starts from the truth).
+        self._intermittent: set[str] = set()
         self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=200)
         self._sent_times: list[float] = []
         self.stats: dict[str, Any] = {"sent": 0, "failed": 0, "dropped": 0,
@@ -79,7 +83,7 @@ class Notifier:
                 back = True
             else:
                 back = False
-        if back and cfg.notify_offline and _channels(cfg):
+        if back and cfg.notify_offline and _channels(cfg) and node not in self._intermittent:
             self._enqueue(_message("online", node, {"title": "Agent is reporting again"},
                                    cfg))
         raw = diagnosis.get("findings") if isinstance(diagnosis, dict) else None
@@ -153,6 +157,8 @@ class Notifier:
                 self._enqueue(_message("resolved", node, finding, cfg))
         if cfg.notify_offline:
             for node in offline:
+                if node in self._intermittent:
+                    continue
                 self._enqueue(_message("offline", node, {
                     "title": "Agent stopped reporting",
                     "detail": f"No report from {node} for {OFFLINE_AFTER_S:.0f} s. "
@@ -173,12 +179,21 @@ class Notifier:
         self._enqueue(_message(kind, node, {"title": title, "detail": detail,
                                             "severity": severity}, cfg))
 
+    def set_intermittent(self, node: str, intermittent: bool) -> None:
+        """Record the operator's word that this node is not always on."""
+        with self._lock:
+            if intermittent:
+                self._intermittent.add(node)
+            else:
+                self._intermittent.discard(node)
+
     def forget_node(self, node: str) -> None:
         with self._lock:
             for key in [k for k in self._active if k[0] == node]:
                 self._active.pop(key, None)
             self._node_seen.pop(node, None)
             self._node_offline.discard(node)
+            self._intermittent.discard(node)
 
     # -------------------------------------------------------------- testing
     def send_test(self) -> dict[str, Any]:

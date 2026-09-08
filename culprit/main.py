@@ -156,6 +156,12 @@ async def lifespan(app: FastAPI):
     expectations = Expectations(history)
     verifier = ActionVerifier(history)
     notifier = Notifier()
+    # The operator's "not always on" marks survive a restart in the agents
+    # table; the notifier must know them before its first sweep, or a node
+    # that is off at startup would be reported as gone.
+    for agent in history.list_agents():
+        if agent.get("intermittent"):
+            notifier.set_intermittent(str(agent["name"]), True)
     coroner = Coroner(history, notifier)
     registry.expectations = expectations
     registry.verifier = verifier
@@ -875,6 +881,30 @@ async def api_node_unpin(request: Request, name: str) -> dict[str, Any]:
         raise HTTPException(404, f"no agent named '{name}'")
     log.info("pin cleared on '%s' by %s", name, getattr(request.state, "user", "?"))
     return {"name": name, "pinned": False}
+
+
+@app.put("/api/nodes/{name}/availability",
+         summary="Say whether this machine is always on",
+         dependencies=[Depends(require_role("operator"))])
+async def api_node_availability(request: Request, name: str,
+                                body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """`{"intermittent": true}` is the operator's word that this machine is
+    not always on -- a desktop that sleeps at night, a laptop -- so its being
+    offline is expected: not badged, not counted as a problem, not notified.
+    The host cannot tell a switched-off machine from a dead one; only the
+    operator can, which is why this is a setting and not a heuristic."""
+    assert history is not None and registry is not None
+    flag = body.get("intermittent") if isinstance(body, dict) else None
+    if not isinstance(flag, bool):
+        raise HTTPException(422, "expected {\"intermittent\": true|false}")
+    if not history.set_agent_intermittent(name, flag):
+        raise HTTPException(404, f"no agent named '{name}'")
+    if notifier is not None:
+        notifier.set_intermittent(name, flag)
+    log.info("node '%s' marked %s by %s", name,
+             "not always on" if flag else "always on", getattr(request.state, "user", "?"))
+    broker.publish("nodes", registry.status_list())
+    return {"name": name, "intermittent": flag}
 
 
 @app.post("/api/nodes/update-all",

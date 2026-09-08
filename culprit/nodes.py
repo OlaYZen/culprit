@@ -531,6 +531,10 @@ class NodeRegistry:
             meta["last_addr"] = agent.get("last_addr")
             meta["pinned_version"] = agent.get("pinned_version") or None
             meta["pinned_ref"] = agent.get("pinned_ref") or None
+            # The operator's word, not a measurement: an intermittent node
+            # that is offline is doing what it does, and every consumer
+            # (badge, fleet card, notifier) reads this rather than guessing.
+            meta["intermittent"] = bool(agent.get("intermittent"))
             out.append(meta)
         # A node that reports with a valid token but was since deleted from
         # the agents table cannot happen (the token check consults the table),
