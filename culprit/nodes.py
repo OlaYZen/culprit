@@ -539,6 +539,18 @@ class NodeRegistry:
         offenders = diagnosis.get("offenders") or []
         findings = [f for f in (diagnosis.get("findings") or [])
                     if f.get("severity") in ("warn", "critical")]
+        # Pulse items are findings too, under their own namespace: "443 was
+        # quiet from 14:10 to 15:40" belongs on the timeline beside the
+        # pressure that was not there, and Trends folds stored findings into
+        # incidents with no new write path. Expected ones are not written, the
+        # same rule the Lag Doctor's are held to.
+        findings += [
+            {"key": f"pulse:{item.get('key')}", "severity": item.get("severity"),
+             "resource": "activity", "title": item.get("title"),
+             "detail": item.get("detail"), "culprits": item.get("culprits") or []}
+            for item in self._pulse_items(node.name)
+            if item.get("severity") in ("warn", "critical") and not item.get("expected")
+        ]
         try:
             self.history.write_rollup(
                 node.bucket_ts, aggregate, offenders[:self.history_top],
