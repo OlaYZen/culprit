@@ -424,7 +424,7 @@ class NodeRegistry:
             # while it holds and resolved when it clears, whichever section
             # the report carried.
             try:
-                self.notifier.observe(name, _notifiable(merged), now)
+                self.notifier.observe(name, _notifiable(merged, self._pulse_items(name)), now)
             except Exception:  # noqa: BLE001
                 log.exception("notifier failed for %s", name)
         if deaths is not None and self.coroner is not None:
@@ -466,6 +466,32 @@ class NodeRegistry:
         if dropped:
             reply["dropped"] = dropped[:20]
         return reply
+
+    def _pulse_items(self, name: str) -> list[dict[str, Any]]:
+        if self.pulse is None:
+            return []
+        try:
+            return self.pulse.items(name)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def renotify(self, name: str) -> None:
+        """Put the notifier back in step after a Pulse sweep changed a node's
+        items. The Pulse judges on the sweep, not on a report, so without
+        this a subject that went quiet would wait for the next report that
+        happens to carry a diagnosis or an outage section."""
+        if self.notifier is None:
+            return
+        with self._lock:
+            node = self._nodes.get(name)
+            merged = dict(node.snapshot) if node else None
+        if merged is None:
+            return
+        try:
+            self.notifier.observe(name, _notifiable(merged, self._pulse_items(name)),
+                                  time.time())
+        except Exception:  # noqa: BLE001
+            log.exception("renotify failed for %s", name)
 
     def set_intermittent(self, name: str, intermittent: bool) -> None:
         """Mirror the operator's word for the ingest path (the Pulse reads
@@ -793,9 +819,17 @@ class CommandBroker:
                 self._pending.pop(node, None)
 
 
-def _notifiable(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """The node's diagnosis findings plus its outage items in finding shape,
-    for the notifier: one list, keys namespaced so the two never collide."""
+def _notifiable(snapshot: dict[str, Any],
+                pulse_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """The node's diagnosis findings, its outage items and its Pulse items in
+    finding shape, for the notifier: one list, keys namespaced so the three
+    never collide.
+
+    All three must be in every call. The notifier reads the list as "what is
+    active on this node right now" and starts resolving anything missing from
+    it, so handing it the diagnosis alone would resolve every outage and
+    Pulse item on the next report.
+    """
     diagnosis = _d(snapshot.get("diagnosis"))
     findings = [f for f in (diagnosis.get("findings") or []) if isinstance(f, dict)]
     for item in _d(snapshot.get("outage")).get("items") or []:
@@ -806,6 +840,18 @@ def _notifiable(snapshot: dict[str, Any]) -> dict[str, Any]:
             "title": item.get("title"), "detail": item.get("detail"),
             "resource": item.get("kind"), "evidence": item.get("evidence"),
             "culprits": [], "outage": True,
+        })
+    for item in pulse_items or []:
+        if not isinstance(item, dict) or item.get("expected"):
+            continue
+        findings.append({
+            "key": f"pulse:{item.get('key')}", "severity": item.get("severity"),
+            "title": item.get("title"), "detail": item.get("detail"),
+            "resource": "activity",
+            "evidence": {e.get("label"): e.get("value")
+                         for e in (item.get("evidence") or []) if isinstance(e, dict)},
+            "culprits": item.get("culprits") or [], "pulse": True,
+            "external": bool(item.get("external")), "blame": item.get("blame"),
         })
     return {"findings": findings}
 

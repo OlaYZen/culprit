@@ -35,7 +35,7 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 OVERRUN_WINDOW_MIN = 30      # how long after a window ends "overran" is reported
 MAX_REASON = 200
-MAX_KEY = 64
+MAX_KEY = 128
 MAX_CULPRIT = 128
 
 
@@ -60,12 +60,13 @@ def validate(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
         errors["node"] = "use an agent name or * for every node"
     clean["node"] = node
 
-    # Finding keys are identifiers (psi_io, cpu_steal) or, for volumes, an
-    # identifier plus a mount point (space_/home). Anything that looks like a
-    # path trick is refused: it could never match a real key anyway.
+    # Finding keys are identifiers (psi_io, cpu_steal), an identifier plus a
+    # mount point for volumes (space_/home), or a namespaced key from one of
+    # the other doctors (pulse:went_quiet:listener:443/tcp). Anything that
+    # looks like a path trick is refused: it could never match a real key.
     key = str(payload.get("key") or "").strip()
     if not key or len(key) > MAX_KEY or not key[0].isalpha() or ".." in key \
-            or not all(c.isalnum() or c in "-_/." for c in key):
+            or not all(c.isalnum() or c in "-_/.:" for c in key):
         errors["key"] = "a finding key is required (a name such as psi_io or space_/home)"
     clean["key"] = key
 

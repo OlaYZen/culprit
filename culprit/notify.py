@@ -187,6 +187,17 @@ class Notifier:
             else:
                 self._intermittent.discard(node)
 
+    def drop(self, node: str, key: str) -> None:
+        """Forget one active key without announcing a resolution.
+
+        A finding that clears is good news worth sending. A *subject that
+        stopped existing* is not the same news: a listener that closed or a
+        unit that was stopped is a change, and saying "443 is busy again"
+        about a port that no longer exists would be a lie in the operator's
+        inbox. The Pulse calls this for those keys."""
+        with self._lock:
+            self._active.pop((node, key), None)
+
     def forget_node(self, node: str) -> None:
         with self._lock:
             for key in [k for k in self._active if k[0] == node]:
@@ -271,9 +282,11 @@ def _message(event: str, node: str, finding: dict[str, Any],
                 if isinstance(c, dict)]
     lead = culprits[0] if culprits else None
     lines: list[str] = []
+    pulse = bool(finding.get("pulse"))
     if event == "resolved":
-        heading = f"{node}: resolved -- {title}"
-        lines.append("The finding has cleared.")
+        heading = f"{node}: {'busy again' if pulse else 'resolved'} -- {title}"
+        lines.append("It is doing what it normally does at this hour again."
+                     if pulse else "The finding has cleared.")
     elif event == "escalated":
         heading = f"{node}: now {severity.upper()} -- {title}"
     elif event in ("offline", "online", "test"):
@@ -282,6 +295,11 @@ def _message(event: str, node: str, finding: dict[str, Any],
         heading = f"{node}: {title}"
     if finding.get("detail"):
         lines.append(str(finding["detail"]))
+    if pulse and event in ("finding", "escalated"):
+        # Say what kind of statement this is. Nothing is broken and nothing
+        # is slow: something that normally happens has stopped.
+        lines.append("Nothing here crossed a threshold -- this is measured "
+                     "against what this machine normally does at this hour.")
     if finding.get("external"):
         lines.append(f"Cause is outside the machine: {finding.get('blame')}.")
     elif lead:
@@ -304,7 +322,7 @@ def _message(event: str, node: str, finding: dict[str, Any],
         "body": "\n".join(lines) or heading, "ts": time.time(),
         "finding": {k: finding.get(k) for k in ("key", "title", "detail", "resource",
                                                  "severity", "evidence", "culprits",
-                                                 "external", "blame")},
+                                                 "external", "blame", "pulse")},
     }
 
 

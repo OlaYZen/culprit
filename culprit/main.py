@@ -66,7 +66,7 @@ pulse: Pulse | None = None
 async def _sweep_loop() -> None:
     """Housekeeping the ingest path cannot do: verdicts whose node went quiet,
     notifications for findings that resolved or nodes that stopped reporting,
-    the daily auto-update schedule."""
+    the daily auto-update schedule, and the Pulse's judgement."""
     while True:
         await asyncio.sleep(15.0)
         try:
@@ -80,7 +80,18 @@ async def _sweep_loop() -> None:
                 # itself no-ops until REMOTE_VERSION_REFRESH_S has passed.
                 await asyncio.get_running_loop().run_in_executor(
                     None, registry.refresh_remote_version, config_module.get().agent_update_branch)
-            if pulse is not None:
+            if pulse is not None and registry is not None:
+                # The Pulse reaches its verdicts here rather than at ingest:
+                # "quiet for the last half hour" is a statement about a
+                # window, not about the report that just arrived. Nodes whose
+                # item set changed are re-notified so a subject that went
+                # quiet is announced now, not on the next report that happens
+                # to carry a diagnosis.
+                for node in pulse.sweep(time.time()):
+                    for key in pulse.take_vanished(node):
+                        if notifier is not None:
+                            notifier.drop(node, f"pulse:{key}")
+                    registry.renotify(node)
                 # Its own retention, rate-limited to once an hour inside
                 # History -- the rhythm outlives the metric history.
                 pulse.prune()
