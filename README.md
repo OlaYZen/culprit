@@ -25,7 +25,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Live demo](#live-demo) · [Quick start](#quick-start) · [Add the machines to watch](#add-the-machines-to-watch)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [The Pulse](#the-pulse) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -163,6 +163,7 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | Says **what changed** before a finding began | ● | ○ | ○ | ○ | ◑ logs |
 | Names **what breaks next** (fd / conntrack / inotify ceilings with the holder, next OOM victim, disk-full ETA with the writer) | ● | ◑ thresholds | ◑ thresholds | ◑ | ○ |
 | Shows **clients being turned away** (accept queue full, `ListenOverflows`) and names the listener | ● | ◑ node exporter counter, no port | ◑ counter | ○ | ○ |
+| Notices what **stopped happening** (a listener nobody reaches, a job that did not run, a worker gone idle) against the machine's **own rhythm** | ● | ◑ `nodata` triggers, per item, hand-written | ◑ `absent()`, per metric, hand-written | ○ | ○ |
 | **Remembers** whether an action helped last time; suggests what is routine | ● | ○ | ○ | ○ | ○ |
 | Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
@@ -389,6 +390,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before, and for units a **Restart / Start / Reload button** whose outcome is verified against the next samples |
+| **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire** or is still running long after it should have finished. Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -607,7 +609,12 @@ The verdict is one of a few classes, each earned by evidence:
 Every verdict shows its evidence line by line, its **confidence**, and what it
 **could not check** (a journal that needs the `systemd-journal` group, a pstore
 that needs root, an agent that is not a systemd service) rather than pretending
-those sources agreed. The Coroner view has the last ten minutes as charts with a
+those sources agreed. *Stopped without warning* earns its confidence from the
+recorder itself: frames running right up to the end with no clean stop marked
+are proof the stop was not orderly (an orderly shutdown stops the agent first,
+and it marks the file), so a hypervisor's hard stop is high confidence with the
+journal read, medium without it, and low only when the recorder stopped before
+the machine did. The Coroner view has the last ten minutes as charts with a
 scrubber: any second shows the numbers at that moment and the processes
 recorded then, so "what was it doing at 03:11:40" is a drag, not a guess.
 Deaths are notified over the same channels as findings.
@@ -699,6 +706,67 @@ port map that could not be read -- rather than rendering as fine. A healthy
 box shows a page that says nothing is broken, and the checks strip says what
 was looked at. Outage items go out over the notification channels like
 findings, once while they hold and once when they clear.
+
+## The Pulse
+
+Three doctors ask what is *there*: a stall, a failure, a death. The Pulse asks
+what is **not** -- because the most expensive failures are the quiet ones, and
+every counter is green while they happen:
+
+| What every other check says | What actually happened |
+|---|---|
+| nginx: active, listening, certificate valid, no pressure | the load balancer dropped this node an hour ago and nobody has reached it since |
+| `backup.service`: exited 0, in four seconds, as it does every night since the 22nd | the target mount is gone and `rsync` has nothing to copy |
+| `worker.service`: active (running), no restarts, 0.0 % CPU since Tuesday | the queue consumer lost its broker session and is sleeping forever |
+| `certbot.timer`: listed, `next` is in the past | its service failed once, nobody noticed, and the certificate expires in a fortnight |
+
+Nothing there crosses a line, so no threshold monitor can help. What is needed
+is the machine's own rhythm, and that is what the Pulse keeps: **one hourly
+bucket per listener, per running service and for the machine's own network**,
+for five weeks, in a few megabytes -- built entirely from numbers the agents
+already report, so it costs **no new agent traffic, no subprocess and no
+probe**.
+
+A subject is quiet when its **last half hour is below a quarter of its own
+quietest normal hour** (the 10th percentile of the same hour on the same
+weekday) *and* it is idle in it -- and it stops being quiet as soon as the
+last ten minutes reach half its normal median. Two different lines, so nothing
+flaps at the moment you are trying to read it. Schedules need no history at
+all: a timer whose `next` is in the past by more than the grace **did not
+fire**, and systemd's own word is enough.
+
+**What it refuses to do** is the point:
+
+- **Nothing is claimed without a baseline, and the baseline is in the
+  sentence.** *"0 connections for 42 min; the last 12 Tuesdays at 14:00 saw
+  180-400, median 260."* Below two same weekdays (or seven days at that hour)
+  it stays silent and says how much history it has.
+- **A subject with no rhythm cannot fall out of one.** One that is idle at
+  this hour a fifth of the time, or barely busy when it is busy, is never
+  judged -- and the page says which, and why.
+- **The host's own deafness is never read as silence on the machine.** A node
+  that is not reporting, one that came back minutes ago, a machine that has
+  just booted, and a machine the operator marked *not always on* that was off
+  within the hour all produce silence here, not an item.
+- **One cause, one item.** A unit the Outage Doctor already has is left to it.
+  Three listeners quiet at once *and* the network quiet is **one** item -- and
+  an external one: nothing on this machine is refusing clients, they are not
+  arriving, so nothing on it is ranked under it.
+- **Absent is not quiet.** A listener that closed or a unit that was stopped is
+  a *change*, already owned by the change log; only something present and alive
+  can be doing less than it does.
+
+Each item ranks exactly the subject's own process -- a quiet listener is
+nobody else's fault -- carries what changed in the ten minutes before it went
+quiet, and offers *Quiet is fine here* (the same expectations dialog the Lag
+Doctor uses: it stays visible, with its evidence, reading as normal). The
+**rhythm grid** shows one subject's whole week, hour by hour, with the hours
+nobody observed drawn as *not observed*, never as zero. Items go out over the
+notification channels like findings, once while they hold, and "busy again"
+when they recover -- never a recovery for a subject that simply stopped
+existing.
+
+---
 
 ---
 
@@ -805,6 +873,12 @@ Culprit tells you what it *can't* do as plainly as what it can:
   that `/proc`-derived numbers may be the host's unless lxcfs is mounted.
 - **Journal persistence matters:** with a volatile-only journal, event history
   dies at reboot, and the Events view says which kind this machine has.
+- **The Pulse needs history:** seven days at an hour before it says anything
+  about that hour, two same weekdays before it compares like with like. Until
+  then it is silent and says how much it has -- except for schedules, which are
+  facts and are checked from the first report. A health check that keeps one
+  connection alive can also keep a dead service looking busy; the comparison is
+  of magnitude, not presence, but a low-rate probe is a known blind spot.
 - **Commit charge is shown always but alerted on only under strict overcommit:**
   under the default policy, `Committed_AS` over `CommitLimit` is normal, and
   alarming on it would be confident nonsense.
