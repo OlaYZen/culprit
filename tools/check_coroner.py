@@ -158,10 +158,26 @@ def main() -> int:
           v["class"] == "abrupt_stop" and "healthy" in v["title"], v["title"])
     check("abrupt stop is warn, not critical", v["severity"] == "warn")
 
+    check("healthy, journal and pstore read, recorder to the end -> high confidence",
+          v["confidence"] == "high", v["confidence"])
+    check("abrupt stop with a readable journal says there was no shutdown record",
+          any("no shutdown record in the journal" in b for b in v["because"]), json.dumps(v["because"]))
+
     v = verdict_for(death("machine", end, frames(600, end), evidence(journal=False)))
-    check("journal unreadable -> named as unverified, confidence not high",
-          any("journal" in u for u in v["unverified"]) and v["confidence"] != "high",
+    check("journal unreadable -> named as unverified, confidence one step down (medium), not the floor",
+          any("journal" in u for u in v["unverified"]) and v["confidence"] == "medium",
           f"{v['confidence']} {v['unverified']}")
+    check("journal unreadable -> the evidence names the recorder's end, never the journal",
+          not any("in the journal" in b for b in v["because"])
+          and any("last frame" in b and "could not be read" in b for b in v["because"]),
+          json.dumps(v["because"]))
+    check("journal unreadable -> the summary does not claim the journal stopped",
+          "stopped writing its journal" not in v["summary"] and "recorder ends" in v["summary"],
+          v["summary"][:120])
+
+    v = verdict_for(death("machine", end, frames(300, end - 300), evidence()))
+    check("recorder stopped 5 min before the death -> abrupt_stop at low confidence",
+          v["class"] == "abrupt_stop" and v["confidence"] == "low", v["confidence"])
 
     v = verdict_for(death("machine", end, {"fast": {"columns": list(FAST_COLUMNS), "rows": []}, "proc": []},
                           evidence(previous=False)))
