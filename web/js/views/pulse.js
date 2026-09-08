@@ -36,6 +36,14 @@ const TONE = { critical: "crit", warn: "warn", info: "info", ok: "ok" };
 const KIND_WORD = { listener: "listener", unit: "service", machine: "machine", timer: "schedule" };
 const VERB_WORD = { restart: "Restart", start: "Start", "reload-or-restart": "Reload or restart" };
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const RECORD_TTL_MS = 5 * 60_000;
+// The words the host's Pulse verdicts use, plus the outage ones -- one unit
+// can have been acted on from either doctor, and the record shows both.
+const OUTCOME_WORD = {
+  came_back: "it came back", still_quiet: "still quiet", went_quiet_again: "quiet again",
+  partial: "partly", moot: "nothing to verify", unknown: "unknown", pending: "watching",
+  fixed: "fixed", recurred: "came back", no_change: "no change",
+};
 
 /** What the agent will run for an offered verb, for the button title and the
  *  confirmation — systemd on Linux, the Service Control Manager on Windows. */
@@ -54,6 +62,8 @@ export function createPulse() {
   let picked = null;          // {kind, subject} being shown in the grid
   let pending = null;         // a deep link from the hash, applied on load
   let hovered = null;
+  // Track record per (node, unit): what earlier actions here were judged.
+  const records = new Map();
 
   const head = viewHead({
     title: "The Pulse",
@@ -316,6 +326,8 @@ export function createPulse() {
         row.append(button);
       });
       group.append(row);
+      const record = trackRecordLine(item.unit);
+      if (record) group.append(record);
       node.append(group);
     }
     if (item.fix) {
@@ -404,6 +416,37 @@ export function createPulse() {
     ]);
   }
 
+  /** "Restart: it came back 2 of 3 · last 2 h ago" for this unit on this node,
+   *  from the stored verdicts. Fetched once per unit and kept a few minutes;
+   *  the same store the Outage Doctor reads, because both doctors act on the
+   *  same units through the same route. */
+  function trackRecordLine(unit) {
+    if (!unit) return null;
+    const key = `${store.node}|${unit}`;
+    const cached = records.get(key);
+    if (!cached) {
+      records.set(key, { at: Date.now(), payload: null });
+      api(`/api/history/record?node=${encodeURIComponent(store.node)}&unit=${encodeURIComponent(unit)}`)
+        .then((payload) => { records.set(key, { at: Date.now(), payload }); if (root.isActive) paint(); })
+        .catch(() => { records.set(key, { at: Date.now(), payload: { record: {} } }); });
+      return null;
+    }
+    if (Date.now() - cached.at > RECORD_TTL_MS) { records.delete(key); return trackRecordLine(unit); }
+    const record = (cached.payload || {}).record || {};
+    const rows = Object.entries(record).filter(([action]) => action.startsWith("unit_"));
+    if (!rows.length) return null;
+    return el("div", { style: { marginTop: "6px" } }, rows.map(([action, entry]) => {
+      const outcomes = Object.entries(entry.outcomes || {}).sort((a, b) => b[1] - a[1])
+        .map(([outcome, n]) => `${OUTCOME_WORD[outcome] || outcome} ${n}`).join(", ");
+      const tone = ["came_back", "fixed"].includes(entry.last_outcome) ? "ok"
+        : ["still_quiet", "no_change", "went_quiet_again", "recurred"].includes(entry.last_outcome) ? "warn" : null;
+      return kv(`${VERB_WORD[action.slice(5)] || action} before`, el("span", {}, [
+        pill(outcomes, tone),
+        el("span.faint.small", { text: ` of ${entry.tries} · last ${fmt.ago(entry.last_ts)}`, title: entry.last_text || "" }),
+      ]));
+    }));
+  }
+
   function runUnitAction(item, action) {
     const node = store.node;
     const word = VERB_WORD[action.verb] || action.verb;
@@ -416,13 +459,21 @@ export function createPulse() {
       confirmLabel: word,
       danger: true,
       onConfirm: async () => {
+        // `origin` picks what the host watches the action against: the Pulse's
+        // own items, not the outage list. "It is broken again" and "it is
+        // still doing nothing" are different answers.
         outcome = await api(`/api/nodes/${encodeURIComponent(node)}/units/${encodeURIComponent(action.unit)}/${action.verb}`, {
-          method: "POST", body: JSON.stringify({ confirm: true, manager: action.manager || "system" }),
+          method: "POST",
+          body: JSON.stringify({ confirm: true, manager: action.manager || "system", origin: "pulse" }),
         });
         const before = outcome.before || {}; const after = outcome.after || {};
         return `${action.unit}: ${before.active || "?"} → ${after.active || "?"}${after.sub ? ` (${after.sub})` : ""}.`;
       },
-      onClosed: () => { if (outcome) addRecent(node, action, outcome); },
+      onClosed: () => {
+        if (!outcome) return;
+        records.delete(`${node}|${action.unit}`);
+        addRecent(node, action, outcome);
+      },
     });
   }
 
