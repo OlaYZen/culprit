@@ -388,14 +388,27 @@ def build_detail(item: dict[str, Any]) -> str:
         parts.append(_stable_sentence(entry))
     forecast = item.get("forecast")
     if isinstance(forecast, dict) and forecast.get("reaches_at"):
-        parts.append(
-            f"At {forecast.get('per_day')} {forecast.get('unit', '%')} a day over the last "
-            f"{forecast.get('fitted_days')} days it reaches {forecast.get('target', 100)}"
-            f"{forecast.get('unit', '%')} around "
-            f"{time.strftime('%-d %b %Y', time.localtime(float(forecast['reaches_at'])))}.")
+        parts.append(_forecast_sentence(forecast))
     if item.get("closing"):
         parts.append(str(item["closing"]))
     return " ".join(parts)
+
+
+def _forecast_sentence(forecast: dict[str, Any]) -> str:
+    """The one sentence a forecast is allowed to say -- and it always says
+    what it was fitted over. A date with no window behind it is a guess
+    wearing a calendar."""
+    unit = str(forecast.get("unit") or "%")
+    when = time.strftime("%-d %b %Y", time.localtime(float(forecast["reaches_at"])))
+    return (f"At {_number(forecast.get('per_day'))} {unit} a day over the last "
+            f"{forecast.get('fitted_days')} days it reaches "
+            f"{_number(forecast.get('target', 100))} {unit} around {when}.")
+
+
+def _number(value: Any) -> str:
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value)
 
 
 def _stable_sentence(entry: dict[str, Any]) -> str:
@@ -404,6 +417,11 @@ def _stable_sentence(entry: dict[str, Any]) -> str:
     day = entry.get("since_day")
     if day:
         when = time.strftime("%-d %b %Y", time.localtime(float(day)))
+        if entry.get("since_all"):
+            # The run reaches the oldest row there is, so the honest claim is
+            # about the record, not about the drive.
+            return (f"{label} is {value}, unchanged for as long as this host has "
+                    f"watched it (since {when}).")
         return f"{label} is {value}, unchanged since {when}."
     reads = int(entry.get("reads") or 1)
     return (f"{label} is {value}, unchanged across the {reads} read"

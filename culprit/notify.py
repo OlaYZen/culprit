@@ -283,10 +283,19 @@ def _message(event: str, node: str, finding: dict[str, Any],
     lead = culprits[0] if culprits else None
     lines: list[str] = []
     pulse = bool(finding.get("pulse"))
+    wear = bool(finding.get("prognosis"))
     if event == "resolved":
-        heading = f"{node}: {'busy again' if pulse else 'resolved'} -- {title}"
-        lines.append("It is doing what it normally does at this hour again."
-                     if pulse else "The finding has cleared.")
+        # Hardware does not heal. A wear item that stops being reported means
+        # the part was replaced, or the counter simply stopped moving -- and
+        # from here there is no way to tell which, so the message says so
+        # instead of congratulating anyone.
+        word = "busy again" if pulse else "no longer reported" if wear else "resolved"
+        heading = f"{node}: {word} -- {title}"
+        lines.append("It is doing what it normally does at this hour again." if pulse
+                     else "This is no longer reported. Either the part was replaced or "
+                          "the counter stopped moving; nothing here can tell which, and "
+                          "a counter that stops moving does not undo what it counted."
+                     if wear else "The finding has cleared.")
     elif event == "escalated":
         heading = f"{node}: now {severity.upper()} -- {title}"
     elif event in ("offline", "online", "test"):
@@ -295,6 +304,11 @@ def _message(event: str, node: str, finding: dict[str, Any],
         heading = f"{node}: {title}"
     if finding.get("detail"):
         lines.append(str(finding["detail"]))
+    if wear and event in ("finding", "escalated"):
+        # Say what kind of statement this is: not a threshold and not a
+        # prediction, but a counter the hardware itself keeps.
+        lines.append("This is the hardware's own counter, not a threshold this "
+                     "tool chose. Back up before acting on it.")
     if pulse and event in ("finding", "escalated"):
         # Say what kind of statement this is. Nothing is broken and nothing
         # is slow: something that normally happens has stopped.
@@ -322,7 +336,8 @@ def _message(event: str, node: str, finding: dict[str, Any],
         "body": "\n".join(lines) or heading, "ts": time.time(),
         "finding": {k: finding.get(k) for k in ("key", "title", "detail", "resource",
                                                  "severity", "evidence", "culprits",
-                                                 "external", "blame", "pulse")},
+                                                 "external", "blame", "pulse",
+                                                 "prognosis")},
     }
 
 

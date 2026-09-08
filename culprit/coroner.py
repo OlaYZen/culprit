@@ -30,6 +30,7 @@ import logging
 import time
 from typing import Any
 
+from .collectors import prognosis as prognosis_mod
 from .collectors.recorder import FAST_COLUMNS, summarise_frames
 from .db import History
 
@@ -52,6 +53,10 @@ class Coroner:
     def __init__(self, history: History, notifier: Any = None) -> None:
         self.history = history
         self.notifier = notifier
+        # culprit.wear.Wear, set in main.py's lifespan: the week of hardware
+        # counters before a death. Optional -- the Coroner's verdicts are the
+        # same without it, they just have less to say.
+        self.wear: Any = None
 
     # ---------------------------------------------------------------- ingest
     def record(self, node: str, payload: Any) -> list[int]:
@@ -86,8 +91,9 @@ class Coroner:
 
     def _host_context(self, node: str, died_at: float) -> dict[str, Any]:
         """What the host itself had written down before the node went quiet:
-        the findings of the last quarter hour and the changes before them."""
-        out: dict[str, Any] = {"findings": [], "changes": []}
+        the findings of the last quarter hour, the changes before them, and
+        the week of wear rows underneath both."""
+        out: dict[str, Any] = {"findings": [], "changes": [], "wear": []}
         if not self.history.ready:
             return out
         try:
@@ -110,9 +116,44 @@ class Coroner:
             for change in changes:
                 change["offset_seconds"] = round(float(change["ts"]) - died_at)
             out["changes"] = changes[:12]
+            if self.wear is not None:
+                out["wear"] = self.wear.at_death(node, died_at)
         except Exception:  # noqa: BLE001
             log.exception("host context for the coroner failed")
         return out
+
+
+def _wear_lines(rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """(disk sentences, memory sentences) from the wear record before a death.
+
+    Only counters that *moved* are said. "sda had 27 reallocated sectors" is
+    true of half the disks in service; "sda reallocated 14 more sectors in the
+    six days before it stopped" is the sentence that means something.
+    """
+    disks: list[str] = []
+    memory: list[str] = []
+    for row in rows:
+        rose = row.get("rose") or {}
+        if not rose:
+            continue
+        span = int(row.get("days") or 1)
+        window = f"in the {span} day{'' if span == 1 else 's'} before"
+        if row.get("kind") == "disk":
+            parts = [f"{prognosis_mod.ATA_ATTRS.get(int(key), key) if key.isdigit() else key} "
+                     f"{was} -> {now}" for key, (was, now) in list(rose.items())[:3]]
+            disks.append(f"{row.get('subject')} was still wearing {window}: "
+                         + ", ".join(parts))
+        elif row.get("kind") == "memory":
+            corrected = rose.get("ce_count")
+            uncorrected = rose.get("ue_count")
+            if uncorrected:
+                memory.append(f"{row.get('subject')} logged "
+                              f"{uncorrected[1] - uncorrected[0]} uncorrectable memory "
+                              f"error(s) {window}")
+            elif corrected:
+                memory.append(f"{row.get('subject')} corrected "
+                              f"{corrected[1] - corrected[0]} memory error(s) {window}")
+    return disks, memory
 
 
 # ------------------------------------------------------------------- shape
@@ -298,6 +339,18 @@ def judge(death: dict[str, Any], host: dict[str, Any] | None = None) -> dict[str
     packages = evidence.get("packages") or []
     for package in packages[:3]:
         context.append(f"{package.get('title')} ({_ago(float(package.get('ts') or died_at), died_at)})")
+
+    # The hardware's own counters in the week before. A wearing disk is never
+    # a verdict on its own -- a machine with a reallocating drive can still be
+    # unplugged by a cleaner -- so it is *evidence* only for the classes that
+    # already claim hardware, and context everywhere else.
+    disk_lines, memory_lines = _wear_lines(host.get("wear") or [])
+    if verdict_class == "hang_io" and disk_lines:
+        because.extend(disk_lines[:2])
+    elif verdict_class == "hardware_error" and (memory_lines or disk_lines):
+        because.extend((memory_lines + disk_lines)[:2])
+    else:
+        context.extend((disk_lines + memory_lines)[:2])
 
     confidence = "high"
     if unverified:

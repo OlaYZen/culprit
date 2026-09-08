@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from . import config as config_module
 from .db import History, aggregate_window
 
 log = logging.getLogger("culprit.nodes")
@@ -43,7 +44,7 @@ DICT_SECTIONS = frozenset({
     "cpu", "memory", "psi", "pressures", "gpu", "disk", "network",
     "network_detail", "ports", "sync", "process_table", "diagnosis", "services",
     "system", "volumes", "events", "errors", "timings", "sampler",
-    "cgroups", "kernel", "changes", "ceilings", "outage",
+    "cgroups", "kernel", "changes", "ceilings", "outage", "prognosis",
     # Delivered once after a death and stored, never kept in the snapshot
     # (see NodeRegistry.ingest): a recorder's frames must not ride along
     # in every snapshot poll.
@@ -337,6 +338,7 @@ class NodeRegistry:
         self.notifier: Any = None        # culprit.notify.Notifier
         self.coroner: Any = None         # culprit.coroner.Coroner
         self.pulse: Any = None           # culprit.pulse.Pulse
+        self.wear: Any = None            # culprit.wear.Wear
         # Fleet-wide, not per-node: the version.json GitHub publishes for the
         # agent's main branch, refreshed at most every REMOTE_VERSION_REFRESH_S
         # by main.py's sweep loop (a blocking call, so it runs off the event
@@ -400,7 +402,10 @@ class NodeRegistry:
                     self.history.set_agent_platform(name, platform)
                 except Exception:  # noqa: BLE001 -- bookkeeping, never the ingest
                     log.debug("could not persist platform for %s", name)
-            settings = dict(node.settings)
+            # Per-node overrides on top of what every agent is told (the
+            # Prognosis's cadence is a fleet decision, not a per-machine one),
+            # so both travel down the one channel a push-only agent has.
+            settings = {**self.agent_settings(), **node.settings}
             merged = node.snapshot
             diagnosis = merged.get("diagnosis") if "diagnosis" in snapshot else None
 
@@ -426,7 +431,8 @@ class NodeRegistry:
                 self.verifier.observe_outage(name, merged.get("outage") or {}, now)
             except Exception:  # noqa: BLE001
                 log.exception("outage observer failed for %s", name)
-        if self.notifier is not None and ("diagnosis" in snapshot or "outage" in snapshot):
+        if self.notifier is not None and ("diagnosis" in snapshot or "outage" in snapshot
+                                         or "prognosis" in snapshot):
             # The notifier sees findings and outage items as one active set
             # per node (outage keys are namespaced), so each is sent once
             # while it holds and resolved when it clears, whichever section
@@ -440,6 +446,14 @@ class NodeRegistry:
                 self.coroner.record(name, deaths)
             except Exception:  # noqa: BLE001 -- the coroner catches its own, but never trust that here
                 log.exception("coroner failed for %s", name)
+        if "prognosis" in snapshot and self.wear is not None:
+            # Only when the section actually arrived: a merged-but-unchanged
+            # prognosis was annotated when it came, and re-annotating it would
+            # re-render sentences over numbers that have not moved.
+            try:
+                self.wear.annotate(name, merged.get("prognosis") or {}, now)
+            except Exception:  # noqa: BLE001 -- an observer must never break ingest
+                log.exception("wear observer failed for %s", name)
         if self.pulse is not None:
             # The rhythm of this machine, folded from the sections this
             # report actually carried (a merged-but-unchanged section was
@@ -475,6 +489,18 @@ class NodeRegistry:
             reply["dropped"] = dropped[:20]
         return reply
 
+    @staticmethod
+    def agent_settings() -> dict[str, Any]:
+        """What every agent is told in the response to its report. Fleet-wide
+        configuration, in contrast to _Node.settings, which is the title-bar
+        Refresh control's live nudge to one machine."""
+        cfg = config_module.get()
+        return {
+            "prognosis_enabled": bool(cfg.prognosis_enabled),
+            "prognosis_smart_interval_minutes": int(cfg.prognosis_smart_interval_minutes),
+            "prognosis_wake_disks": bool(cfg.prognosis_wake_disks),
+        }
+
     def _pulse_items(self, name: str) -> list[dict[str, Any]]:
         if self.pulse is None:
             return []
@@ -487,7 +513,7 @@ class NodeRegistry:
         """Put the notifier back in step after a Pulse sweep changed a node's
         items. The Pulse judges on the sweep, not on a report, so without
         this a subject that went quiet would wait for the next report that
-        happens to carry a diagnosis or an outage section."""
+        happens to carry a diagnosis, an outage or a prognosis section."""
         if self.notifier is None:
             return
         with self._lock:
@@ -594,6 +620,8 @@ class NodeRegistry:
                 "remote_version": self._remote_version_for(agent.get("platform") or "linux"),
                 "remote_branch": getattr(self, "_remote_branch", "main"),
                 "pulse_status": None, "pulse_severity": None, "pulse_count": 0,
+                "prognosis_status": None, "prognosis_severity": None,
+                "prognosis_count": 0,
             }
             meta["enabled"] = bool(agent.get("enabled"))
             meta["enrolled_at"] = agent.get("created_at")
@@ -731,6 +759,9 @@ class NodeRegistry:
             # sidebar badge, the fleet card and the Nodes row all want it,
             # and none of them should pay for a second request.
             **self._pulse_meta(node.name),
+            # And the Prognosis's, straight off the node's own last section
+            # (no IO, no second pass over the items).
+            **_prognosis_meta(node.snapshot.get("prognosis")),
         }
 
     def _pulse_meta(self, name: str) -> dict[str, Any]:
@@ -882,16 +913,33 @@ class CommandBroker:
                 self._pending.pop(node, None)
 
 
+def _prognosis_meta(section: Any) -> dict[str, Any]:
+    """What is wearing out on this node, in three keys -- the sidebar badge,
+    the fleet card and the Nodes row all read them and none of them should pay
+    for a second request."""
+    section = _d(section)
+    if not section.get("available"):
+        return {"prognosis_status": None, "prognosis_severity": None,
+                "prognosis_count": 0}
+    items = [i for i in (section.get("items") or []) if isinstance(i, dict)]
+    return {
+        "prognosis_status": _short(section.get("status")),
+        "prognosis_severity": _short(section.get("severity")),
+        "prognosis_count": sum(1 for i in items
+                               if i.get("severity") in ("warn", "critical")),
+    }
+
+
 def _notifiable(snapshot: dict[str, Any],
                 pulse_items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """The node's diagnosis findings, its outage items and its Pulse items in
-    finding shape, for the notifier: one list, keys namespaced so the three
-    never collide.
+    """The node's diagnosis findings, its outage items, its Prognosis items and
+    its Pulse items in finding shape, for the notifier: one list, keys
+    namespaced so the four never collide.
 
-    All three must be in every call. The notifier reads the list as "what is
+    All four must be in every call. The notifier reads the list as "what is
     active on this node right now" and starts resolving anything missing from
-    it, so handing it the diagnosis alone would resolve every outage and
-    Pulse item on the next report.
+    it, so handing it the diagnosis alone would resolve every outage,
+    Prognosis and Pulse item on the next report.
     """
     diagnosis = _d(snapshot.get("diagnosis"))
     findings = [f for f in (diagnosis.get("findings") or []) if isinstance(f, dict)]
@@ -903,6 +951,19 @@ def _notifiable(snapshot: dict[str, Any],
             "title": item.get("title"), "detail": item.get("detail"),
             "resource": item.get("kind"), "evidence": item.get("evidence"),
             "culprits": [], "outage": True,
+        })
+    for item in (_d(snapshot.get("prognosis")).get("items") or [])[:200]:
+        if not isinstance(item, dict):
+            continue
+        findings.append({
+            "key": f"prognosis:{item.get('key')}", "severity": item.get("severity"),
+            "title": item.get("title"), "detail": item.get("detail"),
+            # A disk has no pid. The resource is the hardware itself, and the
+            # culprit list stays empty by construction: ranking processes
+            # under a wearing platter would be invention of the first order.
+            "resource": "hardware", "culprits": [], "prognosis": True,
+            "evidence": {e.get("label"): e.get("value")
+                         for e in (item.get("evidence") or []) if isinstance(e, dict)},
         })
     for item in pulse_items or []:
         if not isinstance(item, dict) or item.get("expected"):

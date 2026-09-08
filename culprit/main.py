@@ -41,6 +41,7 @@ from .nodes import MAX_REPORT_BYTES, CommandBroker, NodeRegistry
 from . import changelog, portnames
 from .notify import Notifier
 from .pulse import Pulse
+from .wear import Wear
 from .verdict import ActionVerifier
 from .sampler import LIVE_KEYS, Sampler
 from .state import Broker, Store
@@ -61,6 +62,7 @@ notifier: Notifier | None = None
 coroner: Coroner | None = None
 fleetmap: FleetMap | None = None
 pulse: Pulse | None = None
+wear: Wear | None = None
 
 
 async def _sweep_loop() -> None:
@@ -101,6 +103,10 @@ async def _sweep_loop() -> None:
                 # Its own retention, rate-limited to once an hour inside
                 # History -- the rhythm outlives the metric history.
                 pulse.prune()
+            if wear is not None:
+                # One row per device per day, kept for months: its own
+                # retention, rate-limited to once an hour inside History.
+                wear.prune(config_module.get().wear_retention_days)
             _maybe_auto_update()
         except Exception:  # noqa: BLE001 -- housekeeping must not die
             log.exception("sweep failed")
@@ -154,7 +160,7 @@ async def _run_scheduled_update(name: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global history, auth, registry, commands, expectations, verifier, notifier, coroner, fleetmap, pulse
+    global history, auth, registry, commands, expectations, verifier, notifier, coroner, fleetmap, pulse, wear
     cfg = config_module.load()
     logging.basicConfig(
         level=logging.INFO,
@@ -193,6 +199,12 @@ async def lifespan(app: FastAPI):
     registry.coroner = coroner
     pulse = Pulse(history, expectations)
     registry.pulse = pulse
+    # The Prognosis's memory: the daily wear rows behind "unchanged since 3
+    # August" and every endurance date. The Coroner reads it too -- a disk
+    # that had been reallocating for a month belongs in the verdict.
+    wear = Wear(history)
+    registry.wear = wear
+    coroner.wear = wear
     fleetmap = FleetMap(registry)
     sweeper = asyncio.get_running_loop().create_task(_sweep_loop())
     # This host is an aggregator + dashboard only: it ingests external agents
@@ -1190,6 +1202,8 @@ async def api_agent_delete(name: str, request: Request) -> dict[str, Any]:
         notifier.forget_node(name)
     if pulse is not None:
         pulse.forget(name)
+    if wear is not None:
+        wear.forget(name)
     registry.set_intermittent(name, False)
     broker.publish("nodes", registry.status_list())
     return {"ok": True, "name": name,
@@ -1583,6 +1597,21 @@ async def api_pulse_rhythm(
     if pulse is None:
         raise HTTPException(503, "the pulse is not initialised")
     return pulse.rhythm(node, kind, subject, weeks)
+
+
+@app.get("/api/wear", summary="One device's daily wear counters, and its forecast")
+async def api_wear(
+    node: str = Query(..., description="the node name"),
+    kind: str | None = Query(None, description="disk | memory | pci | power | nic"),
+    subject: str | None = Query(None, description="the serial, controller, BDF or interface"),
+    days: int = Query(400, ge=1, le=3650),
+) -> dict[str, Any]:
+    """The wear table read back: one subject's series for the chart, or the
+    node's subjects when none is named. Read-time only -- nothing here samples
+    or asks an agent for anything."""
+    if wear is None:
+        raise HTTPException(503, "the wear record is not initialised")
+    return wear.rows(node, kind, subject, days)
 
 
 @app.get("/api/pulse/fleet", summary="Each node's Pulse status in one line")
