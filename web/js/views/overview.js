@@ -350,7 +350,7 @@ export function createOverview() {
     patchAttr(card, "data-severity", severity || "offline");
     patchAttr(card, "title", isCurrent ? "Currently shown" : `Show ${node.name} in every view`);
     const [pillText, pillTone] = node.enabled === false ? ["revoked", "crit"]
-      : !node.online ? ["offline", "crit"]
+      : !node.online ? (node.intermittent ? ["off · expected", null] : ["offline", "crit"])
       : stale ? [`stale ${fmt.shortDuration(node.age_seconds)}`, "warn"]
       : [{ healthy: "healthy", nominal: "nominal", strained: "strained", struggling: "struggling" }[node.status] || "online",
         { critical: "crit", warn: "warn", info: "info" }[severity] || "ok"];

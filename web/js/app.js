@@ -125,7 +125,7 @@ function updateNodePicker(state) {
 
   const wanted = nodes.map((node) => ({
     value: node.name,
-    label: `${node.name}${node.platform === "windows" ? " · Windows" : ""}${node.online ? "" : node.enabled === false ? " · revoked" : " · offline"}`,
+    label: `${node.name}${node.platform === "windows" ? " · Windows" : ""}${node.online ? "" : node.enabled === false ? " · revoked" : node.intermittent ? " · off" : " · offline"}`,
   }));
   const signature = wanted.map((o) => `${o.value}|${o.label}`).join(";");
   if (nodePicker.dataset.signature !== signature) {
@@ -212,7 +212,9 @@ function updateBadges(state) {
   const volumes = (state.volumes || {}).volumes || [];
   setBadge("badge-storage", volumes.filter((v) => (100 - v.percent) <= 10).length || null, "warn");
 
-  const offline = (state.nodes || []).filter((n) => !n.online && n.enabled !== false).length;
+  // A node the operator marked "not always on" is doing what it does when
+  // it is off: only an unexpected absence earns the badge.
+  const offline = (state.nodes || []).filter((n) => !n.online && n.enabled !== false && !n.intermittent).length;
   setBadge("badge-nodes", offline || null, null);
 }
 

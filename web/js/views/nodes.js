@@ -14,7 +14,7 @@ import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
   combobox, confirmAction, emptyState, inlineResult, note, openModal, pendingSlot, readySlot, setBusy,
-  skeletonFigures, skeletonSection,
+  skeletonFigures, skeletonSection, switchControl,
 } from "../ui.js";
 import {
   canAdminister, canOperate, codeRow, figures, kv, kvs, pill, platformPill, section, subhead, viewHead,
@@ -195,11 +195,15 @@ export function createNodes() {
     }
     head.setPending(false);
     const list = store.state.nodes || [];
-    const offline = list.filter((n) => !n.online && n.enabled !== false).length;
+    // "Offline" is the unexpected kind; a node marked not always on that is
+    // off right now is doing what it does, and counts under its own label.
+    const offline = list.filter((n) => !n.online && n.enabled !== false && !n.intermittent).length;
+    const expectedOff = list.filter((n) => !n.online && n.enabled !== false && n.intermittent).length;
     readySlot(figSlot, figures([
       { label: "Enrolled", value: String(list.length) },
       { label: "Online", value: String(list.filter((n) => n.online).length), tone: "ok" },
       { label: "Offline", value: String(offline), tone: offline ? "warn" : null },
+      expectedOff ? { label: "Off, expected", value: String(expectedOff), hint: "not always on" } : null,
       { label: "Revoked", value: String(list.filter((n) => n.enabled === false).length) },
     ]));
 
@@ -220,7 +224,7 @@ export function createNodes() {
       tableSection = section({
         title: "Agents",
         meta: el("span", { style: { display: "inline-flex", alignItems: "center", gap: "10px" } }, [countNode, updateAll]),
-        body: el("div.tblwrap", {}, [table]),
+        body: el("div", {}, [el("div.tblwrap", {}, [table]), el("div.formrow", { style: { marginTop: "8px" } }, [rowResult])]),
         foot: "Revoking rejects reports instantly but leaves the remote process running; rotating a token re-enables "
             + "a revoked node. Tokens are hashed at rest — none of them can be read back, only replaced.",
       });
@@ -263,10 +267,34 @@ export function createNodes() {
   /** Skeleton built once per node; updateRow() patches it in place from then
    * on. Click handlers read `entry.node`, refreshed by updateRow() on every
    * poll, never a value captured when the row was first created. */
+  // Feedback for the per-row switch, under the table where the row is.
+  const rowResult = el("div.result");
+
   function createRow() {
     const nameLabel = el("span.strong");
     const dockerBadge = el("span");
-    const statusCell = el("td");
+    const statusPill = el("span");
+    // The operator's word that this machine is not always on (a desktop that
+    // sleeps at night). Immediate, hence a switch: off = its absences are
+    // expected, so they are not badged, not counted and not notified.
+    const alwaysOn = switchControl({
+      label: "Always on", checked: true,
+      title: "Off: this machine is not always on, so its being offline is expected -- no badge, no count, no notification",
+      onChange: async (checked) => {
+        const node = entry.node;
+        try {
+          await api(`/api/nodes/${encodeURIComponent(node.name)}/availability`, {
+            method: "PUT", body: JSON.stringify({ intermittent: !checked }),
+          });
+          inlineResult(rowResult, checked ? `${node.name} is expected to be always on.`
+            : `${node.name} is not always on: being offline is expected and will not be flagged.`, "ok");
+        } catch (error) {
+          alwaysOn.setChecked(!checked);
+          inlineResult(rowResult, `Could not change ${node.name}: ${error.message}`, "error");
+        }
+      },
+    });
+    const statusCell = el("td", {}, [el("div.row", { style: { gap: "10px" } }, [statusPill, alwaysOn])]);
     const hostCell = el("td.faint");
     const versionText = el("span.mono.faint");
     const versionBadge = el("span");
@@ -293,7 +321,7 @@ export function createNodes() {
         addrCell,
         el("td", {}, [el("div.actions", {}, [rotate, update, version, unpin, revoke, remove])]),
       ]),
-      nameLabel, dockerBadge, statusCell, hostCell, versionText, versionBadge, lastCell, addrCell,
+      nameLabel, dockerBadge, statusCell, statusPill, alwaysOn, hostCell, versionText, versionBadge, lastCell, addrCell,
       rotate, update, version, unpin, revoke, remove, pinBadge, brokenBadge, node: null, flags: {},
     };
 
@@ -401,12 +429,18 @@ export function createNodes() {
       entry.dockerBadge.replaceChildren(...[isDocker ? pill("Docker", "info") : null, platformPill(node.platform)].filter(Boolean));
     }
 
-    const statusKey = revoked ? "revoked" : node.online ? "online" : "offline";
+    const statusKey = revoked ? "revoked" : node.online ? "online" : node.intermittent ? "expected-off" : "offline";
     if (entry.flags.status !== statusKey) {
       entry.flags.status = statusKey;
-      entry.statusCell.replaceChildren(statusKey === "revoked" ? pill("revoked", "crit")
-        : statusKey === "online" ? pill("online", "ok") : pill("offline", "warn"));
+      entry.statusPill.replaceChildren(statusKey === "revoked" ? pill("revoked", "crit")
+        : statusKey === "online" ? pill("online", "ok")
+        : statusKey === "expected-off" ? pill("off · expected", null) : pill("offline", "warn"));
     }
+    if (entry.flags.intermittent !== !!node.intermittent) {
+      entry.flags.intermittent = !!node.intermittent;
+      entry.alwaysOn.setChecked(!node.intermittent);
+    }
+    show(entry.alwaysOn, !revoked && canOperate());
 
     patchText(entry.hostCell, node.hostname || fmt.dash);
 

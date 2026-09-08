@@ -875,9 +875,10 @@ export function createSettings() {
     if (!list.length) rows.push(kv("Agents", "none enrolled"));
     for (const node of list) {
       const seen = node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported";
-      const status = node.enabled === false ? "revoked" : node.online ? "online" : "offline";
+      const expectedOff = !node.online && node.intermittent;
+      const status = node.enabled === false ? "revoked" : node.online ? "online" : expectedOff ? "off · expected" : "offline";
       rows.push(kv(node.name, `${status} · ${seen}${node.platform === "windows" ? " · Windows" : ""}${node.hostname ? ` · ${node.hostname}` : ""}${node.agent_version ? ` · agent v${node.agent_version}` : ""}`,
-        { tone: node.enabled === false ? null : node.online ? "ok" : "crit" }));
+        { tone: node.enabled === false || expectedOff ? null : node.online ? "ok" : "crit" }));
     }
     const foot = el("span");
     foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view. Dashboard users are the one thing "
