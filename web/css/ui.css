@@ -441,6 +441,7 @@
 .check--child { margin-left: 22px; }
 .checkgroup { display: flex; flex-direction: column; gap: 1px; }
 .checkgroup + .checkgroup { margin-top: 8px; }
+.checkgroup > .toggle { padding: 4px 0; }   /* switches stacked like checkboxes keep the same rhythm */
 
 /* ── Status line (the verdict) ─────────────────────────────────────────── */
 .status {

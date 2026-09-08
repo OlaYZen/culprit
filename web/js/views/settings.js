@@ -10,9 +10,9 @@
  * - A page that edits configuration is one form with **one** Save bar stuck
  *   to the bottom of the viewport ("Save changes", "Reload from server", the
  *   inline result), the fields scrolling behind it. Enter in any field
- *   saves. Nothing on such a page applies before Save, which is why every
- *   boolean is a checkbox and never a switch (uxgoodpatterns: checkboxes
- *   for grouped selection with a submit step).
+ *   saves. Booleans are switches everywhere, one control for one idea;
+ *   they wait for Save like every other field on the page, which the
+ *   Save bar in view makes plain.
  * - Pages that perform actions rather than edit settings (Account, Users,
  *   Expected findings) have no Save bar; each action is a plain button next
  *   to its inputs with its own inline result. The primary button on any
@@ -36,7 +36,7 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  checkbox, combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav,
+  combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav, switchControl,
 } from "../ui.js";
 import { canAdminister, canOperate, kv, kvs, section, subhead, viewHead } from "./shared.js";
 
@@ -288,7 +288,7 @@ export function createSettings() {
 
   function boolField(page, key, { label, title, checked, read = null }) {
     let value = checked ?? !!config[key];
-    const node = checkbox({ label, title, checked: value, onChange: (v) => { value = v; } });
+    const node = switchControl({ label, title, checked: value, onChange: (v) => { value = v; } });
     register(page, key, { read: read ? () => read(value) : () => value, synced: () => { value = !!config[key]; node.setChecked(value); } });
     return node;
   }
