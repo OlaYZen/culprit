@@ -165,6 +165,11 @@ class NodePulse:
     cgroup_attribution: bool | None = None
     timers: list[dict[str, Any]] = field(default_factory=list)
     timers_reason: str | None = None
+    # timer -> the newest run seen, and the runs not yet written. A run is
+    # seen first while it is still going and again when it ends; both are
+    # kept, and the finished one replaces the other in the table.
+    runs_seen: dict[str, float] = field(default_factory=dict)
+    pending_runs: list[tuple] = field(default_factory=list)
     listeners: dict[str, dict[str, Any]] = field(default_factory=dict)
     listeners_available: bool | None = None
     listeners_reason: str | None = None
@@ -200,6 +205,10 @@ def _num(value: Any) -> float | None:
 
 def _d(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _short(value: Any, limit: int = 64) -> str | None:
+    return value[:limit] if isinstance(value, str) else None
 
 
 def listener_subject(row: dict[str, Any]) -> str | None:
@@ -270,6 +279,8 @@ class Pulse:
                     if conns is None:
                         continue
                     self._fold(state, "listener", subject, conns, 0.0, now)
+            if "services" in sections:
+                self._take_runs(state, now)
             if "network" in sections:
                 total = _d(_d(merged.get("network")).get("total"))
                 recv, sent = _num(total.get("recv_bytes_sec")), _num(total.get("sent_bytes_sec"))
@@ -339,6 +350,39 @@ class Pulse:
             keep[subject] = row
         state.listeners = keep
 
+    def _take_runs(self, state: NodePulse, now: float) -> None:
+        """Queue a row for every run that is new, or that has just ended.
+
+        Both are queued: a job that is still going is worth a row (that is
+        what `schedule_overlap` reads), and the finished record replaces it.
+        No IO here -- the ingest path only appends; the sweep writes.
+        """
+        for row in state.timers:
+            timer = row.get("unit") or row.get("name")
+            run = row.get("run")
+            if not isinstance(timer, str) or not isinstance(run, dict):
+                continue
+            started = _num(run.get("started"))
+            if started is None or started <= 0:
+                continue
+            ended = _num(run.get("ended"))
+            seen = state.runs_seen.get(timer)
+            # New run, or the same run now finished (seen is the start we
+            # already have; ended arriving is the change worth another row).
+            if seen == started and (ended is None or run.get("_written_end") == ended):
+                continue
+            state.runs_seen[timer] = started
+            run["_written_end"] = ended
+            duration = _num(run.get("duration_s"))
+            status = run.get("status")
+            state.pending_runs.append((
+                timer, int(started), row.get("activates"),
+                ended, duration,
+                int(status) if isinstance(status, int) and not isinstance(status, bool) else None,
+                _short(run.get("result")),
+            ))
+            del state.pending_runs[:-MAX_SUBJECTS]
+
     def _take_outage(self, state: NodePulse, outage: dict[str, Any]) -> None:
         items = outage.get("items")
         state.outage_keys = [
@@ -402,6 +446,10 @@ class Pulse:
         with self._lock:
             for node, state in self._nodes.items():
                 self._write(node, state)
+                if state.pending_runs:
+                    rings = {key: list(ring) for key, ring in state.rings.items()}
+                    pending, state.pending_runs = state.pending_runs, []
+                    self._store_runs(node, pending, rings)
 
     def forget(self, node: str) -> None:
         """Drop a deleted agent's live state. Its stored buckets stay, like
@@ -459,6 +507,7 @@ class Pulse:
             platform, intermittent = state.platform, state.intermittent
             held_keys = set(state.held)
             since_seen = dict(state.since)
+            pending_runs, state.pending_runs = state.pending_runs, []
             available = {
                 "services": (state.services_available, state.services_reason,
                              state.cgroup_attribution),
@@ -467,6 +516,9 @@ class Pulse:
                 "timers_reason": state.timers_reason,
             }
 
+        # Runs first: the judgement two lines below reads them back.
+        if pending_runs:
+            self._store_runs(node, pending_runs, rings)
         checks = self._checks(available, services, listeners, timers, now,
                               last_report, online_since, boot_time, gaps, platform)
         items: list[dict[str, Any]] = []
@@ -485,7 +537,8 @@ class Pulse:
             settled = self._settled(now, online_since, boot_time, intermittent,
                                     gaps, checks)
             grace = float(getattr(cfg, "pulse_timer_grace_minutes", 15)) * 60.0
-            items += judge_timers(timers, services, outage, now, grace, platform)
+            items += judge_timers(timers, services, outage, now, grace, platform,
+                                  runs=self._runs(node))
             if settled:
                 baselines = self._baselines(node, subjects, now)
                 ratio = float(getattr(cfg, "pulse_quiet_ratio", 0.25))
@@ -575,6 +628,50 @@ class Pulse:
         if kind == "timer":
             return not any((t.get("unit") or t.get("name")) == subject for t in timers)
         return False
+
+    def _store_runs(self, node: str, pending: list[tuple],
+                    rings: dict[tuple[str, str], list[tuple]]) -> None:
+        """Write the runs this node's reports turned up, each with the bytes
+        its unit moved while it ran -- integrated from the ring the host was
+        already keeping, so "it exited 0 and wrote nothing" has a number."""
+        rows = []
+        for timer, started, unit, ended, duration, status, result in pending:
+            rows.append((node, timer, started, unit, ended, duration, status, result,
+                         self._io_over(rings, unit, started, ended)))
+        try:
+            self.history.write_pulse_runs(rows)
+        except Exception:  # noqa: BLE001 -- bookkeeping never breaks a sweep
+            log.exception("could not write pulse runs for %s", node)
+
+    @staticmethod
+    def _io_over(rings: dict[tuple[str, str], list[tuple]], unit: Any,
+                 started: float, ended: float | None) -> float | None:
+        """Bytes the unit moved between two stamps, or None when the host did
+        not watch the whole run. Never a zero standing in for "unknown": that
+        is the number the hollow rule would misread."""
+        if not isinstance(unit, str) or ended is None or ended <= started:
+            return None
+        ring = rings.get(("unit", unit)) or rings.get(("unit", f"user:{unit}"))
+        if not ring or ring[0][0] > started:
+            return None                 # the run began before the ring did
+        total = 0.0
+        previous = None
+        for stamp, _a, rate, _active in ring:
+            if stamp < started or stamp > ended:
+                previous = stamp
+                continue
+            if previous is not None and stamp - previous <= 4 * SAMPLE_GAP_S:
+                total += float(rate) * (stamp - previous)
+            previous = stamp
+        return round(total, 1) if total else 0.0
+
+    def _runs(self, node: str) -> dict[str, list[dict[str, Any]]]:
+        """This node's stored runs, refreshed at most once a minute (the
+        sweep's own cadence) -- one indexed query of a few hundred rows."""
+        try:
+            return self.history.pulse_runs(node)
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _settled(self, now: float, online_since: float | None, boot_time: float | None,
                  intermittent: bool, gaps: list[dict[str, Any]],
@@ -892,6 +989,17 @@ BUSY_PUBLIC = 50.0              # a public listener this busy, gone silent, is c
 NOW_ACTIVE_SHARE = 0.2          # "and it is not merely quieter -- it is idle"
 RECOVERED_RATIO = 0.5           # of the baseline median, over RECENT_S: it is back
 MACHINE_FOLD = 3                # this many quiet listeners plus a quiet NIC
+
+# Run records (schema v11). A duration is compared with the median of the
+# runs before it, never with a fixed number: "twenty minutes" means nothing
+# without knowing what this job normally takes.
+RUNS_KEPT = 10                  # the window a median is taken over
+MIN_RUNS_LONG = 3               # before "it is taking far too long" is fair
+MIN_RUNS_HOLLOW = 5             # a stronger claim, so more evidence
+LONG_RATIO = 3.0                # of the median duration, and still going
+HOLLOW_RATIO = 0.2              # of the median duration, and it "succeeded"
+HOLLOW_IO_RATIO = 0.1           # of the median bytes moved, when that is known
+MIN_HOLLOW_MEDIAN_S = 30.0      # a job that normally takes 3 s has no shape
 
 PULSE_MIN_BUCKET_N = 30         # an hour observed for less than ~10 min is not evidence
 PULSE_MAX_WEEKS = 5
@@ -1224,6 +1332,109 @@ def suppressed(subject: Subject, status: str | None,
     return None
 
 
+def _median(values: list[float]) -> float:
+    return _pct(values, 0.5)
+
+
+def run_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """What this timer's service normally does, from its own last runs.
+
+    Only *completed* runs count towards a median -- a run still going has no
+    duration yet, and counting it as zero is how a monitor invents a finding.
+    """
+    done = [r for r in rows if _num(r.get("duration_s")) is not None][:RUNS_KEPT]
+    durations = [float(r["duration_s"]) for r in done]
+    moved = [float(r["io_bytes"]) for r in done if _num(r.get("io_bytes")) is not None]
+    return {
+        "runs": len(done),
+        "median_s": _median(durations) if durations else None,
+        "median_io": _median(moved) if moved else None,
+        "io_runs": len(moved),
+        "last": rows[0] if rows else None,
+        "previous": rows[1] if len(rows) > 1 else None,
+    }
+
+
+def _stamp(ts: Any) -> str:
+    value = _num(ts)
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(value)) if value else "never"
+
+
+def _run_public(row: dict[str, Any]) -> dict[str, Any]:
+    """One stored run, as the view reads it."""
+    return {"started": _num(row.get("started")), "ended": _num(row.get("ended")),
+            "duration_s": _num(row.get("duration_s")), "status": row.get("status"),
+            "result": row.get("result"), "io_bytes": _num(row.get("io_bytes"))}
+
+
+def _failed_run(last: dict[str, Any] | None, run: dict[str, Any],
+                row: dict[str, Any]) -> tuple[float | None, str] | None:
+    """(when, why) when the last run of this job ended badly, else None.
+
+    Three sources say the same thing and any of them is enough: the stored
+    run record, the live one on the timer row, and -- for a Windows scheduled
+    task, which has neither -- the scheduler's own result code on the row.
+    """
+    for source in (last or {}, run or {}):
+        result = source.get("result")
+        status = source.get("status")
+        ended = _num(source.get("ended"))
+        if isinstance(result, str) and result and result != "success":
+            return ended, f"systemd recorded Result={result}."
+        if isinstance(status, int) and not isinstance(status, bool) and status != 0:
+            return ended, f"It exited {status}."
+    code = row.get("last_result") if isinstance(row, dict) else None
+    if isinstance(code, int) and not isinstance(code, bool) and code != 0:
+        return (_num(row.get("last")),
+                f"The scheduler recorded result {code} (0x{code & 0xFFFFFFFF:08X}).")
+    return None
+
+
+def _overlap(stats: dict[str, Any]) -> tuple[float, float] | None:
+    """(started, the previous run's end) when the newest run began before the
+    one before it finished."""
+    last, previous = stats.get("last"), stats.get("previous")
+    if not last or not previous:
+        return None
+    began, previous_end = _num(last.get("started")), _num(previous.get("ended"))
+    if began is None or previous_end is None or began >= previous_end:
+        return None
+    return began, previous_end
+
+
+def _hollow(stats: dict[str, Any]) -> tuple[float, float, str] | None:
+    """(took, share of normal, the IO note) when the last run reported success
+    far too quickly to have done its job.
+
+    The duration ratio is the claim; the bytes it moved are the corroboration
+    when the host watched the run, and the sentence says which it had. A job
+    whose normal run is seconds long has no shape to be short against, so it
+    is left alone.
+    """
+    last = stats.get("last")
+    median = stats.get("median_s")
+    if not last or not median or stats.get("runs", 0) < MIN_RUNS_HOLLOW:
+        return None
+    if median < MIN_HOLLOW_MEDIAN_S:
+        return None
+    took = _num(last.get("duration_s"))
+    status, result = last.get("status"), last.get("result")
+    ended_well = (status in (0, None)) and (result in (None, "success"))
+    if took is None or not ended_well or took >= HOLLOW_RATIO * median:
+        return None
+    moved, median_io = _num(last.get("io_bytes")), stats.get("median_io")
+    if moved is not None and median_io:
+        if moved < HOLLOW_IO_RATIO * median_io:
+            note = (f" It moved {moved / 1e6:.0f} MB where it normally moves "
+                    f"{median_io / 1e6:.0f} MB.")
+        else:
+            # It was quick but it did move the usual bytes: not hollow.
+            return None
+    else:
+        note = " (How much it moved was not watched, so this is the duration alone.)"
+    return took, took / median, note
+
+
 def _critical_timer(*names: Any) -> bool:
     for name in names:
         if isinstance(name, str) and any(mark in name for mark in CRITICAL_TIMERS):
@@ -1246,7 +1457,8 @@ def _timer_actions(timer: str, activates: str | None,
 
 def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any]],
                  outage_items: list[dict[str, Any]], now: float,
-                 grace_s: float, platform: str = "linux") -> list[dict[str, Any]]:
+                 grace_s: float, platform: str = "linux",
+                 runs: dict[str, list[dict[str, Any]]] | None = None) -> list[dict[str, Any]]:
     """Scheduled jobs, judged from facts rather than from a baseline.
 
     A timer whose next activation is in the past by more than the grace did
@@ -1254,8 +1466,16 @@ def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any
     one with an unchanged `last` is the schedule itself having stopped. That
     needs no history and fires from the first report -- a fact beats a
     baseline.
+
+    With `runs` (the stored records of what each service actually did), three
+    more become sayable, and each is measured against that job's own median
+    rather than any fixed number: it is **taking far longer than it takes**,
+    it **succeeded without doing anything**, and it **started again before
+    the last one finished**. One item per timer -- the most explanatory of
+    them, since a run that never ends is also why the next one overlapped.
     """
     out: list[dict[str, Any]] = []
+    runs = runs or {}
     for row in timers:
         name = row.get("unit") or row.get("name")
         if not isinstance(name, str) or not name or len(name) > 128:
@@ -1299,30 +1519,106 @@ def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any
                 "external": False,
             })
             continue
-        # Windows says how the last run ended without any run record at all.
-        result_code = row.get("last_result")
-        if isinstance(result_code, int) and not isinstance(result_code, bool) and result_code != 0:
-            out.append({
-                "key": f"schedule_failed:{name}", "kind": "timer", "subject": name,
-                "label": name, "unit": name, "activates": activates, "manager": manager,
-                "port": None, "proto": None, "scope": None, "severity": "warn",
-                "title": f"{name} failed on its last run",
-                "detail": (f"The scheduler recorded result {result_code} "
-                           f"(0x{result_code & 0xFFFFFFFF:08X})"
-                           + (f" at {time.strftime('%Y-%m-%d %H:%M', time.localtime(last))}."
-                              if last and last > 0 else ".")),
-                "since": last or now, "since_capped": False,
-                "last": last, "next": nxt, "now": None, "baseline": None,
-                "evidence": [{"label": "result", "value": str(result_code)}],
-                "culprits": [], "changes": [], "actions": [],
-                "fix": f"Get-ScheduledTask '{name}' | Get-ScheduledTaskInfo",
-                "external": False,
-            })
+        stats = run_stats(runs.get(name) or [])
+        run = row.get("run") if isinstance(row.get("run"), dict) else {}
+        base = {
+            "kind": "timer", "subject": name, "label": name, "unit": name,
+            "activates": activates, "manager": manager, "port": None, "proto": None,
+            "scope": None, "since_capped": False, "last": last, "next": nxt,
+            "now": None, "baseline": None, "culprits": [], "changes": [],
+            "actions": [], "external": False,
+            "runs": [_run_public(r) for r in (runs.get(name) or [])[:8]],
+            "run_stats": {"runs": stats["runs"], "median_s": stats["median_s"],
+                          "median_io": stats["median_io"]},
+        }
+
+        # It failed. From the run record where there is one, and from the
+        # unit's own Result where there is not.
+        failed = _failed_run(stats["last"], run, row)
+        if failed is not None:
+            when, why = failed
+            out.append({**base, "key": f"schedule_failed:{name}", "severity":
+                        "critical" if _critical_timer(name, activates) else "warn",
+                        "title": f"{activates or name} failed on its last run",
+                        "detail": (f"{why} The timer is still scheduled, so this repeats "
+                                   f"until it is fixed."),
+                        "since": when or now,
+                        "evidence": [{"label": "ended", "value": _stamp(when)},
+                                     {"label": "result", "value": why}],
+                        "fix": (f"systemctl status {activates or name}; "
+                                f"journalctl -u {activates or name} -n 30"
+                                if platform != "windows"
+                                else f"Get-ScheduledTask '{name}' | Get-ScheduledTaskInfo"),
+                        "actions": _timer_actions(name, activates, manager)})
             continue
-        # Still running when its next activation is already due. A weak form:
-        # with no run records the only duration available is the gap between
-        # the timer's own last and next, which is the schedule, not a
-        # measured normal. Phase B replaces it with real run durations.
+
+        # It is taking far longer than it takes. Measured: three times the
+        # median of its own last runs, not a number someone chose.
+        elapsed = _num(run.get("elapsed_s")) if run.get("running") else None
+        if elapsed is None and service.get("status") == "running":
+            began = _num(service.get("since"))
+            elapsed = now - began if began else None
+        median = stats["median_s"]
+        if elapsed is not None and median and stats["runs"] >= MIN_RUNS_LONG \
+                and elapsed > LONG_RATIO * max(median, 1.0):
+            out.append({**base, "key": f"schedule_long:{name}", "severity": "warn",
+                        "title": f"{activates or name} is taking far longer than it takes",
+                        "detail": (f"Running {_duration(elapsed)} so far; the last "
+                                   f"{stats['runs']} runs took {_duration(median)} on "
+                                   f"average. That is {elapsed / max(median, 1.0):.1f}x."),
+                        "since": now - elapsed,
+                        "evidence": [{"label": "running for", "value": _duration(elapsed)},
+                                     {"label": "normally", "value": _duration(median)},
+                                     {"label": "over", "value": f"{stats['runs']} runs"}],
+                        "culprits": ([{"pid": service.get("pid"),
+                                       "name": str(activates or name).rsplit(".", 1)[0],
+                                       "unit": activates, "container": None,
+                                       "resource": "activity", "share": "the job itself"}]
+                                     if service.get("pid") else []),
+                        "fix": f"systemctl status {activates}; journalctl -u {activates} -f"
+                               if activates else None})
+            continue
+
+        # It started again before the last one finished.
+        overlap = _overlap(stats)
+        if overlap is not None:
+            began, previous_end = overlap
+            out.append({**base, "key": f"schedule_overlap:{name}", "severity": "warn",
+                        "title": f"{activates or name} started before the last run finished",
+                        "detail": (f"The run at {_stamp(began)} began while the one from "
+                                   f"{_stamp(previous_end)} was still going. Two copies of a "
+                                   "scheduled job rarely both do their work."),
+                        "since": began,
+                        "evidence": [{"label": "started", "value": _stamp(began)},
+                                     {"label": "previous still ran until",
+                                      "value": _stamp(previous_end)}],
+                        "fix": f"systemctl status {activates}" if activates else None})
+            continue
+
+        # It "succeeded" without doing anything.
+        hollow = _hollow(stats)
+        if hollow is not None:
+            took, share, io_note = hollow
+            out.append({**base, "key": f"schedule_hollow:{name}", "severity":
+                        "critical" if _critical_timer(name, activates) else "warn",
+                        "title": f"{activates or name} succeeded without doing anything",
+                        "detail": (f"The last run exited 0 in {_duration(took)} -- "
+                                   f"{share:.0%} of the {_duration(median or 0)} it normally "
+                                   f"takes over {stats['runs']} runs.{io_note} A job that "
+                                   "returns success this fast usually found nothing to work "
+                                   "on: a missing mount, an empty source, a changed path."),
+                        "since": _num((stats["last"] or {}).get("ended")) or now,
+                        "evidence": [{"label": "took", "value": _duration(took)},
+                                     {"label": "normally", "value": _duration(median or 0)},
+                                     {"label": "over", "value": f"{stats['runs']} runs"}],
+                        "fix": f"journalctl -u {activates} -n 50" if activates else None})
+            continue
+
+        # Still running when its next activation is already due. The weak
+        # form, for a machine with no run records yet (a fresh host, or a
+        # platform that cannot report them): the only duration available is
+        # the gap between the timer's own last and next, which is the
+        # schedule, not a measured normal.
         if not activates or not last or not nxt or nxt <= last:
             continue
         started = _num(service.get("since"))
