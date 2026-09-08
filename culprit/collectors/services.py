@@ -82,8 +82,14 @@ class ServiceCollector:
 
         services = system["services"] + user["services"]
         boot_time = _boot_time()
+        # Listed before the journal fallback runs: a timer's activated unit is
+        # usually a oneshot that systemd has unloaded between runs, which is
+        # exactly the case the fallback exists for.
+        listed_timers = self._list_timers()
+        activated = {str(t.get("activates")) for t in listed_timers if t.get("activates")}
         for service in services:
-            if _boot_job_candidate(service) and service.get("exited_at") is None:
+            if (_boot_job_candidate(service) or str(service["name"]) in activated) \
+                    and service.get("exited_at") is None:
                 name = str(service["name"])
                 if name not in self._exit_cache:
                     self._exit_cache[name] = _journal_run(name, str(service.get("scope")))
@@ -124,7 +130,7 @@ class ServiceCollector:
             "summary": summary,
             "problems": problems,
             "by_pid": by_pid,
-            "timers": self._timers(),
+            "timers": _timer_rows(listed_timers, services),
             "cgroup_attribution": linux.cgroup_version() == 2,
             "user_bus": user["available"],
             "user_bus_reason": user["reason"],
@@ -295,22 +301,76 @@ class ServiceCollector:
                     max(0.0, (read_b - prev_io[1] + write_b - prev_io[2]) / dt))
         return out
 
-    def _timers(self) -> list[dict[str, object]]:
-        """Scheduled jobs. A timer whose service failed on its last run is a
-        real signal that Windows Task Scheduler made very hard to see."""
+    def _list_timers(self) -> list[dict[str, object]]:
+        """`systemctl list-timers` as it comes: unit, what it activates, and
+        the two stamps systemd keeps (microsecond epochs)."""
         listed = linux.run_json(
             ["systemctl", "list-timers", "--all", "-o", "json", "--no-pager"],
             timeout=10)
-        out = []
-        for timer in listed if isinstance(listed, list) else []:
-            out.append({
-                "unit": timer.get("unit"),
-                "activates": timer.get("activates"),
-                # systemd reports microsecond epoch stamps.
-                "next": _usec(timer.get("next")),
-                "last": _usec(timer.get("last")),
-            })
-        return out
+        return [t for t in (listed if isinstance(listed, list) else [])
+                if isinstance(t, dict)]
+
+
+# --------------------------------------------------------------------- timers
+def _timer_rows(listed: list[dict[str, object]],
+                services: list[dict]) -> list[dict[str, object]]:
+    """Scheduled jobs, each with **its last run**.
+
+    A timer whose service failed on its last run is a real signal that Windows
+    Task Scheduler made very hard to see -- and *how long the run took* is a
+    second one that nothing else reports: a backup that normally runs twenty
+    minutes and "succeeded" in four seconds did not back anything up. The run
+    is joined from the activated unit's own properties, which the batched
+    `systemctl show` already read, so this costs no extra call.
+    """
+    by_name = {str(s["name"]): s for s in services}
+    out = []
+    for timer in listed:
+        activates = timer.get("activates")
+        service = by_name.get(str(activates or ""))
+        run, reason = _run_of(service) if service is not None else (
+            None, "the unit this activates is not loaded, so systemd keeps no "
+                  "record of its last run")
+        out.append({
+            "unit": timer.get("unit"),
+            "activates": activates,
+            # systemd reports microsecond epoch stamps.
+            "next": _usec(timer.get("next")),
+            "last": _usec(timer.get("last")),
+            "run": run,
+            "run_reason": reason,
+        })
+    return out
+
+
+def _run_of(service: dict) -> tuple[dict[str, object] | None, str | None]:
+    """The activated unit's last (or current) run, or why there is none.
+
+    `ExecMainExitTimestamp` is empty while the main process lives, which is
+    what separates a run still going from one that finished: a duration is
+    only ever reported for a run that ended, and the one in flight reports
+    how long it has been going instead. Nothing is inferred from a missing
+    stamp -- a unit that has never run says so.
+    """
+    started = service.get("started_at")
+    ended = service.get("exited_at")
+    if not isinstance(started, (int, float)):
+        return None, "this unit has not run since the last boot"
+    running = ended is None and str(service.get("active_state")) in (
+        "active", "activating", "reloading", "deactivating")
+    duration = None
+    if isinstance(ended, (int, float)) and ended >= started:
+        duration = round(float(ended) - float(started), 3)
+    return {
+        "started": float(started),
+        "ended": float(ended) if isinstance(ended, (int, float)) else None,
+        # Set only for a run that ended; a run in flight carries elapsed.
+        "duration_s": duration,
+        "elapsed_s": round(time.time() - float(started), 1) if running else None,
+        "status": service.get("exit_status"),
+        "result": service.get("result"),
+        "running": running,
+    }, None
 
 
 # --------------------------------------------------------------------- mapping
