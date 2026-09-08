@@ -182,10 +182,18 @@ export function createNodes() {
       published = answer.published || published;
       paintPublished();
       const version = (answer.published || {}).linux;
-      const waiting = (answer.update_available || []).length;
-      const behind = waiting
-        ? `${waiting} agent${waiting === 1 ? " has" : "s have"} an update.`
-        : "No agent has an update.";
+      // What the host would actually move, not what merely carries an older
+      // number: a Docker agent updates through its image, so counting it
+      // here would promise an action this page cannot take.
+      const can = answer.updatable || [];
+      const left = answer.skipped || [];
+      const behind = (can.length
+        ? `${can.length} agent${can.length === 1 ? "" : "s"} can be updated: ${can.join(", ")}.`
+        : "No agent can be updated from here.")
+        + (left.length
+          ? ` Left out: ${left[0].name} (${left[0].reason})`
+            + `${left.length > 1 ? ` and ${left.length - 1} more` : ""}.`
+          : "");
       const age = fmt.isNum((answer.published || {}).checked_at)
         ? fmt.ago(answer.published.checked_at) : "never";
       if (!answer.asked) {
