@@ -294,6 +294,8 @@ export function createPulse() {
     if (item.subjects?.length) {
       node.append(el("div.finding__evidence.pills", {}, item.subjects.map((s) => pill(s, null, { mono: true }))));
     }
+    const history = runHistory(item);
+    if (history) node.append(history);
     const culprits = item.culprits || [];
     if (culprits.length) {
       node.append(el("div.finding__culprits", {}, [
@@ -351,6 +353,55 @@ export function createPulse() {
     }
     if (tools.children.length) node.append(tools);
     return node;
+  }
+
+  /** The last runs of a timer's service: one bar per run, height by duration,
+   *  with the job's own median drawn across them. This is the whole claim of
+   *  the run rules — "far longer than it takes", "succeeded far too fast" —
+   *  so the shape it is measured against is on the page, not just asserted. */
+  function runHistory(item) {
+    const runs = (item.runs || []).filter((r) => r && fmt.isNum(r.started));
+    if (!runs.length) return null;
+    const stats = item.run_stats || {};
+    const peak = Math.max(...runs.map((r) => r.duration_s || 0), stats.median_s || 0, 1);
+    const bars = el("div.runs", { role: "img",
+      "aria-label": `The last ${runs.length} runs of ${item.activates || item.unit}` });
+    // Oldest on the left, so the newest bar sits nearest the sentence about it.
+    for (const run of runs.slice().reverse()) {
+      const failed = (run.result && run.result !== "success") || (fmt.isNum(run.status) && run.status !== 0);
+      const running = run.duration_s === null || run.duration_s === undefined;
+      const bits = [fmt.dayTime(run.started),
+        running ? "still running" : fmt.shortDuration(run.duration_s),
+        fmt.isNum(run.io_bytes) ? fmt.bytes(run.io_bytes) : null,
+        run.result || (fmt.isNum(run.status) ? `exit ${run.status}` : null)];
+      bars.append(el("i", {
+        dataset: { tone: failed ? "crit" : running ? "run" : "ok" },
+        style: { height: `${Math.max(8, Math.round(100 * (run.duration_s || peak) / peak))}%` },
+        title: bits.filter(Boolean).join(" · "),
+      }));
+    }
+    if (fmt.isNum(stats.median_s) && stats.median_s > 0) {
+      // Visual only (it is a hairline, and nothing can hover it): the same
+      // number is stated in words underneath.
+      bars.append(el("span.runs__median", {
+        style: { bottom: `${Math.min(98, Math.round(100 * stats.median_s / peak))}%` },
+      }));
+    }
+    return el("div.finding__culprits", {}, [
+      el("span.label", {}, [
+        document.createTextNode("Its own last runs "),
+        el("span.faint", { text: "— the line is the median it is judged against" }),
+      ]),
+      bars,
+      el("div.kvs", {}, [
+        kv("Normally", fmt.isNum(stats.median_s)
+          ? `${fmt.shortDuration(stats.median_s)} over ${fmt.count(stats.runs)} run${stats.runs === 1 ? "" : "s"}`
+          : `not enough finished runs yet (${fmt.count(stats.runs || 0)})`),
+        fmt.isNum(stats.median_io)
+          ? kv("Moves", `${fmt.bytes(stats.median_io)} in a normal run`)
+          : kv("Moves", "not watched — the host only counts bytes for a run it saw start"),
+      ]),
+    ]);
   }
 
   function runUnitAction(item, action) {
