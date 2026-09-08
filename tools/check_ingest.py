@@ -19,7 +19,7 @@ tool asks two questions the other scanners only touch:
    that would make a dashboard request wait forever, unbounded growth from
    made-up section names -- must be rejected or absorbed. After each one the
    endpoints every viewer depends on (`/api/nodes`, `/api/fleet`, the Pulse,
-   the node's
+   the wear record, the node's
    snapshot, the SSE stream's first frame) must still answer 200 with
    *strict* JSON, and the host must still be healthy. A 5xx on the ingest is
    HIGH (the agent hurt itself); a 5xx or invalid JSON on a read endpoint is
@@ -226,7 +226,9 @@ def readback(ctx: Ctx, node: str) -> list[str]:
     if not ctx.cookie:
         return problems
     for target in ("/api/nodes", "/api/fleet", f"/api/nodes/{node}/snapshot", "/api/snapshot",
-                   f"/api/pulse?node={node}", f"/api/pulse/rhythm?node={node}", "/api/pulse/fleet"):
+                   f"/api/pulse?node={node}", f"/api/pulse/rhythm?node={node}", "/api/pulse/fleet",
+                   f"/api/wear?node={node}",
+                   f"/api/wear?node={node}&kind=disk&subject=S1"):
         # A node snapshot may legitimately approach the 8 MB report cap.
         r = safe_req(ctx, "GET", target, cookie=ctx.cookie, timeout=20.0, max_read=12_000_000)
         if r is None or r.status >= 500:
@@ -357,6 +359,39 @@ def check_poisoning(ctx: Ctx, node: str, token: str) -> None:
                                                                             "title": ["t"], "root": "r"}]}), None),
         ("outage huge", snap(outage={"items": [{"key": "k" * 5000, "severity": "critical", "title": "t" * 100000,
                                                 "detail": "d" * 500000}] * 300}), None),
+        # The Prognosis's section is annotated at ingest (culprit/wear.py:
+        # history lookups, a least-squares fit and one row per device per day),
+        # so a hostile shape here must not 5xx, must not turn into an unbounded
+        # number of queries or rows, and must leave /api/wear readable.
+        ("prognosis wrong types", snap(prognosis={"available": True, "items": "x",
+                                                  "devices": "x", "memory": 5, "checks": []}), None),
+        ("prognosis items garbage", snap(prognosis={"available": True, "items": [
+            None, 5, "x", [], {"key": None, "severity": {"a": 1}, "stable": "no",
+                               "title": ["t"], "detail": 5, "evidence": "x"}],
+            "devices": [None, 7, "z"]}), None),
+        ("prognosis counters as strings", snap(prognosis={"available": True, "items": [],
+            "devices": [{"subject": "S1", "kind": "disk", "smart": {"read": True},
+                         "counters": {"5": "many", "197": None, "percentage_used": [1]}}]}), None),
+        ("prognosis NaN and overflow counters", b'{"agent":{},"snapshot":{"prognosis":'
+            b'{"available":true,"items":[],"devices":[{"subject":"S2","smart":{"read":true},'
+            b'"counters":{"percentage_used":NaN,"5":1e400,"197":-1e400}}]}}}', None),
+        # Well past culprit.wear.MAX_SUBJECTS (256), and the same order as the
+        # existing "4000 processes" case on purpose: what is being proved is
+        # that the host bounds the annotation and the daily rows, and a report
+        # an order of magnitude larger only proves that this checkout's own
+        # dev box has 4 GB and no swap. Every section a case leaves behind is
+        # re-serialised by the read-back after every later case.
+        ("prognosis 4000 devices", snap(prognosis={"available": True, "items": [], "devices": [
+            {"subject": f"S{i}", "kind": "disk", "smart": {"read": True},
+             "counters": {"5": i}} for i in range(4000)]}), None),
+        ("prognosis 512KB raw blob", snap(prognosis={"available": True, "items": [],
+            "devices": [{"subject": "S3", "smart": {"read": True, "raw": {"x": "b" * 512_000}},
+                         "counters": {"5": 1}}]}), None),
+        # Back to a small one, so the fuzz's remaining cases are not each
+        # measured against a snapshot the previous case inflated.
+        ("prognosis clean", snap(prognosis={"available": True, "items": [], "devices": [
+            {"subject": "S1", "kind": "disk", "name": "sda", "smart": {"read": True},
+             "counters": {"5": 0}}]}), None),
         # The Pulse folds `services`, `ports` and `network` into its rings at
         # ingest and judges them on the host's sweep, so a hostile shape here
         # must not reach a ring, break a verdict, or 5xx /api/pulse.

@@ -459,6 +459,41 @@ def main() -> int:
         note(f"clock: synchronized={clock.get('synchronized')} daemon={clock.get('daemon')} "
              f"offset={clock.get('offset_ms')} ms")
 
+    print("\n--- prognosis (what is wearing out) " + "-" * 35)
+    import tempfile as _tempfile
+    from culprit.collectors import prognosis as prognosis_mod
+    with _tempfile.TemporaryDirectory() as _ring_dir:
+        wear_collector = prognosis_mod.PrognosisCollector(data_dir=_ring_dir)
+        # The first pass pays for the SMART reads (one smartctl per disk); the
+        # warm one is the sysfs sweep alone, which is what runs on most events
+        # ticks.
+        wear = timed("PrognosisCollector.sample (first: SMART pass)",
+                     lambda: wear_collector.sample(volumes=volumes, network=net_sample,
+                                                   kernel=kn, system=info,
+                                                   changes=change_log), budget_ms=3000)
+        wear = timed("PrognosisCollector.sample (warm: sysfs only)",
+                     lambda: wear_collector.sample(volumes=volumes, network=net_sample,
+                                                   kernel=kn, system=info,
+                                                   changes=change_log), budget_ms=60) or wear
+    if wear:
+        note(f"status={wear['status']} severity={wear['severity']} "
+             f"items={[(i['key'], i['severity']) for i in wear['items'][:6]]}")
+        # The availability matrix: this is the part that matters on a machine
+        # where most of these sources do not exist.
+        for name, entry in (wear["checks"] or {}).items():
+            if name == "guest":
+                continue
+            state = "ok" if entry.get("available") else "n/a"
+            note(f"{name}={state}" + (f"  {entry.get('reason')}" if entry.get("reason") else ""))
+        smart = (wear["checks"] or {}).get("smart") or {}
+        note(f"disks: {smart.get('devices', 0)} found, {smart.get('read', 0)} read, "
+             f"{smart.get('asleep', 0)} asleep (left asleep), "
+             f"{smart.get('virtual', 0)} virtual"
+             + (f", pass {smart['pass_ms']} ms" if smart.get("pass_ms") else ""))
+        guest = (wear["checks"] or {}).get("guest") or {}
+        if guest.get("note"):
+            note(f"{YELLOW}{guest['note']}{RESET}")
+
     print("\n--- coroner (flight recorder + previous-boot forensics) " + "-" * 14)
     import tempfile
     from culprit.collectors import forensics, recorder

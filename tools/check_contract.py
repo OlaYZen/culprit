@@ -130,6 +130,31 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "checks.reboot.pending",
         ],
     },
+    "prognosis": {
+        "node:prognosis": [
+            "available", "status", "severity", "items", "count", "failing", "wearing",
+            "items[].key", "items[].kind", "items[].subject", "items[].severity",
+            "items[].title", "items[].detail", "items[].fix", "items[].since",
+            "items[].since_start", "items[].changes", "items[].evidence",
+            "items[].device", "items[].rising_since",
+            # Host-added by culprit/wear.py -- present only once a node has a
+            # day of record, so they are checked on the device rows instead.
+            "devices[].kind", "devices[].subject", "devices[].name", "devices[].model",
+            "devices[].serial", "devices[].transport", "devices[].rotational",
+            "devices[].size", "devices[].firmware", "devices[].virtual",
+            "devices[].counters", "devices[].smart", "devices[].smart.read",
+            "devices[].smart.asleep", "devices[].history",
+            "links", "nics", "pci", "power",
+            "memory.available", "memory.controllers",
+            "checks.smart.available", "checks.smart.devices", "checks.smart.read",
+            "checks.smart.asleep", "checks.smart.next_pass", "checks.smart.wake_disks",
+            "checks.links.available", "checks.nics.available", "checks.nics.physical",
+            "checks.memory.available", "checks.pci.available", "checks.power.available",
+            "checks.guest.virtualization",
+        ],
+        # The wear record behind the chart and every "unchanged since".
+        "/api/wear?node=<node>": ["node", "subjects"],
+    },
     "processes": {
         "node:process_table": [
             "mode", "cores", "sample_ms", "by_state", "io_note",

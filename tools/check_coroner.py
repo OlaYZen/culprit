@@ -95,10 +95,17 @@ def death(kind: str, end: float, rec: dict, ev: dict, **extra) -> dict:
             "boot_time": end + 100, "recorder": rec, "evidence": ev, **extra}
 
 
-def verdict_for(raw: dict) -> dict:
+def verdict_for(raw: dict, host: dict | None = None) -> dict:
     clean = coroner_mod._clean_death(raw)
     assert clean is not None
-    return coroner_mod.judge(clean)
+    return coroner_mod.judge(clean, host=host)
+
+
+def wear(kind: str, subject: str, rose: dict, days: int = 6) -> dict:
+    """One row of the host's wear record, as Coroner._host_context builds it:
+    the last day's counters plus which of them moved over the window."""
+    return {"kind": kind, "subject": subject, "days": days,
+            "day": 0, "counters": {k: v[1] for k, v in rose.items()}, "rose": rose}
 
 
 def main() -> int:
@@ -152,6 +159,43 @@ def main() -> int:
 
     v = verdict_for(death("machine", end, frames(600, end, psi_io_full=60.0), evidence()))
     check("IO stalled at the end -> hang_io", v["class"] == "hang_io", v["title"])
+
+    # The wear record before the death: evidence for the classes that already
+    # claim hardware, context for the ones that claim nothing. A wearing disk
+    # never changes a class -- a machine with a reallocating drive can still
+    # be unplugged by a cleaner.
+    io = death("machine", end, frames(600, end, psi_io_full=60.0), evidence())
+    v = verdict_for(io, host={"findings": [], "changes": [], "wear": [
+        wear("disk", "S4EVNF0M123456", {"5": (13, 27), "197": (0, 14)})]})
+    check("a reallocating disk becomes evidence under hang_io",
+          v["class"] == "hang_io"
+          and any("S4EVNF0M123456" in b and "still wearing" in b for b in v["because"]),
+          json.dumps(v["because"][-1:]))
+    check("and the sentence quotes both numbers and the window",
+          any("13 -> 27" in b and "6 days before" in b for b in v["because"]),
+          json.dumps(v["because"][-1:]))
+
+    mce = death("machine", end, frames(600, end), evidence(markers=[
+        {"kind": "mce", "ts": end - 5, "message": "mce: [Hardware Error]: Machine check events logged"}]))
+    v = verdict_for(mce, host={"findings": [], "changes": [], "wear": [
+        wear("memory", "mc0", {"ce_count": (0, 412)})]})
+    check("a correcting DIMM becomes evidence under hardware_error",
+          v["class"] == "hardware_error"
+          and any("mc0" in b and "412" in b for b in v["because"]), json.dumps(v["because"][-1:]))
+
+    v = verdict_for(death("machine", end, frames(600, end), evidence()),
+                    host={"findings": [], "changes": [], "wear": [
+                        wear("disk", "S4EVNF0M123456", {"5": (13, 27)})]})
+    check("under abrupt_stop the same disk is context, never a class change",
+          v["class"] == "abrupt_stop"
+          and any("still wearing" in c for c in v["context"])
+          and not any("still wearing" in b for b in v["because"]),
+          json.dumps(v["context"]))
+
+    v = verdict_for(io, host={"findings": [], "changes": [], "wear": [
+        wear("disk", "S1", {}, days=6)]})
+    check("a disk whose counters did not move says nothing at all",
+          not any("still wearing" in b for b in v["because"] + v["context"]))
 
     v = verdict_for(death("machine", end, frames(600, end), evidence()))
     check("healthy, no record -> abrupt_stop while healthy",
