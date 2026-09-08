@@ -154,6 +154,60 @@ export function createNodes() {
     + `${names.length === 1 ? "that machine" : "those machines"} once; from v0.18.1-b on they update from here.`;
   const updateAll = el("button.btn.btn--sm", { type: "button" }, ["Update all"]);
   const countNode = el("span");
+  // What the host currently believes the agents should be on, and how old
+  // that belief is: "no update available" means something different when the
+  // answer was read an hour ago, so the age is always on screen.
+  const CHECK_LABEL = "Check for updates";
+  const checkNow = el("button.btn.btn--sm", { type: "button",
+    title: "Ask GitHub now what version the agents should be on. The host does this by itself every half hour." },
+    [CHECK_LABEL]);
+  const publishedNode = el("span.faint.small");
+  let published = null;
+
+  function paintPublished() {
+    if (!published) { patchText(publishedNode, ""); return; }
+    const version = published.linux ? `v${published.linux}` : "unknown";
+    const when = fmt.isNum(published.checked_at) ? fmt.ago(published.checked_at) : "never";
+    patchText(publishedNode, `published ${version} · read ${when}`);
+    patchAttr(publishedNode, "title", published.checked_at
+      ? `The version.json GitHub serves for the ${published.branch} branch, read ${when}. `
+        + `Checked automatically every ${Math.round((published.every_seconds || 1800) / 60)} minutes.`
+      : "The host has not managed to read the published version yet; nodes are compared against nothing.");
+  }
+
+  checkNow.addEventListener("click", async () => {
+    setBusy(checkNow, true, "Checking…");
+    try {
+      const answer = await api("/api/nodes/check-updates", { method: "POST" });
+      published = answer.published || published;
+      paintPublished();
+      const version = (answer.published || {}).linux;
+      const waiting = (answer.update_available || []).length;
+      const behind = waiting
+        ? `${waiting} agent${waiting === 1 ? " has" : "s have"} an update.`
+        : "No agent has an update.";
+      const age = fmt.isNum((answer.published || {}).checked_at)
+        ? fmt.ago(answer.published.checked_at) : "never";
+      if (!answer.asked) {
+        // Someone clicked twice. Saying "unreachable" here would be a lie
+        // about GitHub; nothing was asked of it.
+        inlineResult(rowResult, `Asked moments ago already — still ${version ? `v${version}` : "no version"} `
+          + `from ${age}. ${behind}`, "ok");
+      } else if (!answer.reached) {
+        // The last good number is still on screen; say that rather than let
+        // "no update" read as a fresh answer.
+        inlineResult(rowResult, "GitHub could not be reached just now — still showing "
+          + `${version ? `v${version}` : "no version"} from ${age}.`, "warn");
+      } else if (answer.changed) {
+        inlineResult(rowResult, `Published version is now v${version}. ${behind}`, "ok");
+      } else {
+        inlineResult(rowResult, `Unchanged: v${version} is still what is published. ${behind}`, "ok");
+      }
+    } catch (error) {
+      inlineResult(rowResult, `Could not check: ${error.message}`, "error");
+    }
+    setBusy(checkNow, false, CHECK_LABEL);
+  });
   updateAll.addEventListener("click", () => {
     const targets = updateTargets(store.state.nodes || []);
     if (!targets.length) return;
@@ -223,7 +277,8 @@ export function createNodes() {
       table.append(tbody);
       tableSection = section({
         title: "Agents",
-        meta: el("span", { style: { display: "inline-flex", alignItems: "center", gap: "10px" } }, [countNode, updateAll]),
+        meta: el("span", { style: { display: "inline-flex", alignItems: "center", gap: "10px" } },
+          [countNode, publishedNode, checkNow, updateAll]),
         body: el("div", {}, [el("div.tblwrap", {}, [table]), el("div.formrow", { style: { marginTop: "8px" } }, [rowResult])]),
         foot: "Revoking rejects reports instantly but leaves the remote process running; rotating a token re-enables "
             + "a revoked node. Tokens are hashed at rest — none of them can be read back, only replaced.",
@@ -234,6 +289,8 @@ export function createNodes() {
     reconcileRows(list);
     const targets = updateTargets(list);
     show(updateAll, canOperate());
+    show(checkNow, canOperate());
+    paintPublished();
     updateAll.disabled = !targets.length;
     patchText(updateAll, targets.length ? `Update all (${targets.length})` : "Update all");
     patchAttr(updateAll, "title", targets.length
@@ -666,6 +723,7 @@ export function createNodes() {
     repaint();
     api("/api/nodes").then((payload) => {
       store.state.nodes = payload.nodes || [];
+      published = payload.published || null;
       loaded = true;
       repaint();
     }).catch(() => { loaded = true; repaint(); });
