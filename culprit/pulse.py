@@ -1431,7 +1431,8 @@ def _hollow(stats: dict[str, Any]) -> tuple[float, float, str] | None:
             # It was quick but it did move the usual bytes: not hollow.
             return None
     else:
-        note = " (How much it moved was not watched, so this is the duration alone.)"
+        note = (" (How much this run moved was not watched -- the host counts bytes "
+                "only for a run it saw start -- so this rests on the duration alone.)")
     return took, took / median, note
 
 
@@ -1603,8 +1604,8 @@ def judge_timers(timers: list[dict[str, Any]], services: dict[str, dict[str, Any
                         "critical" if _critical_timer(name, activates) else "warn",
                         "title": f"{activates or name} succeeded without doing anything",
                         "detail": (f"The last run exited 0 in {_duration(took)} -- "
-                                   f"{share:.0%} of the {_duration(median or 0)} it normally "
-                                   f"takes over {stats['runs']} runs.{io_note} A job that "
+                                   f"{share * 100:.1f}% of the {_duration(median or 0)} it "
+                                   f"normally takes over {stats['runs']} runs.{io_note} A job that "
                                    "returns success this fast usually found nothing to work "
                                    "on: a missing mount, an empty source, a changed path."),
                         "since": _num((stats["last"] or {}).get("ended")) or now,
