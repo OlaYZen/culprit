@@ -682,13 +682,21 @@ class Pulse:
         if self.expectations is None or not items:
             return
         shaped = [{"key": f"pulse:{i['key']}", "severity": i.get("severity"),
+                   "title": i.get("title") or "", "detail": i.get("detail") or "",
                    "culprits": i.get("culprits") or []} for i in items]
         try:
+            # annotate() reorders the list it is given (it recomputes a
+            # verdict from it), so the results are matched back by key, not
+            # by position.
             self.expectations.annotate(node, {"findings": shaped}, now)
         except Exception:  # noqa: BLE001 -- an annotation never breaks a verdict
             log.exception("expectation annotate failed for %s", node)
             return
-        for item, shape in zip(items, shaped):
+        by_key = {str(shape.get("key")): shape for shape in shaped}
+        for item in items:
+            shape = by_key.get(f"pulse:{item['key']}")
+            if not shape:
+                continue
             if shape.get("expected"):
                 item["expected"] = shape["expected"]
                 item["severity_raw"] = shape.get("severity_raw") or item.get("severity")

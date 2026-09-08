@@ -171,8 +171,10 @@ class Config:
     # the items without throwing away the weeks of buckets that produced them.
     pulse_enabled: bool = True
     # The rhythm's own retention, deliberately not retention_days: a weekday
-    # baseline needs five weeks where the metric history needs seven days.
-    pulse_retention_days: int = 35
+    # baseline needs five weeks where the metric history needs seven days --
+    # and a week of slack on top, or the oldest same-weekday hour is pruned
+    # an hour before the baseline would have read it.
+    pulse_retention_days: int = 42
     # Quiet is "below this fraction of the quietest normal hour" (the
     # baseline's 10th percentile), not below a fixed number -- a busy port
     # and a sleepy one are judged on their own scale.
