@@ -390,7 +390,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Processes** | A direct `/proc` scan of every process: CPU, block-level disk IO, **scheduler run delay** (runnable but starved of a CPU), major faults, D-state with the blocking kernel function (`wchan`), threads, FDs, PSS |
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before, and for units a **Restart / Start / Reload button** whose outcome is verified against the next samples |
-| **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire** or is still running long after it should have finished. Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
+| **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire**, and -- from the run each scheduled job records -- one that **failed**, one **taking far longer than it takes**, one that **started before the last finished**, and one that **succeeded without doing anything** (exited 0 in a fifth of its usual time, having moved none of its usual bytes). Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -734,6 +734,28 @@ last ten minutes reach half its normal median. Two different lines, so nothing
 flaps at the moment you are trying to read it. Schedules need no history at
 all: a timer whose `next` is in the past by more than the grace **did not
 fire**, and systemd's own word is enough.
+
+**Scheduled jobs get a second measurement.** Every timer row the agents send
+now carries the run its service actually did -- when it started, when it
+ended, how long that took, how it ended -- joined from properties systemd had
+already handed over, so it costs nothing extra. The host keeps those runs, and
+four things become sayable, each against **that job's own median** rather than
+any number someone chose:
+
+| | |
+|---|---|
+| **It failed** | the last run ended with a Result other than success, or a non-zero exit. One record is enough; no history needed |
+| **It is taking far longer than it takes** | three times the median of its own last runs and still going (three runs minimum) |
+| **It started before the last one finished** | two copies of a scheduled job rarely both do their work |
+| **It succeeded without doing anything** | it exited 0 in under a fifth of its usual time (five runs minimum) -- the backup whose target mount is gone. When the host watched the run it also compares the **bytes it moved**, and a run that was quick but moved the usual bytes is a fast disk, not a hollow run, and is refused |
+
+The card draws the job's last runs as bars with the median across them, so the
+shape the verdict rests on is on the page rather than asserted. On **Windows**
+the same rows come from `schtasks` plus the Task Scheduler's own Operational
+log (event 100 opens an instance, 102 closes it); that log needs an
+Administrator task, so without one the duration is `null` with the reason
+named -- and the task's *result* still comes through, because the scheduler
+reports that to anyone.
 
 **What it refuses to do** is the point:
 
