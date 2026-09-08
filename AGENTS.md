@@ -106,6 +106,10 @@ cd ../culprit-agent && sudo ./agent.sh   # venv (psutil only), ASKS for host URL
                                            # sweep loop's fire/skip decision (hour, capability,
                                            # availability, enabled, the claim race)
 .venv/bin/python -m pyflakes culprit tools # lint
+.venv/bin/python tools/make_releases.py    # after a pushed version bump: the GitHub release for every
+                                           # version that has none yet (tag at the bump commit, notes
+                                           # from the commits under it, pre-release while the version
+                                           # carries -b); --dry prints the plan. See Versioning › Releases
 ```
 
 The five live tools (`check_contract`, `check_security`, `check_ingest`, `scan_unauth`, `check_role_matrix`) share `tools/_auth.py`: pass `--save-auth` once with the URL / `--user` / `--password` (and `--token --node` for the ingest check) and they are written to **`tools_auth.json`** at the repo root (mode 600, gitignored, pinned by the audit like `agent.json`); after that the tools run with **no arguments**, print one dim line saying what they took from the file, and anything on the command line still wins for that run. `--no-auth-file` ignores it. There is one such file per checkout, so a scratch host on another port gets its own.
@@ -150,6 +154,10 @@ The version is a plain string in `version.json` at the repo root, e.g. `{"versio
 - When a `fix` commit lands, that same commit's diff bumps Z by 1.
 - `docs` commits, `test` commits and `chore` commits that carry no semantic change (e.g. a sync exclusion, a `.gitignore` tweak) never touch `version.json` -- it simply carries forward unchanged.
 - This means `version.json` should always match the state of the code at HEAD, on every single commit, not just at release boundaries. Before committing a `feat` or `fix`, bump `version.json` in the same commit; if you're not sure whether a change is Y- or Z-sized, treat a new capability as Y and a repair of existing behavior as Z.
+
+**Keep `version.json` on its three-line layout** (`{`, `  "version": "X.Y.Z-b"`, `}`): `changelog._bumps` reads the bump history out of the file's diffs, and while it now accepts a one-line object too, the layout is part of what the history looks like. Edit the value, never reformat the file.
+
+**Releases.** Every version `version.json` has ever held is a GitHub release: the tag `vX.Y.Z-b` points at the commit that set it and the notes are that version's commits grouped by conventional type -- the same grouping Patch notes shows, from the same `culprit.changelog` parse, so there is nothing to write by hand. **After pushing a commit that bumps the version, run `.venv/bin/python tools/make_releases.py`** (`--dry` prints the plan); it creates only what is missing, so the releases never drift from the history and a forgotten run is repaired by the next one. **Every release stays flagged pre-release until 1.0.0**: the `-b` suffix is a beta, GitHub marks no pre-release "Latest", and that is the honest state of the line. The script applies the flag from the suffix; when 1.0.0 lands the suffix goes and the flag with it -- never clear the flag on a `-b` release by hand. Releases are made from `main`, so a bump lands there (merged from `dev`) before it is released.
 
 ## Architecture
 
