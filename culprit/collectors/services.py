@@ -28,6 +28,7 @@ import re
 import time
 
 from .. import linux
+from . import cron as cron_mod
 
 log = logging.getLogger("culprit.services")
 
@@ -62,6 +63,7 @@ _JOURNAL_WINDOW_S = 120
 # (journalctl returns the newest N, so a chatty unit hides a quiet one), and
 # the whole source reports unavailable rather than inventing a silence.
 _JOURNAL_MAX_LINES = 8000
+_CRON_REFRESH_S = 300.0
 
 
 class ServiceCollector:
@@ -73,6 +75,12 @@ class ServiceCollector:
         # an inactive unit and `systemctl show` then reports no timestamps,
         # so a boot job that finished needs its journal line to prove it.
         self._exit_cache: dict[str, tuple[float | None, float | None]] = {}
+        # Cron is read on its own cadence: the schedules come from files, but
+        # "when did it last run" is a journal read (~0.8 s here), and a job's
+        # last run does not change between slow ticks.
+        self._cron: list[dict[str, object]] = []
+        self._cron_reason: str | None = None
+        self._cron_at = 0.0
 
     def sample(self) -> dict[str, object]:
         system = self._scope("system")
@@ -150,12 +158,15 @@ class ServiceCollector:
             "summary": summary,
             "problems": problems,
             "by_pid": by_pid,
-            "timers": _timer_rows(listed_timers, services),
+            "timers": _timer_rows(listed_timers, services) + self._cron_jobs(),
             "cgroup_attribution": linux.cgroup_version() == 2,
             # Whether services[].lines_sec means anything, and why not.
             "journal_rate": rates is not None,
             "journal_rate_reason": rates_reason,
             "journal_rate_window_s": _JOURNAL_WINDOW_S,
+            # What cron could not be read, if anything (per-user crontabs are
+            # root:crontab 1730 and invisible to an unprivileged agent).
+            "cron_reason": self._cron_reason,
             "user_bus": user["available"],
             "user_bus_reason": user["reason"],
         }
@@ -324,6 +335,18 @@ class ServiceCollector:
                 out["io_bytes_sec"] = round(
                     max(0.0, (read_b - prev_io[1] + write_b - prev_io[2]) / dt))
         return out
+
+    def _cron_jobs(self) -> list[dict[str, object]]:
+        """Cron's schedules in the timer shape, refreshed every five minutes."""
+        now = time.monotonic()
+        if now - self._cron_at > _CRON_REFRESH_S or not self._cron:
+            try:
+                self._cron, self._cron_reason = cron_mod.jobs()
+            except Exception as exc:  # noqa: BLE001 -- one optional source
+                log.debug("cron read failed: %s", exc)
+                self._cron, self._cron_reason = [], f"cron could not be read ({exc})"
+            self._cron_at = now
+        return list(self._cron)
 
     def _list_timers(self) -> list[dict[str, object]]:
         """`systemctl list-timers` as it comes: unit, what it activates, and
