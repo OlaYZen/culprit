@@ -75,6 +75,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].disk_latency_ms", "nodes[].net_down", "nodes[].net_up",
             "nodes[].findings", "nodes[].headline", "nodes[].hostname",
             "nodes[].uptime_seconds", "nodes[].process_count", "nodes[].platform",
+            "nodes[].intermittent",
             # Findings active on several nodes at once (one shared cause).
             "shared",
         ],
@@ -373,6 +374,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "nodes[].branch_switch_supported",
             # linux / windows: which agent this is (the badge, the update feed).
             "nodes[].platform",
+            # The operator's word that the machine is not always on: an
+            # offline node with this set is expected off, not a problem.
+            "nodes[].intermittent",
         ],
     },
     "trends": {
