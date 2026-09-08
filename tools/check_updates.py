@@ -107,6 +107,27 @@ def check_remote_version_fetch() -> None:
         registry.refresh_remote_version()
         check("a call after the window elapsed refetches", calls["n"] == 2)
 
+        # The Nodes view's "Check for updates": the half-hour window is for a
+        # background task, not for someone who has just pushed a release. A
+        # few seconds ago is inside that window and outside the button's floor.
+        registry._remote_version_checked -= nodes_mod.FORCE_REFRESH_FLOOR_S + 1
+        before = calls["n"]
+        registry.refresh_remote_version()
+        check("the scheduled check stays inside its window", calls["n"] == before)
+        asked = registry.refresh_remote_version(force=True)
+        check("an explicit check skips that window", calls["n"] == before + 1 and asked is True)
+        asked = registry.refresh_remote_version(force=True)
+        check("but a second one straight away does not: the floor holds",
+              calls["n"] == before + 1 and asked is False)
+        check("... and it reports that it did not ask, which is not the same "
+              "as asking and getting nothing",
+              asked is False and registry._remote_version == "3.2.1")
+        state = registry.remote_version_state()
+        check("the published state carries the version, the branch and when "
+              "it was last actually read",
+              state["linux"] == "3.2.1" and state["branch"] == "main"
+              and isinstance(state["checked_at"], float))
+
         def failing_urlopen(url, timeout=5):  # type: ignore[no-untyped-def]
             calls["n"] += 1
             raise urllib.error.URLError("no route to github")
@@ -118,6 +139,12 @@ def check_remote_version_fetch() -> None:
         check("a fetch failure keeps the last known-good version "
               "(never flips every node's badge off on a blip)",
               registry._remote_version == "3.2.1")
+        stale = registry.remote_version_state()["checked_at"]
+        registry._remote_version_checked = 0.0
+        registry.refresh_remote_version()
+        check("a failure does not freshen the timestamp: the answer on screen "
+              "keeps ageing, as it should",
+              registry.remote_version_state()["checked_at"] == stale)
 
         def malformed_urlopen(url, timeout=5):  # type: ignore[no-untyped-def]
             return _FakeResponse(b'{"not_version": "x"}')

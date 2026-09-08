@@ -383,6 +383,10 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             # The Pulse's last verdict, so the badge, the fleet card and the
             # Nodes row need no second request.
             "nodes[].pulse_status", "nodes[].pulse_severity", "nodes[].pulse_count",
+            # One fact about the host, not one per node: which version the
+            # agents are measured against, and how old that answer is.
+            "published.branch", "published.linux", "published.windows",
+            "published.checked_at", "published.every_seconds",
         ],
     },
     "pulse": {
