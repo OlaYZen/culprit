@@ -1,8 +1,22 @@
 /**
  * Settings.
  *
- * Two rules that pull in the same direction:
+ * One shape for every page, so nothing here has to be learned twice:
  *
+ * - A page is a stack of rule-divided sections (no tiles, no cards — the
+ *   same `section` every other view uses). A section that holds fields lays
+ *   them out in the two-column grid, so a field is the same width on every
+ *   page.
+ * - A page that edits configuration is one form with **one** Save bar stuck
+ *   to the bottom of the viewport ("Save changes", "Reload from server", the
+ *   inline result), the fields scrolling behind it. Enter in any field
+ *   saves. Nothing on such a page applies before Save, which is why every
+ *   boolean is a checkbox and never a switch (uxgoodpatterns: checkboxes
+ *   for grouped selection with a submit step).
+ * - Pages that perform actions rather than edit settings (Account, Users,
+ *   Expected findings) have no Save bar; each action is a plain button next
+ *   to its inputs with its own inline result. The primary button on any
+ *   page is therefore always the Save bar, or absent.
  * - **The Save button is never disabled before submission.** Validation
  *   happens on submit and failures come back as inline messages next to the
  *   offending field, with `aria-invalid` and `aria-describedby` wired up.
@@ -10,13 +24,10 @@
  *   out-of-range value and see why it is wrong. The server is the authority
  *   on the range and returns per-field errors, rendered verbatim.
  *
- * Settings that take effect immediately (history on/off) are toggle switches.
+ * Every field registers itself with its page (`read`, `validate`,
+ * `synced`), and one `savePage` builds the patch from what actually changed,
+ * so a new field is a factory call, never a new save path.
  *
- * The view is split into pages behind a sticky sub-navigation (General,
- * Deployment, Sampling, Account, Network, Notifications, Expected findings)
- * because one long column meant scrolling past the tuning form to reach
- * anything else. Deployment is its own page, second from the left: enrolling
- * a machine is the thing people come here for most.
  * The page is in the hash (`#settings/network`) so it can be linked to and
  * survives a reload; the router hands it to `setPage`.
  */
@@ -25,9 +36,11 @@ import { el, render } from "../util/dom.js";
 import * as fmt from "../util/format.js";
 import { api, store } from "../stream.js";
 import {
-  checkbox, combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonFigures, skeletonSection, subnav, switchControl,
+  checkbox, combobox, confirmAction, emptyState, icons, inlineResult, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav,
 } from "../ui.js";
-import { canAdminister, canOperate, figures, kv, kvs, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, kv, kvs, section, subhead, viewHead } from "./shared.js";
+
+const SAVE_LABEL = "Save changes";
 
 const GROUPS = [
   {
@@ -45,7 +58,7 @@ const GROUPS = [
     title: "History",
     note: "Rolled-up samples on disk, so you can look back at what happened.",
     fields: [
-      ["rollup_seconds_display", "Bucket size", "seconds", null, true],
+      ["rollup_seconds", "Bucket size", "seconds", "Fixed by the host; shown so the numbers below have a scale.", true],
       ["retention_days", "Keep for", "days", "Metric samples and process rollups older than this are pruned. Event entries are kept longer."],
       ["history_top_processes", "Processes per bucket", "count", "How many of the heaviest processes to store per bucket."],
       ["live_window_seconds", "Live chart window", "seconds", "How much history the in-memory ring buffer keeps for the live charts."],
@@ -94,6 +107,17 @@ const GROUPS = [
   },
 ];
 
+const NOTIFY_FIELDS = [
+  ["notify_ntfy_url", "ntfy topic URL", "https://ntfy.sh/<topic>", "Plain-text push to a phone or desktop. Leave blank to switch this channel off."],
+  ["notify_webhook_url", "Webhook URL", "https://…", "Receives a JSON POST per event: node, finding, evidence, culprits, and a text summary."],
+  ["notify_smtp_host", "SMTP server", "host", "Leave blank to switch e-mail off."],
+  ["notify_smtp_port", "SMTP port", "port", "587 for STARTTLS, 465 for implicit TLS, 25 for plain."],
+  ["notify_smtp_user", "SMTP user", "", "Optional."],
+  ["notify_smtp_password", "SMTP password", "", "Stored in config.json; never shown again here."],
+  ["notify_smtp_from", "From address", "address", "Defaults to the SMTP user."],
+  ["notify_smtp_to", "To address", "address", "Where findings are mailed."],
+];
+
 const PAGES = [
   { key: "general", label: "General", icon: icons.sliders },
   { key: "deployment", label: "Deployment", icon: icons.deploy },
@@ -105,188 +129,486 @@ const PAGES = [
   { key: "expected", label: "Expected findings", icon: icons.calendar },
 ];
 
+// Pages that edit configuration get the form + Save bar; the rest act.
+const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications"]);
+
 const ROLE_HINT = {
   viewer: "Read-only: sees every dashboard and history view, no actions.",
   operator: "Viewer, plus process actions (end task, priority, throttle), agent updates, and marking findings as expected.",
   admin: "Operator, plus managing users, agents, and Settings.",
 };
 
+const ROLE_OPTIONS = [
+  { value: "viewer", label: "Viewer", title: ROLE_HINT.viewer },
+  { value: "operator", label: "Operator", title: ROLE_HINT.operator },
+  { value: "admin", label: "Admin", title: ROLE_HINT.admin },
+];
+
 export function createSettings() {
   const root = el("div.view", { dataset: { view: "settings" } });
-  const nodes = {};
-  const inputs = new Map();
   let config = null;
   let limits = {};
   let access = {};
 
   const head = viewHead({
     title: "Settings",
-    lead: "Saved to config.json in the project folder and applied immediately. Host, port and database path need a restart and are not editable here.",
+    lead: "Saved to config.json in the project folder and applied when you save. Host, port and database path need a restart and are not editable here.",
   });
   root.append(head);
 
-  const figSlot = el("div");
-  const togglesSlot = el("div");
-  // Feedback for the immediate switches lives next to them, on their page —
-  // not in the tuning form's summary on another page.
-  const immediateResult = el("div.result");
-  const accountSlot = el("div");
-  const usersSlot = el("div");
-  const trustSlot = el("div");
-  const deploySlot = el("div");
-  // One Save for the whole Deployment page (uxgoodpatterns: one primary
-  // action per page). Two sections each with their own button meant the
-  // bottom one read as the page's Save and quietly ignored the other.
-  const deploySaveSlot = el("div");
-  let deployPatch = () => ({});
-  let updatePatch = () => ({});
-  let updateFieldErrors = () => {};
-  let updateSynced = () => {};
-  const autoUpdateSlot = el("div");
-  const notifySlot = el("div");
-  const expectSlot = el("div");
-  const form = el("form", { novalidate: true });
-  const groupsSlot = el("div.cells.cells--2");
-  form.append(groupsSlot);
-  const summary = el("div.result");
-  const saveButton = el("button.btn.btn--primary", { type: "submit" }, ["Save settings"]);
-  const revertButton = el("button.btn", { type: "button" }, ["Reload from server"]);
-  form.append(el("div.formrow", {
-    style: { position: "sticky", bottom: "0", padding: "12px 0", marginTop: "4px",
-      background: "linear-gradient(transparent, var(--bg) 35%)" },
-  }, [saveButton, revertButton, summary]));
-  const infoRow = el("div.cols.cols--2");
-  const nodesSlot = el("div");
-
-  const pages = {
-    general: el("div.stack", {}, [figSlot, togglesSlot, infoRow]),
-    deployment: el("div.stack", {}, [deploySlot, autoUpdateSlot, deploySaveSlot]),
-    sampling: el("div.stack", {}, [form]),
-    account: el("div.stack", {}, [accountSlot]),
-    users: el("div.stack", {}, [usersSlot]),
-    network: el("div.stack", {}, [trustSlot, nodesSlot]),
-    notifications: el("div.stack", {}, [notifySlot]),
-    expected: el("div.stack", {}, [expectSlot]),
+  /* ── Pages ───────────────────────────────────────────────────────── */
+  // Every section renders into a slot so it can skeleton independently; the
+  // slots are fixed at construction and only their contents change.
+  const slots = {
+    behaviour: el("div"), info: el("div.cols.cols--2"),
+    deploy: el("div"), autoUpdate: el("div"),
+    sampling: el("div.stack"),
+    account: el("div"), users: el("div"),
+    trust: el("div"), nodes: el("div"),
+    notify: el("div"), delivery: el("div"),
+    expect: el("div"),
   };
-  let page = "general";
+  const LAYOUT = {
+    general: [slots.behaviour, slots.info],
+    deployment: [slots.deploy, slots.autoUpdate],
+    sampling: [slots.sampling],
+    account: [slots.account],
+    users: [slots.users],
+    network: [slots.trust, slots.nodes],
+    notifications: [slots.notify, slots.delivery],
+    expected: [slots.expect],
+  };
+  const pages = {};
+  for (const [key, children] of Object.entries(LAYOUT)) {
+    const page = { key, fields: new Map(), after: null, bar: null };
+    if (SAVES.has(key)) {
+      page.node = el("form.stack", { novalidate: true }, children);
+      page.bar = saveBar();
+      page.bar.node.hidden = true;
+      page.node.append(page.bar.node);
+      page.node.addEventListener("submit", (event) => { event.preventDefault(); savePage(page); });
+    } else {
+      page.node = el("div.stack", {}, children);
+    }
+    pages[key] = page;
+  }
+
+  /** The one save affordance: Save, Reload from server, the inline result,
+   *  stuck to the bottom of the scroll viewport with the page's fields
+   *  scrolling behind it. A direct child of the page so `sticky` has the
+   *  whole page as its containing block. */
+  function saveBar() {
+    const result = el("div.result");
+    const button = el("button.btn.btn--primary", { type: "submit" }, [SAVE_LABEL]);
+    const revert = el("button.btn", { type: "button" }, ["Reload from server"]);
+    revert.addEventListener("click", () => { result.replaceChildren(); load(); });
+    return { node: el("div.savebar", {}, [button, revert, result]), button, result };
+  }
+
+  let current = "general";
   // The tabs only write the hash; the router reads it back into setPage, so
   // Back / Forward and a pasted link all go through one path.
-  const tabs = subnav({ label: "Settings pages", items: PAGES, value: page, onChange: (key) => { location.hash = `#settings/${key}`; } });
-  root.append(tabs, ...Object.values(pages));
+  const tabs = subnav({ label: "Settings pages", items: PAGES, value: current, onChange: (key) => { location.hash = `#settings/${key}`; } });
+  root.append(tabs, ...Object.values(pages).map((p) => p.node));
   root.setPage = (key) => {
     if (key && !pages[key]) return;
-    if (key) page = key;
-    for (const [name, node] of Object.entries(pages)) node.hidden = name !== page;
-    tabs.setValue(page);
+    if (key) current = key;
+    for (const [name, page] of Object.entries(pages)) page.node.hidden = name !== current;
+    tabs.setValue(current);
   };
-  root.setPage(page);
+  root.setPage(current);
 
+  /* ── Field factories ─────────────────────────────────────────────── */
+  // Each returns the node to place and registers the field with its page:
+  // `read()` gives the value to save, `validate()` a message or "", and
+  // `synced()` runs after a successful save. Errors land in `error` under
+  // the input, or in the Save bar when a field has no place for one.
+  function register(page, key, field) {
+    page.fields.set(key, field);
+    if (field.input) field.input.addEventListener("input", () => clearFieldError(field));
+    return field;
+  }
+
+  function fieldRow({ id, label, unit, input, help, error, area = false }) {
+    return el("div.field", {}, [
+      el("label.field__label", { for: id }, [el("span", { text: label }), unit ? el("span.field__unit", { text: unit }) : null]),
+      el(area ? "div.input.input--area" : "div.input", {}, [input]),
+      help ? el("div.field__help", { id: `help-${id}`, text: help }) : null,
+      error || null,
+    ]);
+  }
+
+  function textField(page, key, { label, unit, help, placeholder = "", value, password = false, readonly = false, read = null }) {
+    const id = `set-${key}`;
+    const input = el("input", {
+      type: password ? "password" : "text", id, autocomplete: password ? "new-password" : "off", spellcheck: "false",
+      value: value ?? (config[key] ?? ""), placeholder, "aria-describedby": `help-${id}`,
+    });
+    if (readonly) input.readOnly = true;
+    const error = el("div.field__err", { id: `err-${key}`, hidden: true });
+    if (!readonly) register(page, key, { input, error, read: read || (() => input.value.trim()) });
+    return fieldRow({ id, label, unit, input, help, error });
+  }
+
+  function numberField(page, key, { label, unit, help, readonly = false }) {
+    const id = `set-${key}`;
+    const limit = limits[key];
+    const input = el("input", {
+      type: "text", inputmode: "decimal", id, autocomplete: "off", spellcheck: "false",
+      value: config[key] ?? "", "aria-describedby": `help-${id}`,
+    });
+    if (readonly) input.readOnly = true;
+    const error = el("div.field__err", { id: `err-${key}`, hidden: true });
+    if (!readonly) {
+      register(page, key, {
+        input, error,
+        read: () => Number(input.value.trim()),
+        validate: () => {
+          const raw = input.value.trim();
+          if (raw === "") return "This cannot be empty.";
+          const number = Number(raw);
+          if (!Number.isFinite(number)) return `“${raw}” is not a number.`;
+          if (limit && (number < limit[0] || number > limit[1])) return `Must be between ${formatNumber(limit[0])} and ${formatNumber(limit[1])}.`;
+          return "";
+        },
+      });
+    }
+    const helpText = [help, limit && !readonly ? `Allowed: ${formatNumber(limit[0])} to ${formatNumber(limit[1])}` : null].filter(Boolean).join("  ");
+    return fieldRow({ id, label, unit, input, help: helpText, error });
+  }
+
+  function listField(page, key, { label, unit, help, placeholder }) {
+    const id = `set-${key}`;
+    const input = el("textarea", { id, rows: 3, placeholder, spellcheck: "false", autocomplete: "off", "aria-describedby": `help-${id}` });
+    input.value = (config[key] || []).join("\n");
+    const error = el("div.field__err", { id: `err-${key}`, hidden: true });
+    register(page, key, { input, error, read: () => splitLines(input.value), synced: () => { input.value = (config[key] || []).join("\n"); } });
+    return fieldRow({ id, label, unit, input, help, error, area: true });
+  }
+
+  function boolField(page, key, { label, title, checked, read = null }) {
+    let value = checked ?? !!config[key];
+    const node = checkbox({ label, title, checked: value, onChange: (v) => { value = v; } });
+    register(page, key, { read: read ? () => read(value) : () => value, synced: () => { value = !!config[key]; node.setChecked(value); } });
+    return node;
+  }
+
+  function choiceField(page, key, { label, options }) {
+    let value = config[key];
+    const node = segmented({ label, options, value, onChange: (v) => { value = v; } });
+    register(page, key, { read: () => value, synced: () => { value = config[key]; node.setValue(value); } });
+    return node;
+  }
+
+  /* ── The one save path ───────────────────────────────────────────── */
+  async function savePage(page) {
+    const { bar, fields } = page;
+    bar.result.replaceChildren();
+    const patch = {};
+    let firstBad = null;
+    for (const [key, field] of fields) {
+      clearFieldError(field);
+      const problem = field.validate ? field.validate() : "";
+      if (problem) { markFieldError(field, problem); firstBad = firstBad || field; continue; }
+      const value = field.read();
+      if (!same(value, config[key])) patch[key] = value;
+    }
+    if (firstBad) {
+      inlineResult(bar.result, "Some values need fixing — see the fields.", "error");
+      firstBad.input?.focus();
+      firstBad.input?.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    if (!Object.keys(patch).length) {
+      inlineResult(bar.result, "Nothing changed.", "ok");
+      setTimeout(() => bar.result.replaceChildren(), 2000);
+      return;
+    }
+    setBusy(bar.button, true, "Saving…");
+    try {
+      const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
+      config = payload.config;
+      // Views that read preferences (container labels) listen for this.
+      store.ingest({ config: payload.config }, ["config"]);
+      for (const field of fields.values()) field.synced?.();
+      page.after?.(patch);
+      const n = Object.keys(patch).length;
+      inlineResult(bar.result, `Saved ${n} change${n === 1 ? "" : "s"}.`, "ok");
+    } catch (error) {
+      const fieldErrors = error.payload?.field_errors || {};
+      const loose = [];
+      let focused = false;
+      for (const [key, message] of Object.entries(fieldErrors)) {
+        const field = fields.get(key);
+        if (field?.error) {
+          markFieldError(field, message);
+          if (!focused) { field.input?.focus(); focused = true; }
+        } else {
+          loose.push(`${key}: ${message}`);
+        }
+      }
+      const placed = Object.keys(fieldErrors).length - loose.length;
+      inlineResult(bar.result, loose.length ? loose.join("; ") : placed ? "Not saved — see the fields." : error.message, "error");
+    } finally {
+      setBusy(bar.button, false, SAVE_LABEL);
+    }
+  }
+
+  /* ── Loading ─────────────────────────────────────────────────────── */
   async function load() {
     head.setPending(true);
-    pendingSlot(figSlot, skeletonFigures(6));
-    pendingSlot(togglesSlot, skeletonSection("Immediate settings", 2));
-    pendingSlot(accountSlot, skeletonSection("Account", 4));
-    pendingSlot(usersSlot, skeletonSection("Users", 4));
-    pendingSlot(trustSlot, skeletonSection("Network trust", 5));
-    pendingSlot(deploySlot, skeletonSection("Agent deployment", 4));
-    pendingSlot(autoUpdateSlot, skeletonSection("Automatic agent updates", 2));
-    pendingSlot(notifySlot, skeletonSection("Notifications", 6));
-    pendingSlot(expectSlot, skeletonSection("Expected findings", 3));
-    if (!groupsSlot.childElementCount) {
-      pendingSlot(groupsSlot, el("div", { style: { display: "contents" } },
-        GROUPS.map((g) => skeletonSection(g.title, g.fields.length * 2))));
+    for (const page of Object.values(pages)) {
+      page.fields.clear();
+      if (page.bar) { page.bar.node.hidden = true; page.bar.result.replaceChildren(); }
     }
-    pendingSlot(infoRow, el("div", { style: { display: "contents" } }, [
-      skeletonSection("About this tool", 6), skeletonSection("Sampler cost", 4),
-    ]));
-    pendingSlot(nodesSlot, skeletonSection("Nodes and access", 3));
+    pendingSlot(slots.behaviour, skeletonSection("Behaviour", 3));
+    pendingSlot(slots.info, el("div", { style: { display: "contents" } }, [skeletonSection("About this tool", 6), skeletonSection("Sampler cost", 4)]));
+    pendingSlot(slots.deploy, skeletonSection("Agent deployment", 4));
+    pendingSlot(slots.autoUpdate, skeletonSection("Automatic agent updates", 3));
+    if (!slots.sampling.childElementCount) {
+      pendingSlot(slots.sampling, el("div", { style: { display: "contents" } }, GROUPS.map((g) => skeletonSection(g.title, g.fields.length))));
+    }
+    pendingSlot(slots.account, skeletonSection("Account", 4));
+    pendingSlot(slots.users, skeletonSection("Users", 4));
+    pendingSlot(slots.trust, skeletonSection("Network trust", 5));
+    pendingSlot(slots.nodes, skeletonSection("Nodes and access", 3));
+    pendingSlot(slots.notify, skeletonSection("Notifications", 6));
+    pendingSlot(slots.delivery, skeletonSection("Delivery", 3));
+    pendingSlot(slots.expect, skeletonSection("Expected findings", 3));
     try {
       const payload = await api("/api/settings");
       config = payload.config;
       limits = payload.limits || {};
       access = payload.access || {};
-      renderForm();
-      renderToggles();
+      renderBehaviour();
+      renderInfo();
+      renderDeploy();
+      renderAutoUpdate();
+      renderSampling();
       renderAccount();
       renderUsers();
       renderTrust();
-      renderDeploy();
-      renderAutoUpdate();
-      renderDeploySave();
+      renderNodes();
       renderNotify();
       renderExpectations();
-      renderInfo();
-      renderNodes();
-      renderStats();
+      for (const page of Object.values(pages)) if (page.bar) page.bar.node.hidden = false;
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, usersSlot, trustSlot, deploySlot, autoUpdateSlot, deploySaveSlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
-      readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
+      for (const slot of Object.values(slots)) readySlot(slot, []);
+      readySlot(slots.behaviour, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
 
-  function renderStats() {
-    if (!config) return;
-    readySlot(figSlot, figures([
-      { label: "Fast tier", value: `${config.interval_fast}s`, hint: "cpu, memory, gpu, disk, net" },
-      { label: "Process tier", value: `${config.interval_proc}s`, hint: "the full process table" },
-      { label: "Slow tier", value: `${config.interval_slow}s`, hint: "units, mounts, sync" },
-      { label: "Event tier", value: `${config.interval_events}s`, hint: "journal, crash files" },
-      { label: "History", value: config.persist_history ? `${config.retention_days} days` : "off",
-        tone: config.persist_history ? "ok" : null, hint: config.history_enabled ? "recording" : "not writing" },
-      { label: "Process actions", value: config.allow_process_actions ? "enabled" : "read-only",
-        hint: config.allow_process_actions ? "end task, priority" : "monitoring only" },
-    ]));
-  }
-
-  function renderToggles() {
-    readySlot(togglesSlot, section({
-      title: "Immediate settings",
-      body: el("div.row", { style: { gap: "22px", flexWrap: "wrap" } }, [
-        switchControl({ label: "Record history to disk", checked: config.persist_history,
-          title: "Writes rolled-up samples to a local SQLite file", onChange: (v) => applyImmediate({ persist_history: v }) }),
-        switchControl({ label: "Allow process actions", checked: config.allow_process_actions,
-          title: "Enables End task and priority changes from the process detail", onChange: (v) => applyImmediate({ allow_process_actions: v }) }),
-        switchControl({ label: "Group processes as a tree by default", checked: config.tree_grouping,
-          onChange: (v) => applyImmediate({ tree_grouping: v }) }),
-        switchControl({ label: "Open a browser on start", checked: config.open_browser,
-          onChange: (v) => applyImmediate({ open_browser: v }) }),
-        switchControl({ label: "Label containers by name", checked: (config.ui || {}).container_label !== "id",
-          title: "On: \"docker: portainer\". Off: \"docker: f566c851aa3c\" (the id). Names need the agent to read the runtime's socket; otherwise the id shows either way",
-          onChange: (v) => applyImmediate({ ui: { ...(config.ui || {}), container_label: v ? "name" : "id" } }) }),
-        immediateResult,
+  /* ── General ─────────────────────────────────────────────────────── */
+  function renderBehaviour() {
+    const page = pages.general;
+    page.after = () => renderInfo();
+    readySlot(slots.behaviour, section({
+      title: "Behaviour",
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [el("div.checkgroup", {}, [
+          boolField(page, "persist_history", { label: "Record history to disk", title: "Writes rolled-up samples to a local SQLite file" }),
+          boolField(page, "allow_process_actions", { label: "Allow process actions", title: "Enables End task, priority, throttle and unit actions on agents" }),
+          boolField(page, "tree_grouping", { label: "Group processes as a tree by default" }),
+        ])]),
+        el("div", {}, [el("div.checkgroup", {}, [
+          boolField(page, "open_browser", { label: "Open a browser on start" }),
+          boolField(page, "ui", {
+            label: "Label containers by name",
+            title: "On: \"docker: portainer\". Off: \"docker: f566c851aa3c\" (the id). Names need the agent to read the runtime's socket; otherwise the id shows either way",
+            checked: (config.ui || {}).container_label !== "id",
+            read: (on) => ({ ...(config.ui || {}), container_label: on ? "name" : "id" }),
+          }),
+        ])]),
       ]),
-      foot: "Switches rather than checkboxes because they take effect the moment you flip them — there is nothing to submit.",
+      foot: "Applied when you save. Process actions are refused by the agent as well unless it was installed allowing them.",
     }));
   }
 
+  let costNode = null;
+  function renderInfo() {
+    const state = store.state;
+    const system = state.system || {};
+    costNode = el("div");
+    readySlot(slots.info, [
+      section({
+        title: "About this tool",
+        body: kvs([
+          kv("Version", config.version ? `v${config.version}` : fmt.dash, { mono: true }),
+          kv("Configuration file", "config.json", { mono: true }),
+          kv("History database", config.history_enabled ? "data/culprit.db" : "disabled", { mono: true }),
+          kv("History error", config.history_error || "none", { tone: config.history_error ? "crit" : "ok" }),
+          kv("Running as root", state.elevated ? "yes" : "no (by design)", { tone: state.elevated ? null : "ok" }),
+          kv("Python", system.python || fmt.dash, { mono: true }),
+          kv("Server PID", String(system.pid ?? fmt.dash), { mono: true }),
+        ]),
+      }),
+      section({
+        title: "Sampler cost", body: costNode,
+        foot: "Measured time for the last sample of each tier. If a tier's cost approaches its interval, raise the interval on the Sampling page.",
+      }),
+    ]);
+    updateCost();
+  }
+
+  function updateCost() {
+    if (!costNode) return;
+    const timings = store.state.timings || {};
+    const errors = store.state.errors || {};
+    render(costNode, kvs([
+      ["fast", "interval_fast"], ["proc", "interval_proc"], ["slow", "interval_slow"], ["events", "interval_events"],
+    ].map(([tier, key]) => {
+      const cost = timings[tier];
+      const interval = (config?.[key] ?? 1) * 1000;
+      const ratio = cost && interval ? (cost / interval) * 100 : 0;
+      return kv(`${tier} tier`, cost === undefined ? fmt.dash : `${fmt.ms(cost)}  (${ratio.toFixed(1)}% of its interval)`,
+        { mono: true, tone: ratio > 60 ? "crit" : ratio > 30 ? "warn" : "ok" });
+    }).concat(Object.entries(errors).map(([tier, message]) => kv(`${tier} error`, fmt.clip(message, 80), { tone: "crit" })))));
+  }
+
+  /* ── Deployment ──────────────────────────────────────────────────── */
+  function renderDeploy() {
+    const page = pages.deployment;
+    const preview = el("code.code");
+    const hostRow = textField(page, "deploy_host", {
+      label: "Host address agents report to", unit: "URL or IP:port", placeholder: window.location.host,
+      help: "The address the deploy command tells an agent to POST reports to. Leave blank to use the address you reached this dashboard on.",
+    });
+    const cmdRow = textField(page, "agent_command", {
+      label: "Runner command", unit: "prepended to the command", placeholder: "./agent.sh", value: config.agent_command || "./agent.sh",
+      read: () => cmdRow.querySelector("input").value.trim() || "./agent.sh",
+      help: "What runs the Linux agent bundle. Use “sudo ./agent.sh” so the agent installs as a system service running as root, which unlocks full port and process attribution; plain ./agent.sh makes a user service. The Windows command (.\\agent.ps1) is fixed and shown next to it.",
+    });
+    const hostInput = hostRow.querySelector("input");
+    const cmdInput = cmdRow.querySelector("input");
+    function updatePreview() {
+      let host = hostInput.value.trim() || `${window.location.protocol}//${window.location.host}`;
+      if (host && !host.includes("://")) host = `http://${host}`;
+      preview.textContent = `${cmdInput.value.trim() || "./agent.sh"} ${host} <token>`;
+    }
+    hostInput.addEventListener("input", updatePreview);
+    cmdInput.addEventListener("input", updatePreview);
+    updatePreview();
+    readySlot(slots.deploy, section({
+      title: "Agent deployment",
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [hostRow, cmdRow]),
+        el("div", {}, [subhead("Deploy command preview"), preview]),
+      ]),
+      foot: "This is the copy-paste command the Nodes view shows when you enroll or rotate an agent. Changing it here does not affect agents already running.",
+    }));
+  }
+
+  function renderAutoUpdate() {
+    const page = pages.deployment;
+    const enabled = boolField(page, "auto_update_enabled", { label: "Automatically update capable agents once a day" });
+    const hourRow = numberField(page, "auto_update_hour", { label: "At hour", unit: "0-23, this host's local time" });
+    // The branch is picked from what the agent repository actually has (the
+    // host's mirror, demo left out); only a host without a mirror gets a
+    // typed name. The field's `read` follows whichever control is showing.
+    let branchChoice = String(config.agent_update_branch || "main");
+    const branchInput = el("input", {
+      type: "text", id: "set-agent_update_branch", spellcheck: "false", autocomplete: "off",
+      value: branchChoice, placeholder: "main", "aria-label": "Branch of the agent repository agents update from",
+    });
+    const branchSlot = el("div.input", {}, [branchInput]);
+    const branchHelp = el("div.field__help", { id: "help-set-agent_update_branch", text: "Loading branches…" });
+    const branchError = el("div.field__err", { id: "err-agent_update_branch", hidden: true });
+    let picked = false;
+    const branchField = register(page, "agent_update_branch", {
+      input: branchInput, error: branchError,
+      read: () => (picked ? branchChoice : branchInput.value.trim() || "main"),
+      synced: () => { branchChoice = config.agent_update_branch || "main"; branchInput.value = branchChoice; branchField.picker?.setValue?.(branchChoice); },
+    });
+    (async () => {
+      try {
+        const listing = await api("/api/changelog/branches?refresh=1");
+        if (!listing.available) throw new Error(listing.reason || "no mirror of the agent repository");
+        const names = listing.branches.slice();
+        if (!names.includes(branchChoice)) names.push(branchChoice);
+        const picker = combobox({
+          label: "Branch", allLabel: null, ariaLabel: "Branch of the agent repository agents update from",
+          options: names.map((name) => ({
+            value: name,
+            label: name + (name === "main" ? " · release line" : name === "dev" ? " · unreleased work" : "")
+              + (!listing.branches.includes(name) ? " · not in the repository" : ""),
+          })),
+          value: branchChoice,
+          onChange: (value) => { branchChoice = value; clearFieldError(branchField); },
+        });
+        picker.id = "set-agent_update_branch";
+        picker.classList.add("combo--wide");
+        branchSlot.replaceWith(picker);
+        branchField.picker = picker;
+        picked = true;
+        branchHelp.textContent = `${listing.branches.length} branch${listing.branches.length === 1 ? "" : "es"} in the agent repository`
+          + (listing.stale_reason ? ` (list may be stale: ${listing.stale_reason})` : "")
+          + (listing.hidden?.length ? `; ${listing.hidden.join(", ")} hidden` : "") + ".";
+      } catch (err) {
+        branchHelp.textContent = `Branches could not be listed (${err.message}); type the name.`;
+      }
+    })();
+    readySlot(slots.autoUpdate, section({
+      title: "Automatic agent updates",
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [el("div.checkgroup", { style: { marginBottom: "12px" } }, [enabled]), hourRow]),
+        el("div.field", {}, [
+          el("label.field__label", { for: branchInput.id }, [el("span", { text: "Branch" }),
+            el("span.field__unit", { text: "of the agent repository agents follow" })]),
+          branchSlot, branchHelp, branchError,
+        ]),
+      ]),
+      foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
+          + "agents that have reported themselves update-capable and behind the version GitHub publishes for the "
+          + "chosen branch — or on a different branch than it. Every update, manual or scheduled, moves the agent to "
+          + "that branch; Patch notes and the version picker list it. The agent is never told a schedule — only ever "
+          + "told to update now — and never a repository: it only ever pulls from its own origin.",
+    }));
+  }
+
+  /* ── Sampling ────────────────────────────────────────────────────── */
+  function renderSampling() {
+    const page = pages.sampling;
+    page.after = () => renderInfo();
+    const sections = GROUPS.map((group) => {
+      const columns = [el("div"), el("div")];
+      const half = Math.ceil(group.fields.length / 2);
+      group.fields.forEach(([key, label, unit, help, readonly], index) => {
+        columns[index < half ? 0 : 1].append(numberField(page, key, { label, unit, help, readonly }));
+      });
+      const body = el("div");
+      if (group.note) body.append(el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" }, text: group.note }));
+      body.append(el("div.cols.cols--2", {}, columns));
+      return section({ title: group.title, body });
+    });
+    readySlot(slots.sampling, sections);
+  }
+
+  /* ── Account ─────────────────────────────────────────────────────── */
   /** The signed-in account. Never rebuilt from a live update while it is
    *  being filled in; `force` is for deliberate re-seeds after a rename. */
   function renderAccount(force = false) {
-    if (!force && (accountSlot.contains(document.activeElement)
-        || [...accountSlot.querySelectorAll("input")].some((i) => i.value && i.value !== i.getAttribute("value")))) {
+    if (!force && (slots.account.contains(document.activeElement)
+        || [...slots.account.querySelectorAll("input")].some((i) => i.value && i.value !== i.getAttribute("value")))) {
       return;
     }
     const auth = store.state.auth || {};
     if (!auth.enabled || !auth.username) {
-      readySlot(accountSlot, section({
+      readySlot(slots.account, section({
         title: "Account",
         body: emptyState("Authentication is off", "No dashboard users exist, so there is no account to manage."),
       }));
       return;
     }
     const username = auth.username;
-    const nameInput = el("input", { type: "text", id: "acct-username", value: username, autocomplete: "off", spellcheck: "false", "aria-label": "New username" });
-    const namePw = el("input", { type: "password", id: "acct-name-pw", placeholder: "current password", autocomplete: "current-password", "aria-label": "Current password" });
+    const nameInput = el("input", { type: "text", id: "acct-username", value: username, autocomplete: "off", spellcheck: "false" });
+    const namePw = el("input", { type: "password", id: "acct-name-pw", autocomplete: "current-password" });
     const nameResult = el("div.result");
-    const nameBtn = el("button.btn.btn--sm", { type: "button" }, ["Rename account"]);
+    const nameBtn = el("button.btn", { type: "button" }, ["Rename account"]);
     nameBtn.addEventListener("click", async () => {
       const next = nameInput.value.trim();
-      if (!next || next === username) {
-        inlineResult(nameResult, "Enter a different username.", "error");
-        return;
-      }
+      if (!next || next === username) { inlineResult(nameResult, "Enter a different username.", "error"); return; }
       setBusy(nameBtn, true, "Renaming…");
       nameResult.replaceChildren();
       try {
@@ -304,11 +626,11 @@ export function createSettings() {
       setBusy(nameBtn, false, "Rename account");
     });
 
-    const curPw = el("input", { type: "password", id: "acct-cur-pw", placeholder: "current password", autocomplete: "current-password", "aria-label": "Current password" });
-    const newPw = el("input", { type: "password", id: "acct-new-pw", placeholder: "new password (min 8)", autocomplete: "new-password", "aria-label": "New password" });
-    const confPw = el("input", { type: "password", id: "acct-conf-pw", placeholder: "confirm new password", autocomplete: "new-password", "aria-label": "Confirm new password" });
+    const curPw = el("input", { type: "password", id: "acct-cur-pw", autocomplete: "current-password" });
+    const newPw = el("input", { type: "password", id: "acct-new-pw", autocomplete: "new-password" });
+    const confPw = el("input", { type: "password", id: "acct-conf-pw", autocomplete: "new-password" });
     const pwResult = el("div.result");
-    const pwBtn = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Update password"]);
+    const pwBtn = el("button.btn", { type: "button" }, ["Update password"]);
     pwBtn.addEventListener("click", async () => {
       if (newPw.value.length < 8) { inlineResult(pwResult, "New password must be at least 8 characters.", "error"); return; }
       if (newPw.value !== confPw.value) { inlineResult(pwResult, "New passwords do not match.", "error"); return; }
@@ -326,35 +648,34 @@ export function createSettings() {
       setBusy(pwBtn, false, "Update password");
     });
 
-    const stack = (children) => el("div", { style: { display: "flex", flexDirection: "column", gap: "8px", maxWidth: "420px" } }, children);
-    readySlot(accountSlot, section({
+    readySlot(slots.account, section({
       title: "Account", meta: `signed in as ${username}`,
       body: el("div.cols.cols--2", {}, [
         el("div", {}, [
           subhead("Change username"),
-          stack([el("div.input", {}, [nameInput]), el("div.input", {}, [namePw]), el("div.row", {}, [nameBtn, nameResult])]),
+          fieldRow({ id: nameInput.id, label: "Username", input: nameInput }),
+          fieldRow({ id: namePw.id, label: "Current password", unit: "to confirm", input: namePw }),
+          el("div.formrow", { style: { marginTop: "12px" } }, [nameBtn, nameResult]),
         ]),
         el("div", {}, [
           subhead("Change password"),
-          stack([el("div.input", {}, [curPw]), el("div.input", {}, [newPw]), el("div.input", {}, [confPw]), el("div.row", {}, [pwBtn, pwResult])]),
+          fieldRow({ id: curPw.id, label: "Current password", input: curPw }),
+          fieldRow({ id: newPw.id, label: "New password", unit: "at least 8 characters", input: newPw }),
+          fieldRow({ id: confPw.id, label: "Confirm new password", input: confPw }),
+          el("div.formrow", { style: { marginTop: "12px" } }, [pwBtn, pwResult]),
         ]),
       ]),
       foot: "Both changes require your current password. Renaming re-issues your session automatically — you stay signed in.",
     }));
   }
 
-  const ROLE_OPTIONS = [
-    { value: "viewer", label: "Viewer", title: ROLE_HINT.viewer },
-    { value: "operator", label: "Operator", title: ROLE_HINT.operator },
-    { value: "admin", label: "Admin", title: ROLE_HINT.admin },
-  ];
-
+  /* ── Users ───────────────────────────────────────────────────────── */
   /** Manage *other* accounts. Admin-only, both here (the tab still renders
    *  for every role, honestly, rather than vanishing) and on the server --
    *  a hidden control here would only be convenience, never the real gate. */
   async function renderUsers() {
     if (!canAdminister()) {
-      readySlot(usersSlot, section({
+      readySlot(slots.users, section({
         title: "Users",
         body: emptyState("Admin access required",
           `Your account is ${store.state.auth?.role || "not signed in"} — only an admin can see or manage other users.`),
@@ -366,27 +687,24 @@ export function createSettings() {
       const payload = await api("/api/users");
       list = payload.users || [];
     } catch (error) {
-      readySlot(usersSlot, section({ title: "Users", body: emptyState("Could not load", error.message) }));
+      readySlot(slots.users, section({ title: "Users", body: emptyState("Could not load", error.message) }));
       return;
     }
     const me = store.state.auth?.username;
 
-    const nameInput = el("input", { type: "text", placeholder: "username", autocomplete: "off", spellcheck: "false", "aria-label": "New username" });
-    const pwInput = el("input", { type: "password", placeholder: "password (min 8)", autocomplete: "new-password", "aria-label": "New user's password" });
+    const nameInput = el("input", { type: "text", id: "user-new-name", autocomplete: "off", spellcheck: "false" });
+    const pwInput = el("input", { type: "password", id: "user-new-pw", autocomplete: "new-password" });
     let newRole = "viewer";
     const roleSeg = segmented({ label: "Role", options: ROLE_OPTIONS, value: newRole, onChange: (v) => { newRole = v; } });
     const addResult = el("div.result");
-    const addBtn = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Add user"]);
+    const addBtn = el("button.btn", { type: "button" }, ["Add user"]);
     addBtn.addEventListener("click", async () => {
       const username = nameInput.value.trim();
       if (!username) { inlineResult(addResult, "Give the user a name first.", "error"); return; }
       if (pwInput.value.length < 8) { inlineResult(addResult, "Password must be at least 8 characters.", "error"); return; }
       setBusy(addBtn, true, "Adding…");
       try {
-        await api("/api/users", {
-          method: "POST",
-          body: JSON.stringify({ username, password: pwInput.value, role: newRole }),
-        });
+        await api("/api/users", { method: "POST", body: JSON.stringify({ username, password: pwInput.value, role: newRole }) });
         nameInput.value = ""; pwInput.value = ""; newRole = "viewer"; roleSeg.setValue("viewer");
         inlineResult(addResult, `User '${username}' created.`, "ok");
         renderUsers();
@@ -399,22 +717,23 @@ export function createSettings() {
     const table = el("table.tbl.tbl--tight");
     table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>";
     const tbody = el("tbody");
+    const rowResult = el("div.result");
     for (const user of list) {
       const isSelf = user.username === me;
       const seg = segmented({
-        label: `Role for ${user.username}`, options: ROLE_OPTIONS, value: user.role,
+        options: ROLE_OPTIONS, value: user.role,
         onChange: async (role) => {
           try {
-            await api(`/api/users/${encodeURIComponent(user.username)}/role`, {
-              method: "PUT", body: JSON.stringify({ role }),
-            });
+            await api(`/api/users/${encodeURIComponent(user.username)}/role`, { method: "PUT", body: JSON.stringify({ role }) });
+            inlineResult(rowResult, `${user.username} is now ${role}.`, "ok");
             if (isSelf) renderUsers(); // our own role changed -- re-render to reflect it everywhere
           } catch (error) {
             seg.setValue(user.role);
-            inlineResult(addResult, `Could not change '${user.username}': ${error.message}`, "error");
+            inlineResult(rowResult, `Could not change '${user.username}': ${error.message}`, "error");
           }
         },
       });
+      seg.setAttribute("aria-label", `Role for ${user.username}`);
       const remove = el("button.btn.btn--sm", {
         type: "button", disabled: isSelf,
         title: isSelf ? "Sign in as another admin to remove your own account" : "Remove this user",
@@ -440,67 +759,31 @@ export function createSettings() {
     }
     table.append(tbody);
 
-    readySlot(usersSlot, section({
+    readySlot(slots.users, section({
       title: "Users", meta: `${list.length} account${list.length === 1 ? "" : "s"}`,
-      body: el("div.stack", {}, [
-        el("div.formrow", {}, [el("div.input", {}, [nameInput]), el("div.input", {}, [pwInput]), roleSeg, addBtn, addResult]),
+      body: el("div", {}, [
         el("div.tblwrap", {}, [table]),
+        el("div.formrow", { style: { marginTop: "8px" } }, [rowResult]),
+        subhead("Add a user"),
+        el("div.cols.cols--2", {}, [
+          fieldRow({ id: nameInput.id, label: "Username", input: nameInput }),
+          fieldRow({ id: pwInput.id, label: "Password", unit: "at least 8 characters", input: pwInput }),
+        ]),
+        el("div.formrow", { style: { marginTop: "12px" } }, [roleSeg, addBtn, addResult]),
       ]),
-      foot: "A role change or removal takes effect on that account's next request. Culprit always keeps at least one admin, "
-          + "so the last one cannot be demoted or removed.",
+      foot: "A role change applies as soon as you pick it and takes effect on that account's next request. Culprit always keeps "
+          + "at least one admin, so the last one cannot be demoted or removed.",
     }));
   }
 
+  /* ── Network ─────────────────────────────────────────────────────── */
   /** Which network paths the host believes. Reverse proxies are refused
    *  until declared here; the Host allow-list is opt-in because a wrong one
    *  locks the operator out. The panel shows how *this* request arrived, so
    *  what you type has something concrete to match — and the server refuses
    *  a save that would cut off the connection making it. */
   function renderTrust() {
-    const area = (key, placeholder, label) => el("textarea", {
-      id: `set-${key}`, rows: 3, placeholder, spellcheck: "false", autocomplete: "off",
-      "aria-label": label, "aria-describedby": `help-set-${key}`,
-    });
-    const proxies = area("trusted_proxies", "127.0.0.1\n10.0.0.0/8", "Trusted proxies");
-    const hosts = area("trusted_hosts", "dash.example.com\n*.lan", "Trusted host names");
-    const seed = () => {
-      proxies.value = (config.trusted_proxies || []).join("\n");
-      hosts.value = (config.trusted_hosts || []).join("\n");
-    };
-    seed();
-    const entries = {
-      trusted_proxies: { input: proxies, error: el("div.field__err", { id: "err-trusted_proxies", hidden: true }) },
-      trusted_hosts: { input: hosts, error: el("div.field__err", { id: "err-trusted_hosts", hidden: true }) },
-    };
-    for (const entry of Object.values(entries)) entry.input.addEventListener("input", () => clearFieldError(entry));
-    const result = el("div.result");
-    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save network trust"]);
-    save.addEventListener("click", async () => {
-      setBusy(save, true, "Saving…");
-      result.replaceChildren();
-      for (const entry of Object.values(entries)) clearFieldError(entry);
-      try {
-        const payload = await api("/api/settings", {
-          method: "PUT",
-          body: JSON.stringify({ trusted_proxies: splitLines(proxies.value), trusted_hosts: splitLines(hosts.value) }),
-        });
-        config = payload.config;
-        seed();
-        inlineResult(result, "Saved — applies from the next request.", "ok");
-        section_.metaNode.textContent = trustMeta();
-      } catch (error) {
-        const fieldErrors = error.payload?.field_errors || {};
-        let focused = false;
-        for (const [key, message] of Object.entries(fieldErrors)) {
-          if (!entries[key]) continue;
-          markFieldError(entries[key], message);
-          if (!focused) { entries[key].input.focus(); focused = true; }
-        }
-        inlineResult(result, Object.keys(fieldErrors).length ? "Not saved — see the fields." : error.message, "error");
-      }
-      setBusy(save, false, "Save network trust");
-    });
-
+    const page = pages.network;
     const trustMeta = () => {
       const n = (config.trusted_proxies || []).length;
       return n ? `${n} trusted ${n === 1 ? "proxy" : "proxies"}` : "no reverse proxy declared";
@@ -515,243 +798,106 @@ export function createSettings() {
       kv("Host check", hostCount ? `on — ${hostCount} ${hostCount === 1 ? "name" : "names"}` : "off — any Host accepted",
         { tone: hostCount ? "ok" : null }),
     ];
-    if (access.runtime_proxies?.length) {
-      rows.push(kv("Added for this run", access.runtime_proxies.join(", "), { mono: true, tone: "info" }));
-    }
-    if (access.always_hosts?.length) {
-      rows.push(kv("Always accepted", access.always_hosts.join(", "), { mono: true }));
-    }
-    const section_ = section({
+    if (access.runtime_proxies?.length) rows.push(kv("Added for this run", access.runtime_proxies.join(", "), { mono: true, tone: "info" }));
+    if (access.always_hosts?.length) rows.push(kv("Always accepted", access.always_hosts.join(", "), { mono: true }));
+    const node = section({
       title: "Network trust", meta: trustMeta(),
       body: el("div.cols.cols--2", {}, [
         el("div", {}, [
-          fieldRow({ id: proxies.id, label: "Trusted proxies", unit: "one IP or CIDR per line", input: proxies, area: true, error: entries.trusted_proxies.error,
+          listField(page, "trusted_proxies", {
+            label: "Trusted proxies", unit: "one IP or CIDR per line", placeholder: "127.0.0.1\n10.0.0.0/8",
             help: "Reverse proxies whose X-Forwarded-For / Forwarded headers are honoured, so the login limiter keys on the real client "
                 + "and the session cookie learns it crossed TLS. Empty (the default) refuses any request that arrives with a forwarding "
-                + "header from an undeclared address — with a 400 that says why, rather than quietly ignoring the header." }),
-          fieldRow({ id: hosts.id, label: "Trusted host names", unit: "extra names, one per line", input: hosts, area: true, error: entries.trusted_hosts.error,
+                + "header from an undeclared address — with a 400 that says why, rather than quietly ignoring the header.",
+          }),
+          listField(page, "trusted_hosts", {
+            label: "Trusted host names", unit: "extra names, one per line", placeholder: "dash.example.com\n*.lan",
             help: "The address people type to reach this dashboard (the HTTP Host header): DNS names like dash.example.com or *.lan, "
                 + "without a port. This machine's own IP addresses, host name and loopback always pass and need not be listed. "
-                + "With at least one entry, any other Host is refused, which shuts DNS rebinding. Empty accepts any Host." }),
+                + "With at least one entry, any other Host is refused, which shuts DNS rebinding. Empty accepts any Host.",
+          }),
         ]),
-        el("div", {}, [
-          subhead("This connection"),
-          kvs(rows),
-          el("div.row", { style: { marginTop: "10px" } }, [save, result]),
-        ]),
+        el("div", {}, [subhead("This connection"), kvs(rows)]),
       ]),
       foot: el("span", {}, [
-        "A save that would refuse the very connection making it is rejected, so you cannot lock yourself out from here. ",
+        "Applies from the next request. A save that would refuse the very connection making it is rejected, so you cannot lock yourself out from here. ",
         el("code", { text: "--trust-proxy" }),
         " on the command line adds proxies for one run without saving them — the way in for a host only reachable through one.",
       ]),
     });
-    readySlot(trustSlot, section_);
+    page.after = () => { node.metaNode.textContent = trustMeta(); };
+    readySlot(slots.trust, node);
   }
 
-  function renderDeploy() {
-    const hostInput = el("input", { type: "text", id: "set-deploy_host", value: config.deploy_host || "", placeholder: window.location.host,
-      autocomplete: "off", spellcheck: "false", "aria-label": "Host address agents report to" });
-    const cmdInput = el("input", { type: "text", id: "set-agent_command", value: config.agent_command || "./agent.sh", placeholder: "./agent.sh",
-      autocomplete: "off", spellcheck: "false", "aria-label": "Agent runner command" });
-    const preview = el("code.code");
-    deployPatch = () => ({ deploy_host: hostInput.value.trim(), agent_command: cmdInput.value.trim() || "./agent.sh" });
-
-    function updatePreview() {
-      let host = hostInput.value.trim() || `${window.location.protocol}//${window.location.host}`;
-      if (host && !host.includes("://")) host = `http://${host}`;
-      preview.textContent = `${cmdInput.value.trim() || "./agent.sh"} ${host} <token>`;
+  function renderNodes() {
+    const state = store.state;
+    const list = state.nodes || [];
+    const auth = state.auth || {};
+    const rows = [kv("Authentication", auth.enabled ? `on — signed in as ${auth.username || "?"}` : "off (no users; loopback only)",
+      { tone: auth.enabled ? "ok" : "warn" })];
+    if (!list.length) rows.push(kv("Agents", "none enrolled"));
+    for (const node of list) {
+      const seen = node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported";
+      const status = node.enabled === false ? "revoked" : node.online ? "online" : "offline";
+      rows.push(kv(node.name, `${status} · ${seen}${node.platform === "windows" ? " · Windows" : ""}${node.hostname ? ` · ${node.hostname}` : ""}${node.agent_version ? ` · agent v${node.agent_version}` : ""}`,
+        { tone: node.enabled === false ? null : node.online ? "ok" : "crit" }));
     }
-    hostInput.addEventListener("input", updatePreview);
-    cmdInput.addEventListener("input", updatePreview);
-    updatePreview();
-
-    readySlot(deploySlot, section({
-      title: "Agent deployment",
-      body: el("div.cols.cols--2", {}, [
-        el("div", {}, [
-          fieldRow({ id: hostInput.id, label: "Host address agents report to", unit: "URL or IP:port", input: hostInput,
-            help: "The address the deploy command tells an agent to POST reports to. Leave blank to use the address you reached this dashboard on." }),
-          fieldRow({ id: cmdInput.id, label: "Runner command", unit: "prepended to the command", input: cmdInput,
-            help: "What runs the Linux agent bundle. Use “sudo ./agent.sh” so the agent installs as a system service running as root, which unlocks full port and process attribution; plain ./agent.sh makes a user service. The Windows command (.\\agent.ps1) is fixed and shown next to it." }),
-        ]),
-        el("div", {}, [
-          subhead("Deploy command preview"),
-          preview,
-        ]),
-      ]),
-      foot: "This is the copy-paste command the Nodes view shows when you enroll or rotate an agent. Changing it here does not affect agents already running.",
+    const foot = el("span");
+    foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view. Dashboard users are the one thing "
+      + "that stays on the CLI (<code>python -m culprit users add &lt;name&gt;</code>) — someone must exist before anyone can sign in to create anyone.";
+    readySlot(slots.nodes, section({
+      title: "Nodes and access", meta: `${list.filter((n) => n.online).length} of ${list.length} online`, body: kvs(rows), foot,
     }));
-  }
-
-  /* ── Automatic agent updates ─────────────────────────────────────── */
-  function renderAutoUpdate() {
-    let enabled = !!config.auto_update_enabled;
-    const hourInput = el("input", {
-      type: "number", id: "set-auto_update_hour", min: 0, max: 23, step: 1,
-      value: String(config.auto_update_hour ?? 3), "aria-label": "Hour to run automatic updates",
-    });
-    const error = el("div.field__err", { id: "err-auto_update_hour", hidden: true });
-    // The branch is picked from what the agent repository actually has (the
-    // host's mirror, demo left out); only a host without a mirror gets a
-    // typed name. `branchValue()` is what Save sends either way.
-    let branchChoice = String(config.agent_update_branch || "main");
-    const branchInput = el("input", {
-      type: "text", id: "set-agent_update_branch", spellcheck: "false", autocomplete: "off",
-      value: branchChoice, placeholder: "main",
-      "aria-label": "Branch of the agent repository agents update from",
-    });
-    const branchSlot = el("div.input", {}, [branchInput]);
-    const branchHelp = el("div.field__help", { id: "help-set-agent_update_branch", text: "Loading branches…" });
-    const branchError = el("div.field__err", { id: "err-agent_update_branch", hidden: true });
-    let branchValue = () => branchInput.value.trim() || "main";
-    (async () => {
-      try {
-        const listing = await api("/api/changelog/branches?refresh=1");
-        if (!listing.available) throw new Error(listing.reason || "no mirror of the agent repository");
-        const names = listing.branches.slice();
-        if (!names.includes(branchChoice)) names.push(branchChoice);
-        const picker = combobox({
-          label: "Branch", allLabel: null, ariaLabel: "Branch of the agent repository agents update from",
-          options: names.map((name) => ({
-            value: name,
-            label: name + (name === "main" ? " · release line" : name === "dev" ? " · unreleased work" : "")
-              + (!listing.branches.includes(name) ? " · not in the repository" : ""),
-          })),
-          value: branchChoice,
-          onChange: (value) => { branchChoice = value; },
-        });
-        picker.id = "set-agent_update_branch";
-        branchSlot.replaceWith(picker);
-        branchValue = () => branchChoice;
-        branchHelp.textContent = `${listing.branches.length} branch${listing.branches.length === 1 ? "" : "es"} in the agent repository`
-          + (listing.stale_reason ? ` (list may be stale: ${listing.stale_reason})` : "")
-          + (listing.hidden?.length ? `; ${listing.hidden.join(", ")} hidden` : "") + ".";
-      } catch (err) {
-        branchHelp.textContent = `Branches could not be listed (${err.message}); type the name.`;
-      }
-    })();
-    updatePatch = () => ({
-      auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value),
-      agent_update_branch: branchValue(),
-    });
-    // Returns the first message so the page's Save can say it next to the
-    // button as well as inline; focuses the offending input.
-    updateFieldErrors = (fieldErrors) => {
-      error.hidden = true;
-      branchError.hidden = true;
-      hourInput.removeAttribute("aria-invalid");
-      branchInput.removeAttribute("aria-invalid");
-      for (const [input, node, key] of [[hourInput, error, "auto_update_hour"], [branchInput, branchError, "agent_update_branch"]]) {
-        if (!fieldErrors[key]) continue;
-        node.textContent = fieldErrors[key];
-        node.hidden = false;
-        input.setAttribute("aria-invalid", "true");
-      }
-      const first = fieldErrors.auto_update_hour || fieldErrors.agent_update_branch;
-      if (first) (fieldErrors.auto_update_hour ? hourInput : branchInput).focus();
-      return first || "";
-    };
-    updateSynced = () => {
-      branchChoice = config.agent_update_branch || "main";
-      branchInput.value = branchChoice;
-    };
-
-    readySlot(autoUpdateSlot, section({
-      title: "Automatic agent updates",
-      body: el("div", {}, [
-        checkbox({ label: "Automatically update capable agents once a day", checked: enabled,
-          onChange: (v) => { enabled = v; } }),
-        fieldRow({ id: hourInput.id, label: "At hour", unit: "0-23, this host's local time", input: hourInput, error }),
-        el("div.field", {}, [
-          el("label.field__label", { for: branchInput.id }, [el("span", { text: "Branch" }),
-            el("span.field__unit", { text: "of the agent repository agents follow" })]),
-          branchSlot, branchHelp, branchError,
-        ]),
-      ]),
-      foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
-          + "agents that have reported themselves update-capable and behind the version GitHub publishes for the "
-          + "chosen branch — or on a different branch than it. Every update, manual or scheduled, moves the agent to "
-          + "that branch; Patch notes and the version picker list it. The agent is never told a schedule — only ever "
-          + "told to update now — and never a repository: it only ever pulls from its own origin.",
-    }));
-  }
-
-  /* ── Deployment page: one Save for both sections ─────────────────── */
-  function renderDeploySave() {
-    const result = el("div.result");
-    const save = el("button.btn.btn--primary", { type: "button" }, ["Save deployment settings"]);
-    save.addEventListener("click", async () => {
-      setBusy(save, true, "Saving…");
-      result.replaceChildren();
-      updateFieldErrors({});
-      try {
-        const payload = await api("/api/settings", {
-          method: "PUT", body: JSON.stringify({ ...deployPatch(), ...updatePatch() }),
-        });
-        config = payload.config;
-        updateSynced();
-        inlineResult(result, "Saved — new tokens use this deploy command.", "ok");
-      } catch (err) {
-        const first = updateFieldErrors(err.payload?.field_errors || {});
-        inlineResult(result, first || err.message, "error");
-      }
-      setBusy(save, false, "Save deployment settings");
-    });
-    readySlot(deploySaveSlot, el("div.formrow", {
-      style: { position: "sticky", bottom: "0", padding: "12px 0", marginTop: "4px",
-        background: "linear-gradient(transparent, var(--bg) 35%)" },
-    }, [save, result]));
   }
 
   /* ── Notifications ───────────────────────────────────────────────── */
-  const NOTIFY_FIELDS = [
-    ["notify_ntfy_url", "ntfy topic URL", "https://ntfy.sh/<topic>", "Plain-text push to a phone or desktop. Leave blank to switch this channel off."],
-    ["notify_webhook_url", "Webhook URL", "https://…", "Receives a JSON POST per event: node, finding, evidence, culprits, and a text summary."],
-    ["notify_smtp_host", "SMTP server", "host", "Leave blank to switch e-mail off."],
-    ["notify_smtp_port", "SMTP port", "port", "587 for STARTTLS, 465 for implicit TLS, 25 for plain."],
-    ["notify_smtp_user", "SMTP user", "", "Optional."],
-    ["notify_smtp_password", "SMTP password", "", "Stored in config.json; never shown again here."],
-    ["notify_smtp_from", "From address", "address", "Defaults to the SMTP user."],
-    ["notify_smtp_to", "To address", "address", "Where findings are mailed."],
-  ];
-
   function renderNotify() {
-    const entries = {};
-    let minSeverity = config.notify_min_severity || "warn";
-    const toggles = { notify_smtp_tls: config.notify_smtp_tls, notify_resolved: config.notify_resolved, notify_offline: config.notify_offline };
+    const page = pages.notifications;
     const columns = [el("div"), el("div")];
     NOTIFY_FIELDS.forEach(([key, label, unit, help], index) => {
-      const isPassword = key === "notify_smtp_password";
-      const input = el("input", {
-        type: isPassword ? "password" : "text", id: `set-${key}`, autocomplete: isPassword ? "new-password" : "off", spellcheck: "false",
-        value: isPassword ? "" : (config[key] ?? ""),
-        placeholder: isPassword ? (config.notify_smtp_password_set ? "unchanged (set)" : "not set") : "",
-        "aria-describedby": `help-set-${key}`,
-      });
-      const error = el("div.field__err", { id: `err-${key}`, hidden: true });
-      entries[key] = { input, error, label };
-      input.addEventListener("input", () => clearFieldError(entries[key]));
-      columns[index < 2 ? 0 : 1].append(fieldRow({ id: `set-${key}`, label, unit, input, help, error }));
+      let row;
+      if (key === "notify_smtp_port") {
+        row = numberField(page, key, { label, unit, help });
+      } else if (key === "notify_smtp_password") {
+        // Write-only: blank means "leave it", which `same("", "")` drops.
+        row = textField(page, key, { label, unit, help, password: true, value: "",
+          placeholder: config.notify_smtp_password_set ? "unchanged (set)" : "not set" });
+        const input = row.querySelector("input");
+        page.fields.get(key).synced = () => {
+          input.value = "";
+          input.placeholder = config.notify_smtp_password_set ? "unchanged (set)" : "not set";
+        };
+      } else {
+        row = textField(page, key, { label, unit, help });
+      }
+      columns[index < 2 ? 0 : 1].append(row);
     });
     columns[0].append(
-      el("div", { style: { marginTop: "14px" } }, [segmented({ label: "Send from", value: minSeverity,
-        options: [{ value: "warn", label: "Warnings up" }, { value: "critical", label: "Critical only" }],
-        onChange: (v) => { minSeverity = v; } })]),
-      // Checkboxes, not switches: nothing here applies until Save notifications.
-      el("div.row", { style: { gap: "14px", marginTop: "14px", flexWrap: "wrap" } }, [
-        checkbox({ label: "Follow up when a finding clears", checked: toggles.notify_resolved, onChange: (v) => { toggles.notify_resolved = v; } }),
-        checkbox({ label: "Tell me when an agent stops reporting", checked: toggles.notify_offline, onChange: (v) => { toggles.notify_offline = v; } }),
+      el("div", { style: { marginTop: "14px" } }, [choiceField(page, "notify_min_severity", { label: "Send from",
+        options: [{ value: "warn", label: "Warnings up" }, { value: "critical", label: "Critical only" }] })]),
+      el("div.checkgroup", { style: { marginTop: "14px" } }, [
+        boolField(page, "notify_resolved", { label: "Follow up when a finding clears" }),
+        boolField(page, "notify_offline", { label: "Tell me when an agent stops reporting" }),
       ]),
     );
-    columns[1].append(el("div", { style: { marginTop: "12px" } }, [
-      checkbox({ label: "STARTTLS", checked: toggles.notify_smtp_tls, title: "Upgrade the SMTP connection to TLS (not used on port 465, which is TLS from the start)",
-        onChange: (v) => { toggles.notify_smtp_tls = v; } }),
+    columns[1].append(el("div.checkgroup", { style: { marginTop: "12px" } }, [
+      boolField(page, "notify_smtp_tls", { label: "STARTTLS", title: "Upgrade the SMTP connection to TLS (not used on port 465, which is TLS from the start)" }),
     ]));
+    readySlot(slots.notify, section({
+      title: "Notifications",
+      meta: config.notify_ntfy_url || config.notify_webhook_url || config.notify_smtp_host ? "configured" : "off",
+      body: el("div", {}, [
+        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" },
+          text: "Culprit pages you on a diagnosis, never on a threshold: a message goes out only once a finding has held for the sustain "
+              + "window, and it carries the node, the evidence and the named culprit. One message per finding while it holds, one more "
+              + "if it turns critical, and a follow-up when it clears. Findings marked as expected are never sent." }),
+        el("div.cols.cols--2", {}, columns),
+      ]),
+      foot: "Only findings are ever sent — never a bare threshold. Save before sending a test: the test uses what is saved.",
+    }));
 
-    const result = el("div.result");
     const statusNode = el("div");
-    const save = el("button.btn.btn--primary", { type: "button" }, ["Save notifications"]);
+    const testResult = el("div.result");
     const test = el("button.btn", { type: "button", title: "Deliver a test message on every configured channel" }, ["Send test"]);
     const renderStatus = async () => {
       try {
@@ -765,56 +911,22 @@ export function createSettings() {
         ]));
       } catch { render(statusNode, el("div.faint.small", { text: "Status unavailable." })); }
     };
-    save.addEventListener("click", async () => {
-      setBusy(save, true, "Saving…");
-      const patch = { notify_min_severity: minSeverity, ...toggles };
-      for (const [key, entry] of Object.entries(entries)) {
-        clearFieldError(entry);
-        patch[key] = key === "notify_smtp_port" ? Number(entry.input.value || 587) : entry.input.value;
-      }
-      try {
-        const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
-        config = payload.config;
-        entries.notify_smtp_password.input.value = "";
-        entries.notify_smtp_password.input.placeholder = config.notify_smtp_password_set ? "unchanged (set)" : "not set";
-        inlineResult(result, "Saved. Only findings are ever sent — never a bare threshold.", "ok");
-        renderStatus();
-      } catch (error) {
-        const fieldErrors = error.payload?.field_errors || {};
-        let focused = false;
-        for (const [key, message] of Object.entries(fieldErrors)) {
-          if (!entries[key]) continue;
-          markFieldError(entries[key], message);
-          if (!focused) { entries[key].input.focus(); focused = true; }
-        }
-        inlineResult(result, Object.keys(fieldErrors).length ? "Not saved — see the fields." : error.message, "error");
-      }
-      setBusy(save, false, "Save notifications");
-    });
     test.addEventListener("click", async () => {
       setBusy(test, true, "Sending…");
       try {
         const outcome = await api("/api/notify/test", { method: "POST", body: "{}" });
         const parts = Object.entries(outcome.channels || {}).map(([name, r]) => `${name}: ${r.ok ? "delivered" : r.error}`);
-        inlineResult(result, outcome.ok ? `Test delivered (${parts.join("; ")}).` : (outcome.error || parts.join("; ")), outcome.ok ? "ok" : "error");
+        inlineResult(testResult, outcome.ok ? `Test delivered (${parts.join("; ")}).` : (outcome.error || parts.join("; ")), outcome.ok ? "ok" : "error");
         renderStatus();
       } catch (error) {
-        inlineResult(result, error.message, "error");
+        inlineResult(testResult, error.message, "error");
       }
       setBusy(test, false, "Send test");
     });
-    readySlot(notifySlot, section({
-      title: "Notifications",
-      meta: config.notify_ntfy_url || config.notify_webhook_url || config.notify_smtp_host ? "configured" : "off",
-      body: el("div", {}, [
-        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" },
-          text: "Culprit pages you on a diagnosis, never on a threshold: a message goes out only once a finding has held for the sustain "
-              + "window, and it carries the node, the evidence and the named culprit. One message per finding while it holds, one more "
-              + "if it turns critical, and a follow-up when it clears. Findings marked as expected are never sent." }),
-        el("div.cols.cols--2", {}, columns),
-        el("div.formrow", { style: { marginTop: "14px" } }, [save, test, result]),
-        el("div", { style: { marginTop: "14px" } }, [statusNode]),
-      ]),
+    page.after = () => renderStatus();
+    readySlot(slots.delivery, section({
+      title: "Delivery",
+      body: el("div", {}, [statusNode, el("div.formrow", { style: { marginTop: "12px" } }, [test, testResult])]),
     }));
     renderStatus();
   }
@@ -825,7 +937,7 @@ export function createSettings() {
     try {
       payload = await api("/api/expectations");
     } catch (error) {
-      readySlot(expectSlot, section({ title: "Expected findings", body: emptyState("Could not load", error.message) }));
+      readySlot(slots.expect, section({ title: "Expected findings", body: emptyState("Could not load", error.message) }));
       return;
     }
     const list = payload.expectations || [];
@@ -866,7 +978,7 @@ export function createSettings() {
       body.append(el("div.tblwrap", {}, [table]));
     }
     body.append(await suggestedBlock());
-    readySlot(expectSlot, section({
+    readySlot(slots.expect, section({
       title: "Expected findings", meta: list.length ? `${list.length} marked` : "none",
       body,
       foot: "Windows use this host's local clock. An expected finding is still shown with its evidence; it is reported as expected "
@@ -877,16 +989,16 @@ export function createSettings() {
 
   /** Recurring findings the host noticed; one click marks them, reversibly. */
   async function suggestedBlock() {
-    const wrap = el("div", { style: { marginTop: "12px" } });
+    const wrap = el("div");
     let payload;
     try {
       payload = await api(`/api/expectations/suggested?node=${encodeURIComponent(store.node)}`);
     } catch (error) {
-      wrap.append(el("div.faint.small", { text: `Suggestions unavailable: ${error.message}` }));
+      wrap.append(subhead(`Suggested for ${store.node}`), el("div.faint.small", { text: `Suggestions unavailable: ${error.message}` }));
       return wrap;
     }
     const list = payload.suggestions || [];
-    wrap.append(el("div.subhead", { text: `Suggested for ${store.node}` }));
+    wrap.append(subhead(`Suggested for ${store.node}`));
     if (!list.length) {
       wrap.append(el("div.faint.small", { text: "Nothing recurs at the same time of day on three or more days in the last two weeks." }));
       return wrap;
@@ -923,172 +1035,6 @@ export function createSettings() {
     return wrap;
   }
 
-  function fieldRow({ id, label, unit, input, help, error, area = false }) {
-    return el("div.field", {}, [
-      el("label.field__label", { for: id }, [el("span", { text: label }), unit ? el("span.field__unit", { text: unit }) : null]),
-      el(area ? "div.input.input--area" : "div.input", {}, [input]),
-      help ? el("div.field__help", { id: `help-${id}`, text: help }) : null,
-      error || null,
-    ]);
-  }
-
-  function renderForm() {
-    inputs.clear();
-    const sections = [];
-    for (const group of GROUPS) {
-      const body = el("div");
-      if (group.note) body.append(el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" }, text: group.note }));
-      for (const [key, label, unit, help, readonly] of group.fields) {
-        const realKey = key === "rollup_seconds_display" ? "rollup_seconds" : key;
-        const value = config[realKey];
-        const limit = limits[realKey];
-        const input = el("input", {
-          type: "text", inputmode: "decimal", value: value ?? "", id: `set-${realKey}`,
-          autocomplete: "off", spellcheck: "false", "aria-describedby": `help-set-${realKey}`,
-        });
-        if (readonly) input.readOnly = true;
-        const error = el("div.field__err", { id: `err-${realKey}`, hidden: true });
-        const helpText = [help, limit ? `Allowed: ${formatLimit(limit)}` : null].filter(Boolean).join("  ");
-        const row = fieldRow({ id: `set-${realKey}`, label, unit, input, help: helpText, error });
-        body.append(row);
-        if (!readonly) inputs.set(realKey, { input, error, label });
-        input.addEventListener("input", () => clearFieldError({ input, error }));
-      }
-      sections.push(section({ title: group.title, body }));
-    }
-    readySlot(groupsSlot, sections);
-  }
-
-  function renderNodes() {
-    const state = store.state;
-    const list = state.nodes || [];
-    const auth = state.auth || {};
-    const rows = [kv("Authentication", auth.enabled ? `on — signed in as ${auth.username || "?"}` : "off (no users; loopback only)",
-      { tone: auth.enabled ? "ok" : "warn" })];
-    if (!list.length) rows.push(kv("Agents", "none enrolled"));
-    for (const node of list) {
-      const seen = node.last_seen ? `last report ${fmt.ago(node.last_seen)}` : "never reported";
-      const status = node.enabled === false ? "revoked" : node.online ? "online" : "offline";
-      rows.push(kv(node.name, `${status} · ${seen}${node.platform === "windows" ? " · Windows" : ""}${node.hostname ? ` · ${node.hostname}` : ""}${node.agent_version ? ` · agent v${node.agent_version}` : ""}`,
-        { tone: node.enabled === false ? null : node.online ? "ok" : "crit" }));
-    }
-    const foot = el("span");
-    foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view. Dashboard users are the one thing "
-      + "that stays on the CLI (<code>python -m culprit users add &lt;name&gt;</code>) — someone must exist before anyone can sign in to create anyone.";
-    readySlot(nodesSlot, section({
-      title: "Nodes and access", meta: `${list.filter((n) => n.online).length} of ${list.length} online`, body: kvs(rows), foot,
-    }));
-  }
-
-  function renderInfo() {
-    const state = store.state;
-    const system = state.system || {};
-    nodes.cost = el("div");
-    readySlot(infoRow, [
-      section({
-        title: "About this tool",
-        body: kvs([
-          kv("Version", config.version ? `v${config.version}` : fmt.dash, { mono: true }),
-          kv("Configuration file", "config.json", { mono: true }),
-          kv("History database", config.history_enabled ? "data/culprit.db" : "disabled", { mono: true }),
-          kv("History error", config.history_error || "none", { tone: config.history_error ? "crit" : "ok" }),
-          kv("Running as root", state.elevated ? "yes" : "no (by design)", { tone: state.elevated ? null : "ok" }),
-          kv("Python", system.python || fmt.dash, { mono: true }),
-          kv("Server PID", String(system.pid ?? fmt.dash), { mono: true }),
-        ]),
-      }),
-      section({
-        title: "Sampler cost", body: nodes.cost,
-        foot: "Measured time for the last sample of each tier. If a tier's cost approaches its interval, raise the interval.",
-      }),
-    ]);
-    updateCost();
-  }
-
-  function updateCost() {
-    if (!nodes.cost) return;
-    const timings = store.state.timings || {};
-    const errors = store.state.errors || {};
-    render(nodes.cost, kvs([
-      ["fast", "interval_fast"], ["proc", "interval_proc"], ["slow", "interval_slow"], ["events", "interval_events"],
-    ].map(([tier, key]) => {
-      const cost = timings[tier];
-      const interval = (config?.[key] ?? 1) * 1000;
-      const ratio = cost && interval ? (cost / interval) * 100 : 0;
-      return kv(`${tier} tier`, cost === undefined ? fmt.dash : `${fmt.ms(cost)}  (${ratio.toFixed(1)}% of its interval)`,
-        { mono: true, tone: ratio > 60 ? "crit" : ratio > 30 ? "warn" : "ok" });
-    }).concat(Object.entries(errors).map(([tier, message]) => kv(`${tier} error`, fmt.clip(message, 80), { tone: "crit" })))));
-  }
-
-  async function applyImmediate(patch) {
-    try {
-      const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
-      config = payload.config;
-      // Views that read preferences (container labels) listen for this.
-      store.ingest({ config: payload.config }, ["config"]);
-      inlineResult(immediateResult, "Applied.", "ok");
-      setTimeout(() => immediateResult.replaceChildren(), 2200);
-      renderInfo();
-      renderStats();
-    } catch (error) {
-      inlineResult(immediateResult, error.message, "error");
-    }
-  }
-
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    summary.replaceChildren();
-    const patch = {};
-    let firstBad = null;
-    for (const [key, entry] of inputs) {
-      clearFieldError(entry);
-      const raw = entry.input.value.trim();
-      if (raw === "") { markFieldError(entry, "This cannot be empty."); firstBad = firstBad || entry; continue; }
-      const number = Number(raw);
-      if (!Number.isFinite(number)) { markFieldError(entry, `“${raw}” is not a number.`); firstBad = firstBad || entry; continue; }
-      const limit = limits[key];
-      if (limit && (number < limit[0] || number > limit[1])) {
-        markFieldError(entry, `Must be between ${formatNumber(limit[0])} and ${formatNumber(limit[1])}.`);
-        firstBad = firstBad || entry;
-        continue;
-      }
-      if (number !== config[key]) patch[key] = number;
-    }
-    if (firstBad) {
-      inlineResult(summary, "Some values need fixing — see the fields above.", "error");
-      firstBad.input.focus();
-      firstBad.input.scrollIntoView({ block: "center", behavior: "smooth" });
-      return;
-    }
-    if (!Object.keys(patch).length) {
-      inlineResult(summary, "Nothing changed.", "ok");
-      setTimeout(() => summary.replaceChildren(), 2000);
-      return;
-    }
-    setBusy(saveButton, true, "Saving…");
-    try {
-      const payload = await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) });
-      config = payload.config;
-      inlineResult(summary, `Saved ${Object.keys(patch).length} change(s). Applied to the running sampler.`, "ok");
-      renderInfo();
-      renderStats();
-    } catch (error) {
-      const fieldErrors = error.payload?.field_errors || {};
-      let focused = false;
-      for (const [key, message] of Object.entries(fieldErrors)) {
-        const entry = inputs.get(key);
-        if (!entry) continue;
-        markFieldError(entry, message);
-        if (!focused) { entry.input.focus(); focused = true; }
-      }
-      inlineResult(summary, Object.keys(fieldErrors).length ? "The server rejected some values — see the fields above." : error.message, "error");
-    } finally {
-      setBusy(saveButton, false, "Save settings");
-    }
-  });
-
-  revertButton.addEventListener("click", () => { summary.replaceChildren(); load(); });
-
   root.mount = () => { load(); };
   root.subscriptions = [
     store.on(["snapshot", "tick:fast"], () => { if (root.isActive) updateCost(); }),
@@ -1108,26 +1054,35 @@ function windowText(row) {
   return `${days.map((d) => DAY_NAMES[d] ?? d).join(", ")} ${when}`;
 }
 
-function markFieldError(entry, message) {
-  entry.error.textContent = message;
-  entry.error.hidden = false;
-  entry.input.setAttribute("aria-invalid", "true");
-  entry.input.closest(".input")?.classList.add("is-invalid");
+function markFieldError(field, message) {
+  if (!field.error) return;
+  field.error.textContent = message;
+  field.error.hidden = false;
+  field.input?.setAttribute("aria-invalid", "true");
+  field.input?.closest(".input")?.classList.add("is-invalid");
 }
 
-function clearFieldError(entry) {
-  entry.error.hidden = true;
-  entry.input.removeAttribute("aria-invalid");
-  entry.input.closest(".input")?.classList.remove("is-invalid");
+function clearFieldError(field) {
+  if (!field.error) return;
+  field.error.hidden = true;
+  field.input?.removeAttribute("aria-invalid");
+  field.input?.closest(".input")?.classList.remove("is-invalid");
+}
+
+/** Structural equality for the scalars, lists and one flat object config holds. */
+function same(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => same(v, b[i]));
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const ka = Object.keys(a); const kb = Object.keys(b);
+    return ka.length === kb.length && ka.every((k) => same(a[k], b[k]));
+  }
+  return false;
 }
 
 /** Textarea list -> entries: one per line, commas and blank lines tolerated. */
 function splitLines(text) {
   return String(text || "").split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
-}
-
-function formatLimit(limit) {
-  return `${formatNumber(limit[0])} to ${formatNumber(limit[1])}`;
 }
 
 function formatNumber(value) {

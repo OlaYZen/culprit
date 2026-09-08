@@ -353,6 +353,16 @@
 .field input[readonly] { color: var(--fg-3); }
 
 .formrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* The Save bar every settings page shares: stuck to the bottom of the scroll
+   viewport, the page's fields scrolling behind it. Must be a direct child of
+   the page so `sticky` has the whole page as its containing block. */
+.savebar {
+  position: sticky; bottom: 0; z-index: 2;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 0; margin-top: 4px;
+  background: linear-gradient(transparent, var(--bg) 35%);
+}
+.savebar[hidden] { display: none; }
 
 /* ── Sub-navigation (pages inside one view) ────────────────────────────── */
 .subnav {
@@ -389,6 +399,8 @@
   font-size: var(--fs-s); color: var(--fg);
 }
 .combo__btn:hover { border-color: var(--fg-3); }
+/* A picker standing in for a text input takes the input's full width. */
+.combo--wide .combo__btn { width: 100%; }
 .combo__btn svg { width: 12px; height: 12px; color: var(--fg-3); margin-left: auto; }
 .combo__val { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .combo__val b { color: var(--fg-3); font-weight: 400; }
