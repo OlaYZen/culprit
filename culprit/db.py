@@ -32,7 +32,7 @@ from typing import Any, Iterable, Sequence
 
 log = logging.getLogger("culprit.db")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 ROLES = ("viewer", "operator", "admin")
 
@@ -236,7 +236,12 @@ CREATE TABLE IF NOT EXISTS agents (
     -- repository's version feed, which mirror) is chosen right. NULL until
     -- the first report; a Linux agent older than the platform field is
     -- treated as linux.
-    platform         TEXT
+    platform         TEXT,
+    -- 1 when the operator said this machine is not always on (a desktop
+    -- that sleeps at night): being offline is then expected, so it is not
+    -- counted as a problem, not badged and not notified. The host cannot
+    -- tell a switched-off machine from a dead one; only the operator can.
+    intermittent     INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -1081,7 +1086,14 @@ class History:
     def list_agents(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self._query(
             "SELECT name, enabled, created_at, last_seen, last_addr, "
-            "last_auto_update, pinned_version, pinned_ref, platform FROM agents ORDER BY name")]
+            "last_auto_update, pinned_version, pinned_ref, platform, intermittent "
+            "FROM agents ORDER BY name")]
+
+    def set_agent_intermittent(self, name: str, intermittent: bool) -> bool:
+        """The operator's word that this machine is not always on. Returns
+        whether the row exists."""
+        return self._execute("UPDATE agents SET intermittent = ? WHERE name = ?",
+                             (1 if intermittent else 0, name)) > 0
 
     def set_agent_platform(self, name: str, platform: str | None) -> bool:
         """Remember which agent this is (linux / windows), from its report."""
@@ -1184,7 +1196,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             pass  # column already there (partial earlier migration)
         # v7: the version pin (an operator's explicit downgrade).
         # v8: the agent's platform.
-        for column in ("pinned_version TEXT", "pinned_ref TEXT", "platform TEXT"):
+        # v9: the operator's word that the machine is not always on.
+        for column in ("pinned_version TEXT", "pinned_ref TEXT", "platform TEXT",
+                       "intermittent INTEGER NOT NULL DEFAULT 0"):
             try:
                 conn.execute(f"ALTER TABLE agents ADD COLUMN {column}")
             except sqlite3.Error:
