@@ -955,11 +955,14 @@ def _deploy_base(request: Request) -> str:
     # The address an agent should report to. Configurable in Settings; when
     # `deploy_host` is blank it is inferred from how the browser reached the
     # dashboard (usually the same address an agent can reach). A bare
-    # host/host:port is given an http:// scheme.
+    # host/host:port is given an http:// scheme. The inferred form keeps the
+    # Host header's netloc as it came: a portless Host means the default port
+    # for the scheme (a reverse proxy on 443), not this process's 8787, which
+    # used to be appended and produced https://example.com:8787.
     cfg = config_module.get()
     base = (cfg.deploy_host or "").strip()
     if not base:
-        base = f"{request.url.scheme}://{request.url.hostname}:{request.url.port or 8787}"
+        base = f"{request.url.scheme}://{request.url.netloc}"
     elif "://" not in base:
         base = f"http://{base}"
     return base
