@@ -4,7 +4,7 @@
 
 ### Stop watching graphs. Find out what's actually slowing your machines down.
 
-**A self-hosted Linux health dashboard that names the process (or systemd unit) making a machine slow, tells you whether the number is even a problem, and lets you fix it from the browser.**
+**A self-hosted health dashboard for Linux and Windows machines that names the process (or service) making a machine slow, tells you whether the number is even a problem, and lets you fix it from the browser.**
 
 </div>
 
@@ -30,7 +30,7 @@
 
 ## Contents
 
-- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Watch more machines](#watch-more-machines)
+- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Add the machines to watch](#add-the-machines-to-watch)
 - [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
@@ -234,6 +234,11 @@ with the `admin` / `admin` account it created for you.
 > while it has zero users, so an open dashboard with a kill button can never be
 > reachable by accident.
 
+The dashboard starts **empty**: the host watches nothing by itself, not even
+its own hardware. Monitoring begins when you enroll an agent on a machine --
+this one included -- which takes two commands; see
+[Add the machines to watch](#add-the-machines-to-watch).
+
 Prefer to run it in your terminal instead of as a service? Use `./culprit.sh
 --run` (add `--port N` or `--no-browser` as needed). Manage the service as
 yourself, never with `sudo` (it's a *user* service):
@@ -263,11 +268,13 @@ run it on a machine of your own.
 The branch is never merged here; it is refreshed from `main` by its own
 `tools/build_demo.py`, and its README says how.
 
-### Watch more machines
+### Add the machines to watch
 
-The host is a pure aggregator: it doesn't monitor its own hardware. Every
-machine you want to watch (including the host itself) runs a tiny, report-only
-**agent** that pushes snapshots to the host and **opens no ports of its own**.
+Nothing is watched until you enroll an agent. The host is a pure aggregator:
+it doesn't monitor its own hardware, and a fresh install shows an empty fleet.
+Every machine you want to watch (including the host itself) runs a tiny,
+report-only **agent** that pushes snapshots to the host and **opens no ports
+of its own**.
 
 **1. Enroll it on the host** (the token is shown once; only its hash is stored):
 
@@ -294,6 +301,41 @@ docker run -d --name culprit-agent --restart unless-stopped --pull always \
 
 (The read-only Docker socket is what lets the agent *name* the containers its
 culprits run in; without it they show as `docker <id>` with a note saying so.)
+
+**Windows machines** run the Windows agent from its own repo,
+**[culprit-agent-windows](https://github.com/OlaYZen/culprit-agent-windows)**
+(Windows 10/11 and Windows Server; needs Python 3.10+ from python.org, since
+the Microsoft Store build restricts virtualenvs):
+
+```powershell
+git clone https://github.com/OlaYZen/culprit-agent-windows.git
+cd culprit-agent-windows
+.\agent.ps1      # or double-click agent.cmd; asks for the host URL + token, then sets up a scheduled task
+```
+
+Run it from an **Administrator** PowerShell and the task runs as SYSTEM at boot,
+which is what reads the Security event log (sign-ins, failed sign-ins), other
+users' processes and the drive failure-prediction bit; its venv, config and
+flight recorder live under `%ProgramData%\culprit-agent`. Unelevated, the task
+runs as you at sign-in and can see your windows, so **"not responding"
+detection works**, which a SYSTEM task cannot do. The same token and enrollment
+apply, the Nodes view shows the ready-to-paste `.\agent.ps1` command next to
+the Linux one, and a fleet can mix both kinds freely.
+
+A Windows node reports the **same sections from Windows sources** -- Task
+Manager's frequency-aware CPU, commit charge against its (enforced) limit,
+per-process GPU by engine from the WDDM counters, drive queue and latency, the
+Service Control Manager, the event log (bluescreens with decoded stop codes,
+app crashes and hangs, WHEA errors, Windows Update failures), sign-in history,
+OneDrive health -- and every view picks its vocabulary by platform (service
+for unit, event log for journal, `Restart-Service` for `systemctl`). What
+Windows cannot measure (PSI, per-service cgroup accounting, D-state, the OOM
+ranking, deleted-but-open files, accept-queue overflow, and the rest) is
+reported as **"Not capable in Windows"** with the reason, never as a blank
+panel or a zero; the agent's README lists every one. Actions have parity: End
+task, priority (Windows priority classes, never realtime), Throttle as a Job
+Object CPU cap, Restart / Start for the Outage Doctor's items, and remote
+update, all behind the agent's own `allow_process_actions`.
 
 The dashboard's **Nodes** view enrolls agents and shows a ready-to-paste command
 (native *and* Docker) with the token already filled in. A node picker appears in
@@ -332,6 +374,14 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Nodes** | Enrol agents and manage their tokens; **Update** one agent or **Update all** that have a newer version published (never a Docker agent, which updates through its image); **move an agent to any earlier version** from the picker -- the host resolves the version to the commit that shipped it and the agent resets to that commit -- and the node stays **pinned** there, left alone by the schedule and by Update all until you unpin it or update it again. Settings picks the **branch** of the agent repository agents follow from the branches it actually has (`main` by default, `dev` to run ahead of releases): the published version, Patch notes, the picker and every update all read that one line, and an agent on another branch shows it and is offered the switch. Agents on **v0.18.0-b or older cannot update themselves** (that build's updater was broken; v0.18.1-b fixed it): the row says so, the schedule and Update all leave them out, and one `agent.sh` re-run on the machine brings them into the fold |
 | **Patch notes** | What changed in this host and in the agent, straight from their commit histories: every commit grouped under the version `version.json` carried after it, newest first, with a Features / Fixes filter. The agent side comes from a mirror of the agent repository the host keeps and refreshes hourly, and each version says which enrolled agents run it, so an agent that is behind shows exactly what it is missing. A **Branch** picker on either side reads the notes at any branch the repository has (`main` for what is released, `dev` for what is coming), not only the one running or configured: the running branch is always what is actually serving, another branch is origin's copy fetched at most hourly, and the footer says when the branch shown is not the one this host runs from or the one agents follow. Nothing is written by hand and nothing can go stale; a host without a checkout (the container image), or one that cannot reach the agent repository, says so instead of showing an empty list |
 | **Deaths** | The **Coroner**: when a machine (or only its agent) stops without a clean shutdown, the agent's next start brings back its **flight recorder** (the last ten minutes, every second, kept on disk) and the previous boot's own journal, and the host says what happened: a clean reboot and who asked for it, a hang under memory pressure with the process that was growing, a kernel panic, or an honest *stopped without warning* |
+
+The table names the Linux sources. A **Windows** node fills the same rows from
+Windows ones (performance counters, the SCM, the event log, WTS sessions; see
+[Add the machines to watch](#add-the-machines-to-watch)), adds what only Windows has (the
+**not responding** window, the commit charge as a real ceiling, interrupt + DPC
+time, the power plan, bluescreen stop codes, the shutdown record with who asked
+for it), and says **"Not capable in Windows"** wherever the source is a Linux
+kernel interface.
 
 ---
 
@@ -716,9 +766,13 @@ documented and designed around.
 
 Culprit tells you what it *can't* do as plainly as what it can:
 
-- **Window responsiveness isn't measurable** on a headless box or Wayland, so
-  Culprit relies on kernel-level signals (D-state + `wchan`, run delay, hung-task
-  reports, PSI `full`) instead of faking a "not responding" light.
+- **Window responsiveness isn't measurable on Linux** (headless boxes, Wayland),
+  so Culprit relies on kernel-level signals there (D-state + `wchan`, run delay,
+  hung-task reports, PSI `full`) instead of faking a "not responding" light. On
+  **Windows** it is measurable, but only by an agent running as the signed-in
+  user; a SYSTEM task has no desktop and says so.
+- **Windows has no PSI**, so pressure there is derived from the run queue, hard
+  faults and disk latency, and the Lag Doctor labels it as derived.
 - **Per-process GPU coverage varies by driver:** the panel says which backends
   it tried and why each declined.
 - **Containers make `/proc` lie**; Culprit detects containerisation and warns
@@ -735,6 +789,6 @@ Culprit tells you what it *can't* do as plainly as what it can:
 
 **Culprit.** The machine tells you who's to blame.
 
-Built for people who run their own Linux boxes and want an answer, not a graph.
+Built for people who run their own machines, Linux or Windows, and want an answer, not a graph.
 
 </div>
