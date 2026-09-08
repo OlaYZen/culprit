@@ -181,7 +181,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "volumes.media[].name", "volumes.media[].model",
             "volumes.media[].interface", "volumes.media[].media_type",
             "volumes.media[].size", "volumes.media[].firmware",
-            "volumes.media[].serial", "volumes.media[].smart_reason",
+            # Identity only: health moved to the prognosis section, which the
+            # Storage view joins to these rows by device name.
+            "volumes.media[].serial",
             "disk.total.busy_percent", "disk.total.latency_ms",
             "disk.total.queue_length", "disk.total.read_total",
             "disk.total.write_total",

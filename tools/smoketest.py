@@ -270,8 +270,7 @@ def main() -> int:
             note(f"{YELLOW}skipped{RESET} {skip['device']}: {skip['reason']}")
         for medium in volumes["media"]:
             note(f"{medium['name']}: {medium['model']} ({medium['interface']}, "
-                 f"{medium['media_type']})  smart="
-                 f"{medium['smart_reason'] or medium['status'] or 'unknown'}")
+                 f"{medium['media_type']})  {medium['size']} bytes")
 
     # Per-unit pressure/limits and the kernel's own state (proc tier).
     cg_collector = cgroups.CgroupCollector()

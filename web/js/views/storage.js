@@ -194,8 +194,16 @@ export function createStorage() {
     }
 
     if (media.length) {
+      // Health comes from the Prognosis, which is the one place that reads
+      // it; this list keeps the identity it always had. Matched by device
+      // name, because that is what both sides call the same disk.
+      const wear = store.state.prognosis || {};
+      const byName = new Map((wear.devices || []).map((d) => [d.name, d]));
       const list = el("div.list");
       for (const drive of media) {
+        const device = byName.get(drive.name) || null;
+        const smart = (device || {}).smart || {};
+        const used = (smart.nvme || {}).percentage_used;
         list.append(el("div", { style: { padding: "8px 0" } }, [
           kvs([
             kv("Device", drive.name || fmt.dash, { mono: true }),
@@ -204,16 +212,23 @@ export function createStorage() {
             kv("Capacity", fmt.bytes(drive.size)),
             kv("Firmware", drive.firmware || fmt.dash, { mono: true }),
             kv("Serial", drive.serial || fmt.dash, { mono: true }),
-            kv("SMART health", drive.smart_reason ? "unknown" : (drive.status || fmt.dash),
-              { tone: drive.smart_reason ? null : drive.status === "PASSED" ? "ok" : "warn" }),
-          ]),
-          drive.smart_reason
-            ? note("info", `SMART not readable: ${fmt.esc(drive.smart_reason)}. Unknown means <strong>unknown</strong> — not healthy.`, { margin: true })
-            : null,
-        ]));
+            kv("SMART health", healthWord(device), { tone: healthTone(device) }),
+            fmt.isNum(smart.temperature_c) ? kv("Temperature", `${smart.temperature_c} °C`) : null,
+            fmt.isNum(smart.power_on_hours)
+              ? kv("Powered on", `${(smart.power_on_hours / 8760).toFixed(1)} years`) : null,
+            fmt.isNum(used)
+              ? kv("Endurance used", `${used} %`,
+                { tone: used >= 100 ? "crit" : used >= 90 ? "warn" : used >= 70 ? "info" : null })
+              : null,
+          ].filter(Boolean)),
+          healthNote(device),
+        ].filter(Boolean)));
       }
       readySlot(driveRow, [
-        section({ title: "Drive identity and health", body: list }),
+        section({ title: "Drive identity and health", body: list,
+          foot: "Health is what the drive itself says, read by The Prognosis; identity is what the "
+              + "kernel says. A drive that has not been read is unknown, which is not the same as "
+              + "healthy." }),
         section({
           title: "Per-device activity", body: nodes.perDisk,
           foot: "On multi-queue NVMe, busy% and queue depth are much weaker signals than on single-queue devices — "
@@ -294,10 +309,63 @@ export function createStorage() {
     return wrap;
   }
 
+  /** What the drive itself says, from the Prognosis. "Unknown" is a real
+   *  answer here and is deliberately not toned as anything: a drive nobody
+   *  has read is not a drive that passed. */
+  function healthWord(device) {
+    if (!device) return "unknown";
+    const smart = device.smart || {};
+    if (device.virtual) return "virtual disk";
+    if (smart.asleep) return "asleep — not read";
+    if (smart.read === false) return "unknown";
+    if (smart.passed === false) return "FAILING";
+    if (smart.passed === true) return "PASSED";
+    return "read";
+  }
+
+  function healthTone(device) {
+    const smart = (device || {}).smart || {};
+    if (!device || device.virtual || smart.asleep || smart.read === false) return null;
+    return smart.passed === false ? "crit" : smart.passed === true ? "ok" : null;
+  }
+
+  function healthNote(device) {
+    if (!device) {
+      return note("info", el("span", {}, [
+        document.createTextNode("This drive has no reading yet. Unknown means "),
+        el("strong", { text: "unknown" }),
+        document.createTextNode(" — not healthy."),
+      ]), { margin: true });
+    }
+    const smart = device.smart || {};
+    if (device.virtual) {
+      return note("info", el("span", { text: "A virtual disk: its counters describe no physical "
+        + "medium, so nothing here is judged. The real hardware is visible only to an agent on the "
+        + "hypervisor." }), { margin: true });
+    }
+    if (smart.asleep) {
+      return note("info", el("span", { text: "In standby. It was left asleep rather than spun up to "
+        + "be read; the values shown are from its last reading." }), { margin: true });
+    }
+    if (smart.read === false) {
+      return note("info", el("span", {}, [
+        document.createTextNode(`Not readable: ${smart.reason || "no reason given"}. Unknown means `),
+        el("strong", { text: "unknown" }),
+        document.createTextNode(" — not healthy."),
+      ]), { margin: true });
+    }
+    if (smart.passed === true) {
+      return note("info", el("span", { text: "PASSED is the drive's own verdict against the "
+        + "thresholds it shipped with, and those are set for warranty returns. The Prognosis reads "
+        + "the counters underneath it." }), { margin: true });
+    }
+    return null;
+  }
+
   root.mount = () => { if (!built) build(); updateFast(store.state); updateSlow(store.state); };
   root.subscriptions = [
     store.on("disk", () => { if (root.isActive) updateFast(store.state); }),
-    store.on("volumes", () => { if (root.isActive) updateSlow(store.state); }),
+    store.on(["volumes", "prognosis"], () => { if (root.isActive) updateSlow(store.state); }),
     store.on("node", () => {
       if (!built) return;
       charts.throughput.setData([], {});
