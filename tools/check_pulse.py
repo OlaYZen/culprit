@@ -701,6 +701,88 @@ def main() -> int:
     check("... and never an expected one",
           not any("443/tcp" in f["key"] for f in notifiable))
 
+    # ------------------------------------------------------------- verdicts
+    section("Verdicts -- did acting on it help")
+    from culprit import verdict as V
+
+    def watch(baseline_keys, unit="nginx.service"):
+        baseline = [{"key": k, "title": k, "kind": "listener", "severity": "critical",
+                     "unit": unit} for k in baseline_keys]
+        return V._PulseWatch(1, "n1", "restart", unit, baseline, {"ok": True})
+
+    def item(key, unit="nginx.service"):
+        return {"key": key, "title": key, "severity": "critical", "unit": unit}
+
+    w = watch(["went_quiet:listener:443/tcp"])
+    check("the watch targets the Pulse items that named the unit",
+          [t["key"] for t in w.targets] == ["went_quiet:listener:443/tcp"])
+    start = w.started
+    for i in range(3):
+        w.observe([], start + 120 * (i + 1))
+    check("gone and stayed gone -> it came back",
+          w.done and w.verdict["outcome"] == "came_back", w.verdict["text"])
+
+    w = watch(["went_quiet:listener:443/tcp"])
+    start = w.started
+    for i in range(3):
+        w.observe([item("went_quiet:listener:443/tcp")], start + 120 * (i + 1))
+    check("still there every judgement -> still quiet",
+          w.verdict["outcome"] == "still_quiet", w.verdict["text"])
+    check("... and the sentence says the cause is not inside the unit",
+          "not inside this unit" in w.verdict["text"])
+
+    w = watch(["went_quiet:listener:443/tcp"])
+    start = w.started
+    w.observe([], start + 120)
+    w.observe([item("went_quiet:listener:443/tcp")], start + 240)
+    w.observe([item("went_quiet:listener:443/tcp")], start + 360)
+    check("cleared and then quiet again is its own outcome",
+          w.verdict["outcome"] == "went_quiet_again", w.verdict["text"])
+
+    w = watch(["went_quiet:listener:443/tcp", "went_quiet:unit:nginx.service"])
+    start = w.started
+    for i in range(3):
+        w.observe([item("went_quiet:unit:nginx.service")], start + 120 * (i + 1))
+    check("one back and one not is partly", w.verdict["outcome"] == "partial")
+
+    w = watch([])
+    w.finish(w.started)      # what start_pulse does the moment it sees no targets
+    check("nothing was said about that unit -> nothing to verify",
+          w.done and w.verdict["outcome"] == "moot", w.verdict["text"])
+
+    w = watch(["went_quiet:listener:443/tcp"])
+    w.finish(w.started + 60, reason="the node stopped reporting")
+    check("a node that goes quiet mid-watch gives unknown, not a guess",
+          w.verdict["outcome"] == "unknown" and "stopped reporting" in w.verdict["text"])
+
+    w = watch(["went_quiet:listener:443/tcp"])
+    w.observe([], w.started + 10)
+    check("three minutes is not long enough to call it: a Pulse verdict is a "
+          "statement about the next window",
+          not w.done)
+    check("and the watch waits far longer than an outage one before giving up",
+          V.PULSE_MAX_SECONDS > V.OUTAGE_MAX_SECONDS
+          and V.PULSE_MIN_SECONDS > V.OUTAGE_MIN_SECONDS)
+
+    tmp4 = Path(tempfile.mkdtemp())
+    hist4 = History(tmp4 / "h.db")
+    verifier = V.ActionVerifier(hist4)
+    action_id = verifier.start_pulse("n1", "restart", "nginx.service", {"ok": True},
+                                     [{"key": "went_quiet:listener:443/tcp",
+                                       "title": "Nobody is reaching 443",
+                                       "severity": "critical", "unit": "nginx.service"}],
+                                     "tester")
+    check("the action is recorded as unit_restart with the unit set",
+          action_id > 0 and hist4.action_record("n1", None, unit="nginx.service")["total"] == 1)
+    for i in range(3):
+        verifier.observe_pulse("n1", [], time.time() + 400 * (i + 1))
+    stored = hist4.action_record("n1", None, unit="nginx.service")["record"]
+    check("its verdict lands in the same record the Outage Doctor's do",
+          "unit_restart" in stored and stored["unit_restart"]["outcomes"].get("came_back") == 1,
+          str(stored))
+    check("an outage watch and a pulse watch are told apart by class, not by name",
+          isinstance(verifier._watches.get(action_id), V._PulseWatch))
+
     # ------------------------------------------------------- payload shape
     section("Payload shape")
     fields = ("key", "kind", "subject", "label", "severity", "title", "detail", "since",
