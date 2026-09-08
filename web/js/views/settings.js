@@ -134,6 +134,14 @@ export function createSettings() {
   const usersSlot = el("div");
   const trustSlot = el("div");
   const deploySlot = el("div");
+  // One Save for the whole Deployment page (uxgoodpatterns: one primary
+  // action per page). Two sections each with their own button meant the
+  // bottom one read as the page's Save and quietly ignored the other.
+  const deploySaveSlot = el("div");
+  let deployPatch = () => ({});
+  let updatePatch = () => ({});
+  let updateFieldErrors = () => {};
+  let updateSynced = () => {};
   const autoUpdateSlot = el("div");
   const notifySlot = el("div");
   const expectSlot = el("div");
@@ -152,7 +160,7 @@ export function createSettings() {
 
   const pages = {
     general: el("div.stack", {}, [figSlot, togglesSlot, infoRow]),
-    deployment: el("div.stack", {}, [deploySlot, autoUpdateSlot]),
+    deployment: el("div.stack", {}, [deploySlot, autoUpdateSlot, deploySaveSlot]),
     sampling: el("div.stack", {}, [form]),
     account: el("div.stack", {}, [accountSlot]),
     users: el("div.stack", {}, [usersSlot]),
@@ -204,6 +212,7 @@ export function createSettings() {
       renderTrust();
       renderDeploy();
       renderAutoUpdate();
+      renderDeploySave();
       renderNotify();
       renderExpectations();
       renderInfo();
@@ -212,7 +221,7 @@ export function createSettings() {
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
-      for (const slot of [figSlot, togglesSlot, accountSlot, usersSlot, trustSlot, deploySlot, autoUpdateSlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
+      for (const slot of [figSlot, togglesSlot, accountSlot, usersSlot, trustSlot, deploySlot, autoUpdateSlot, deploySaveSlot, notifySlot, expectSlot, infoRow, nodesSlot]) readySlot(slot, []);
       readySlot(groupsSlot, section({ title: "Settings", body: emptyState("Could not load settings", error.message) }));
     }
   }
@@ -546,8 +555,7 @@ export function createSettings() {
     const cmdInput = el("input", { type: "text", id: "set-agent_command", value: config.agent_command || "./agent.sh", placeholder: "./agent.sh",
       autocomplete: "off", spellcheck: "false", "aria-label": "Agent runner command" });
     const preview = el("code.code");
-    const result = el("div.result");
-    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save deployment settings"]);
+    deployPatch = () => ({ deploy_host: hostInput.value.trim(), agent_command: cmdInput.value.trim() || "./agent.sh" });
 
     function updatePreview() {
       let host = hostInput.value.trim() || `${window.location.protocol}//${window.location.host}`;
@@ -557,21 +565,6 @@ export function createSettings() {
     hostInput.addEventListener("input", updatePreview);
     cmdInput.addEventListener("input", updatePreview);
     updatePreview();
-
-    save.addEventListener("click", async () => {
-      setBusy(save, true, "Saving…");
-      result.replaceChildren();
-      try {
-        const payload = await api("/api/settings", {
-          method: "PUT", body: JSON.stringify({ deploy_host: hostInput.value.trim(), agent_command: cmdInput.value.trim() || "./agent.sh" }),
-        });
-        config = payload.config;
-        inlineResult(result, "Saved — new tokens use this deploy command.", "ok");
-      } catch (error) {
-        inlineResult(result, error.message, "error");
-      }
-      setBusy(save, false, "Save deployment settings");
-    });
 
     readySlot(deploySlot, section({
       title: "Agent deployment",
@@ -585,7 +578,6 @@ export function createSettings() {
         el("div", {}, [
           subhead("Deploy command preview"),
           preview,
-          el("div.row", { style: { marginTop: "10px" } }, [save, result]),
         ]),
       ]),
       foot: "This is the copy-paste command the Nodes view shows when you enroll or rotate an agent. Changing it here does not affect agents already running.",
@@ -639,41 +631,31 @@ export function createSettings() {
         branchHelp.textContent = `Branches could not be listed (${err.message}); type the name.`;
       }
     })();
-    const result = el("div.result");
-    const save = el("button.btn.btn--primary.btn--sm", { type: "button" }, ["Save"]);
-
-    save.addEventListener("click", async () => {
-      setBusy(save, true, "Saving…");
+    updatePatch = () => ({
+      auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value),
+      agent_update_branch: branchValue(),
+    });
+    // Returns the first message so the page's Save can say it next to the
+    // button as well as inline; focuses the offending input.
+    updateFieldErrors = (fieldErrors) => {
       error.hidden = true;
       branchError.hidden = true;
       hourInput.removeAttribute("aria-invalid");
       branchInput.removeAttribute("aria-invalid");
-      try {
-        const payload = await api("/api/settings", {
-          method: "PUT",
-          body: JSON.stringify({
-            auto_update_enabled: enabled, auto_update_hour: Number(hourInput.value),
-            agent_update_branch: branchValue(),
-          }),
-        });
-        config = payload.config;
-        branchChoice = config.agent_update_branch || "main";
-        branchInput.value = branchChoice;
-        inlineResult(result, "Saved.", "ok");
-      } catch (err) {
-        const fieldErrors = err.payload?.field_errors || {};
-        for (const [input, node, key] of [[hourInput, error, "auto_update_hour"], [branchInput, branchError, "agent_update_branch"]]) {
-          if (!fieldErrors[key]) continue;
-          node.textContent = fieldErrors[key];
-          node.hidden = false;
-          input.setAttribute("aria-invalid", "true");
-        }
-        const first = fieldErrors.auto_update_hour || fieldErrors.agent_update_branch;
-        if (first) (fieldErrors.auto_update_hour ? hourInput : branchInput).focus();
-        inlineResult(result, first || err.message, "error");
+      for (const [input, node, key] of [[hourInput, error, "auto_update_hour"], [branchInput, branchError, "agent_update_branch"]]) {
+        if (!fieldErrors[key]) continue;
+        node.textContent = fieldErrors[key];
+        node.hidden = false;
+        input.setAttribute("aria-invalid", "true");
       }
-      setBusy(save, false, "Save");
-    });
+      const first = fieldErrors.auto_update_hour || fieldErrors.agent_update_branch;
+      if (first) (fieldErrors.auto_update_hour ? hourInput : branchInput).focus();
+      return first || "";
+    };
+    updateSynced = () => {
+      branchChoice = config.agent_update_branch || "main";
+      branchInput.value = branchChoice;
+    };
 
     readySlot(autoUpdateSlot, section({
       title: "Automatic agent updates",
@@ -686,7 +668,6 @@ export function createSettings() {
             el("span.field__unit", { text: "of the agent repository agents follow" })]),
           branchSlot, branchHelp, branchError,
         ]),
-        el("div.formrow", { style: { marginTop: "10px" } }, [save, result]),
       ]),
       foot: "Runs the exact same update as the per-agent Update button on the Nodes page, once a day, only for "
           + "agents that have reported themselves update-capable and behind the version GitHub publishes for the "
@@ -694,6 +675,33 @@ export function createSettings() {
           + "that branch; Patch notes and the version picker list it. The agent is never told a schedule — only ever "
           + "told to update now — and never a repository: it only ever pulls from its own origin.",
     }));
+  }
+
+  /* ── Deployment page: one Save for both sections ─────────────────── */
+  function renderDeploySave() {
+    const result = el("div.result");
+    const save = el("button.btn.btn--primary", { type: "button" }, ["Save deployment settings"]);
+    save.addEventListener("click", async () => {
+      setBusy(save, true, "Saving…");
+      result.replaceChildren();
+      updateFieldErrors({});
+      try {
+        const payload = await api("/api/settings", {
+          method: "PUT", body: JSON.stringify({ ...deployPatch(), ...updatePatch() }),
+        });
+        config = payload.config;
+        updateSynced();
+        inlineResult(result, "Saved — new tokens use this deploy command.", "ok");
+      } catch (err) {
+        const first = updateFieldErrors(err.payload?.field_errors || {});
+        inlineResult(result, first || err.message, "error");
+      }
+      setBusy(save, false, "Save deployment settings");
+    });
+    readySlot(deploySaveSlot, el("div.formrow", {
+      style: { position: "sticky", bottom: "0", padding: "12px 0", marginTop: "4px",
+        background: "linear-gradient(transparent, var(--bg) 35%)" },
+    }, [save, result]));
   }
 
   /* ── Notifications ───────────────────────────────────────────────── */
