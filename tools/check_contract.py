@@ -157,6 +157,9 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "services[].result", "services[].restarts",
             "summary.total", "summary.user_units",
             "problems", "timers", "cgroup_attribution",
+            # Each timer's last run: what the Pulse's run rules are built on.
+            "timers[].unit", "timers[].activates", "timers[].next", "timers[].last",
+            "timers[].run",
         ],
         # "Pressure and limits per unit" section.
         "node:cgroups": ["available", "units", "total_units"],
@@ -404,6 +407,8 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "items[].since_capped", "items[].now", "items[].baseline",
             "items[].evidence", "items[].culprits", "items[].changes",
             "items[].actions", "items[].external",
+            # Timer items only: the stored runs and what they add up to.
+            "items[].runs", "items[].run_stats",
         ],
         "/api/pulse/rhythm?node=<node>": [
             "node", "subjects", "weeks", "kind", "subject", "cells",
@@ -467,6 +472,10 @@ OPTIONAL = {
     # Only a timer item has these, and only a subject with a baseline has a
     # `now` -- an item list holding just one kind cannot show the others.
     "items[].now", "items[].baseline", "items[].since_capped", "items[].label",
+    "items[].runs", "items[].run_stats",   # only a timer item carries runs
+    # A timer whose unit has never run, or that systemd has unloaded, has no
+    # run to report -- the row says why instead.
+    "timers[].run",
     "system.ubuntu_pro.available",    # only on Ubuntu
     "system.ubuntu_pro.attached",
     "system.ubuntu_pro.enabled",

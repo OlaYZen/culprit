@@ -264,6 +264,8 @@ def main() -> int:
     check("a Windows task with a non-zero result failed on its last run",
           len(windows) == 1 and windows[0]["key"] == "schedule_failed:Nightly backup"
           and "0x" in windows[0]["detail"], windows[0]["detail"] if windows else "")
+    check("... and the item says what to run to look at it",
+          bool(windows) and "ScheduledTask" in (windows[0]["fix"] or ""))
     long_run = P.judge_timers(
         [{"unit": "report.timer", "activates": "report.service",
           "next": NOW + 600, "last": NOW - 86400}],
@@ -276,6 +278,145 @@ def main() -> int:
     check("a healthy timer says nothing",
           not P.judge_timers([{"unit": "fstrim.timer", "activates": "fstrim.service",
                                "next": NOW + 3600, "last": NOW - 86400}], {}, [], NOW, 900.0))
+
+    # ------------------------------------------------------------ run records
+    section("Run records -- a job measured against its own last runs")
+
+    def stored(durations, *, io=None, status=0, result="success", gap=86400.0,
+               running=False, ended_offset=0.0):
+        """Newest first, one run per `gap` seconds ending just before now."""
+        rows = []
+        for index, seconds in enumerate(durations):
+            began = NOW - (index + 1) * gap
+            rows.append({"timer": "backup.timer", "unit": "backup.service",
+                         "started": began,
+                         "ended": None if (running and index == 0) else began + seconds,
+                         "duration_s": None if (running and index == 0) else seconds,
+                         "status": status if index == 0 else 0,
+                         "result": result if index == 0 else "success",
+                         "io_bytes": (io[index] if io and index < len(io) else None)})
+        return rows
+
+    timer_row = [{"unit": "backup.timer", "activates": "backup.service",
+                  "next": NOW + 3600, "last": NOW - 86400}]
+    normal = stored([1200, 1230, 1180, 1260, 1200, 1190])
+    check("a job that ran its usual twenty minutes says nothing",
+          not P.judge_timers(timer_row, {}, [], NOW, 900.0, runs={"backup.timer": normal}))
+
+    hollow = stored([4, 1230, 1180, 1260, 1200, 1190])
+    item = P.judge_timers(timer_row, {}, [], NOW, 900.0, runs={"backup.timer": hollow})
+    check("exited 0 in four seconds where it normally takes twenty minutes",
+          len(item) == 1 and item[0]["key"] == "schedule_hollow:backup.timer",
+          item[0]["detail"] if item else "")
+    check("... and the sentence says both durations and how many runs it read",
+          bool(item) and "20 min" in item[0]["detail"] and "runs" in item[0]["detail"])
+    check("... and says the bytes were not watched when they were not",
+          bool(item) and "not watched" in item[0]["detail"])
+    with_io = stored([4, 1230, 1180, 1260, 1200, 1190],
+                     io=[1e6, 4e9, 4.2e9, 3.9e9, 4e9, 4.1e9])
+    item = P.judge_timers(timer_row, {}, [], NOW, 900.0, runs={"backup.timer": with_io})
+    check("with the bytes watched, the sentence names them too",
+          item and "MB where it normally moves" in item[0]["detail"],
+          item[0]["detail"] if item else "")
+    moved = stored([4, 1230, 1180, 1260, 1200, 1190],
+                   io=[4e9, 4e9, 4.2e9, 3.9e9, 4e9, 4.1e9])
+    check("quick but it moved the usual bytes -> not hollow (that is a fast disk)",
+          not P.judge_timers(timer_row, {}, [], NOW, 900.0, runs={"backup.timer": moved}))
+    check("four runs is not enough evidence for so strong a claim",
+          not P.judge_timers(timer_row, {}, [], NOW, 900.0,
+                             runs={"backup.timer": stored([4, 1230, 1180, 1260])}))
+    check("a job that normally takes three seconds has no shape to be short against",
+          not P.judge_timers(timer_row, {}, [], NOW, 900.0,
+                             runs={"backup.timer": stored([0.4, 3, 3, 3, 3, 3])}))
+
+    running_service = {"backup.service": {"name": "backup.service", "status": "running",
+                                          "since": NOW - 4 * 3600, "pid": 4242,
+                                          "scope": "system"}}
+    live = [{"unit": "backup.timer", "activates": "backup.service", "next": NOW + 3600,
+             "last": NOW - 4 * 3600,
+             "run": {"started": NOW - 4 * 3600, "ended": None, "duration_s": None,
+                     "elapsed_s": 4 * 3600, "running": True, "status": None,
+                     "result": None}}]
+    item = P.judge_timers(live, running_service, [], NOW, 900.0,
+                          runs={"backup.timer": normal})
+    check("four hours into a job that takes twenty minutes is a finding",
+          len(item) == 1 and item[0]["key"] == "schedule_long:backup.timer"
+          and "12.0x" in item[0]["detail"], item[0]["detail"] if item else "")
+    check("... and it ranks the job's own process, nothing else",
+          bool(item) and [c["pid"] for c in item[0]["culprits"]] == [4242])
+    check("two runs are not enough to call one of them long",
+          not P.judge_timers(live, running_service, [], NOW, 900.0,
+                             runs={"backup.timer": stored([1200, 1230])}))
+    check("a job inside its usual time says nothing while it runs",
+          not P.judge_timers(
+              [{**live[0], "run": {**live[0]["run"], "elapsed_s": 600}}],
+              {"backup.service": {**running_service["backup.service"], "since": NOW - 600}},
+              [], NOW, 900.0, runs={"backup.timer": normal}))
+
+    overlapping = [{"timer": "backup.timer", "started": NOW - 600, "ended": None,
+                    "duration_s": None, "status": None, "result": None, "io_bytes": None},
+                   {"timer": "backup.timer", "started": NOW - 4000, "ended": NOW - 300,
+                    "duration_s": 3700.0, "status": 0, "result": "success", "io_bytes": None}]
+    item = P.judge_timers(timer_row, {}, [], NOW, 900.0,
+                          runs={"backup.timer": overlapping})
+    check("a run that began before the previous one ended is an overlap",
+          len(item) == 1 and item[0]["key"] == "schedule_overlap:backup.timer",
+          item[0]["detail"] if item else "")
+
+    failed = stored([1200, 1230, 1180], status=1, result="exit-code")
+    item = P.judge_timers(timer_row, {}, [], NOW, 900.0, runs={"backup.timer": failed})
+    check("a run that ended with Result=exit-code is a failure, from one record",
+          len(item) == 1 and item[0]["key"] == "schedule_failed:backup.timer"
+          and "exit-code" in item[0]["detail"])
+    check("... and failure outranks every other run rule for that timer",
+          len(item) == 1)
+    check("every run item carries the runs it read and their median",
+          item[0]["run_stats"]["runs"] == 3 and item[0]["runs"]
+          and item[0]["runs"][0]["duration_s"] == 1200)
+
+    # ------------------------------------------------- runs through the host
+    section("Run records -- ingested, stored and integrated")
+    tmp3 = Path(tempfile.mkdtemp())
+    hist3 = History(tmp3 / "h.db")
+    runner = P.Pulse(hist3)
+
+    def with_run(run, cpu=8.0, io=2_000_000.0):
+        return {
+            "system": {"boot_time": NOW - 9 * 86400},
+            "services": {"available": True, "cgroup_attribution": True, "services": [
+                {"name": "backup.service", "scope": "system", "status": "running",
+                 "cpu_percent": cpu, "io_bytes_sec": io, "pid": 812}],
+                "timers": [{"unit": "backup.timer", "activates": "backup.service",
+                            "next": NOW + 3600, "last": NOW - 3600, "run": run}]},
+            "network": {"total": {"recv_bytes_sec": 1000.0, "sent_bytes_sec": 1.0}},
+        }
+
+    began = NOW - 3000
+    live_run = {"started": began, "ended": None, "duration_s": None, "elapsed_s": 60,
+                "running": True, "status": None, "result": None}
+    # 100 samples at 20 s covers the whole run and still fits the ring: a run
+    # older than the ring is deliberately *not* integrated (see below).
+    for i in range(100):
+        runner.observe("r1", ["services", "network", "system"], with_run(live_run),
+                       {}, began - 60 + i * 20)
+    done_run = {**live_run, "ended": began + 1800, "duration_s": 1800.0,
+                "elapsed_s": None, "running": False, "status": 0, "result": "success"}
+    runner.observe("r1", ["services", "network", "system"], with_run(done_run), {},
+                   began + 1950)
+    runner.sweep(began + 1960)
+    kept = hist3.pulse_runs("r1").get("backup.timer") or []
+    check("the run is stored once, and the finished record replaced the live one",
+          len(kept) == 1 and kept[0]["duration_s"] == 1800.0 and kept[0]["status"] == 0,
+          f"{len(kept)} row(s)")
+    check("the bytes it moved were integrated from the unit's own ring",
+          kept and kept[0]["io_bytes"] and kept[0]["io_bytes"] > 1e9,
+          f"{(kept[0]['io_bytes'] or 0) / 1e9:.1f} GB")
+    check("a run the host did not watch has no byte count, not a zero",
+          P.Pulse._io_over({}, "backup.service", began, began + 1800) is None)
+    late = {("unit", "backup.service"): [(began + 600 + i * 20, 1.0, 2e6, True)
+                                         for i in range(30)]}
+    check("nor one whose ring starts after the run did",
+          P.Pulse._io_over(late, "backup.service", began, began + 1800) is None)
 
     # --------------------------------------------------- accumulate and store
     section("Accumulation -- fold once, per report, per gap")
