@@ -130,12 +130,13 @@ const PAGES = [
   { key: "users", label: "Users", icon: icons.user },
   { key: "network", label: "Network", icon: icons.shield },
   { key: "pulse", label: "The Pulse", icon: icons.timer },
+  { key: "prognosis", label: "The Prognosis", icon: icons.disk },
   { key: "notifications", label: "Notifications", icon: icons.bell },
   { key: "expected", label: "Expected findings", icon: icons.calendar },
 ];
 
 // Pages that edit configuration get the form + Save bar; the rest act.
-const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications", "pulse"]);
+const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications", "pulse", "prognosis"]);
 
 const ROLE_HINT = {
   viewer: "Read-only: sees every dashboard and history view, no actions.",
@@ -172,6 +173,7 @@ export function createSettings() {
     trust: el("div"), nodes: el("div"),
     notify: el("div"), delivery: el("div"),
     pulse: el("div"), pulseNodes: el("div"),
+    prognosis: el("div"), prognosisRecord: el("div"),
     expect: el("div"),
   };
   const LAYOUT = {
@@ -183,6 +185,7 @@ export function createSettings() {
     network: [slots.trust, slots.nodes],
     notifications: [slots.notify, slots.delivery],
     pulse: [slots.pulse, slots.pulseNodes],
+    prognosis: [slots.prognosis, slots.prognosisRecord],
     expected: [slots.expect],
   };
   const pages = {};
@@ -414,6 +417,8 @@ export function createSettings() {
     pendingSlot(slots.nodes, skeletonSection("Nodes and access", 3));
     pendingSlot(slots.pulse, skeletonSection("The Pulse", 5));
     pendingSlot(slots.pulseNodes, skeletonSection("What each node has learned", 3));
+    pendingSlot(slots.prognosis, skeletonSection("The Prognosis", 4));
+    pendingSlot(slots.prognosisRecord, skeletonSection("The wear record", 2));
     pendingSlot(slots.notify, skeletonSection("Notifications", 6));
     pendingSlot(slots.delivery, skeletonSection("Delivery", 3));
     pendingSlot(slots.expect, skeletonSection("Expected findings", 3));
@@ -432,6 +437,7 @@ export function createSettings() {
       renderTrust();
       renderNodes();
       renderPulse();
+      renderPrognosis();
       renderNotify();
       renderExpectations();
       for (const page of Object.values(pages)) if (page.bar) { page.bar.node.hidden = false; touch(page); }
@@ -615,6 +621,60 @@ export function createSettings() {
         entry.count ? el("span.faint.small", { text: ` ${entry.count} item${entry.count === 1 ? "" : "s"}` }) : null,
       ].filter(Boolean))))));
     }).catch((error) => render(body, note("warn", `The Pulse could not be read: ${fmt.esc(error.message)}`)));
+  }
+
+  /* ── The Prognosis ───────────────────────────────────────────────── */
+  function renderPrognosis() {
+    const page = pages.prognosis;
+    readySlot(slots.prognosis, section({
+      title: "The Prognosis",
+      body: el("div.cols.cols--2", {}, [
+        el("div", {}, [
+          el("div.checkgroup", { style: { marginBottom: "12px" } }, [
+            boolField(page, "prognosis_enabled", {
+              label: "Read the hardware's own wear counters",
+              title: "Off: agents stop reading SMART, EDAC, AER and the batteries entirely",
+            }),
+            boolField(page, "prognosis_wake_disks", {
+              label: "Wake sleeping disks to read them",
+              title: "Off (the default): a disk in standby is reported as asleep with its last values, and left asleep",
+            }),
+          ]),
+          note("info", "Reading SMART on a spun-down drive spins it up. With this off, a sleeping "
+            + "disk is reported as asleep and its last values are kept — which is right for an "
+            + "archive shelf and costs a few hours of freshness on an array that is always on."),
+        ]),
+        el("div", {}, [
+          numberField(page, "prognosis_smart_interval_minutes", {
+            label: "Read SMART every", unit: "minutes",
+            help: "One smartctl call per disk, on the agent's events tier. Half an hour sees a rising counter the same day without a spun-up drive paying for it every couple of minutes." }),
+          numberField(page, "wear_retention_days", {
+            label: "Keep the wear record for", unit: "days",
+            help: "One row per device per day. An endurance forecast is fitted over months, so this is its own number and not the metric history's." }),
+        ]),
+      ]),
+      foot: "These two settings travel to every agent in the response to its next report, the way the "
+          + "Refresh control's cadence does — the pace of a SMART pass is a fleet decision. The record "
+          + "itself is kept here, and it is what makes \u201cunchanged since 3 August\u201d and an endurance "
+          + "date possible at all.",
+    }));
+    renderWearRecord();
+  }
+
+  function renderWearRecord() {
+    const body = el("div");
+    readySlot(slots.prognosisRecord, section({
+      title: "The wear record", body,
+      foot: "One row per device per day. A forecast needs fourteen of them before it will name a date.",
+    }));
+    api("/api/history/stats").then((payload) => {
+      const rows = (payload.rows || {}).wear;
+      render(body, el("div.kvs", {}, [
+        kv("Rows stored", fmt.isNum(rows) ? fmt.count(rows) : fmt.dash),
+        kv("Kept for", `${config.wear_retention_days} days`),
+      ]));
+    }).catch((error) => render(body, note("warn", el("span", {
+      text: `The wear record could not be read: ${error.message}` }))));
   }
 
   function renderAutoUpdate() {

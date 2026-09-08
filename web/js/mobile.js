@@ -120,13 +120,20 @@ function updateBadges(state) {
   // The Pulse's count comes from the node list: it is judged on the host's
   // sweep, not carried in a section of the snapshot.
   const quiet = ((state.nodes || []).find((n) => n.name === store.node) || {}).pulse_count || 0;
+  // The Prognosis rides the events tier, so the section leads and the node
+  // list fills in until the first one has arrived.
+  const wear = state.prognosis || {};
+  const wearing = wear.available
+    ? (wear.items || []).filter((i) => i.severity === "warn" || i.severity === "critical").length
+    : ((state.nodes || []).find((n) => n.name === store.node) || {}).prognosis_count || 0;
 
   badge("badge-services-m", services.length);
   badge("badge-outage-m", broken.length);
   badge("badge-pulse-m", quiet);
+  badge("badge-prognosis-m", wearing);
   badge("badge-events-m", eventsCrit);
   badge("badge-nodes-m", offline);
-  dot("botnav-more-dot", (services.length || broken.length || quiet || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
+  dot("botnav-more-dot", (services.length || broken.length || quiet || wearing || eventsCrit || offline || sync.length || lowSpace) ? "warn" : null);
 }
 
 function dot(bind, severity) {

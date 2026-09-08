@@ -406,8 +406,10 @@ def _forecast_sentence(forecast: dict[str, Any]) -> str:
 
 
 def _number(value: Any) -> str:
-    if isinstance(value, float) and value == int(value):
-        return str(int(value))
+    """Two significant digits for a rate. A slope carried to four decimals
+    claims a precision the fit does not have."""
+    if isinstance(value, float):
+        return str(int(value)) if value == int(value) else f"{value:.2g}"
     return str(value)
 
 

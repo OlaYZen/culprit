@@ -25,7 +25,8 @@
 const SECTIONS = [
   "system", "cpu", "memory", "psi", "gpu", "disk", "network", "pressures",
   "process_table", "diagnosis", "volumes", "services", "network_detail",
-  "ports", "sync", "events", "cgroups", "kernel", "changes", "ceilings", "outage", "config",
+  "ports", "sync", "events", "cgroups", "kernel", "changes", "ceilings", "outage",
+  "prognosis", "config",
 ];
 
 class Store {
@@ -267,7 +268,7 @@ class Store {
       proc: ["process_table"],
       diagnosis: ["diagnosis"],
       slow: ["volumes", "services", "network_detail", "ports", "sync", "system", "outage"],
-      events: ["events"],
+      events: ["events", "prognosis"],
     })) {
       source.addEventListener(name, (event) => {
         if (!this.isLocal()) return; // remote view: local ticks stay out
@@ -275,7 +276,6 @@ class Store {
         if (!payload) return;
         if (name === "proc") this.ingest({ process_table: payload }, ["process_table"]);
         else if (name === "diagnosis") this.ingest({ diagnosis: payload }, ["diagnosis"]);
-        else if (name === "events") this.ingest({ events: payload }, ["events"]);
         else this.ingest(payload, keys);
         this.emit(`tick:${name}`);
       });

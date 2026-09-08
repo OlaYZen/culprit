@@ -342,6 +342,7 @@ export function createNodes() {
     // The Pulse's verdict for this node, beside its online state: "quiet" is
     // a different fact from "offline", and the row should not conflate them.
     const pulsePill = el("span");
+    const wearPill = el("span");
     // The operator's word that this machine is not always on (a desktop that
     // sleeps at night). Immediate, hence a switch: off = its absences are
     // expected, so they are not badged, not counted and not notified.
@@ -362,7 +363,7 @@ export function createNodes() {
         }
       },
     });
-    const statusCell = el("td", {}, [el("div.row", { style: { gap: "10px" } }, [statusPill, pulsePill, alwaysOn])]);
+    const statusCell = el("td", {}, [el("div.row", { style: { gap: "10px" } }, [statusPill, pulsePill, wearPill, alwaysOn])]);
     const hostCell = el("td.faint");
     const versionText = el("span.mono.faint");
     const versionBadge = el("span");
@@ -389,7 +390,7 @@ export function createNodes() {
         addrCell,
         el("td", {}, [el("div.actions", {}, [rotate, update, version, unpin, revoke, remove])]),
       ]),
-      nameLabel, dockerBadge, statusCell, statusPill, pulsePill, alwaysOn, hostCell, versionText, versionBadge, lastCell, addrCell,
+      nameLabel, dockerBadge, statusCell, statusPill, pulsePill, wearPill, alwaysOn, hostCell, versionText, versionBadge, lastCell, addrCell,
       rotate, update, version, unpin, revoke, remove, pinBadge, brokenBadge, node: null, flags: {},
     };
 
@@ -510,6 +511,16 @@ export function createNodes() {
       entry.pulsePill.replaceChildren(quiet
         ? pill(`${quiet} quiet`, node.pulse_severity === "critical" ? "crit" : "warn") : "");
       if (quiet) entry.pulsePill.title = "Things that stopped happening — see The Pulse";
+    }
+    // Hardware outlives a revoked token and an offline agent, but the count
+    // is only as fresh as the last report -- so it is shown for a node that
+    // is online, the same rule the quiet count follows.
+    const wearing = node.online ? Number(node.prognosis_count || 0) : 0;
+    if (entry.flags.wearing !== wearing) {
+      entry.flags.wearing = wearing;
+      entry.wearPill.replaceChildren(wearing
+        ? pill(`${wearing} wearing`, node.prognosis_severity === "critical" ? "crit" : "warn") : "");
+      if (wearing) entry.wearPill.title = "Parts on their way out — see The Prognosis";
     }
     if (entry.flags.intermittent !== !!node.intermittent) {
       entry.flags.intermittent = !!node.intermittent;

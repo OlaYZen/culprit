@@ -109,6 +109,9 @@ export function createOverview() {
   // the Overview because "nothing is wrong" is exactly the state in which a
   // thing that stopped happening goes unnoticed.
   const pulseSlot = el("div");
+  // And one for the Prognosis, for the same reason: a machine with nothing
+  // wrong is exactly where a disk quietly reallocating goes unnoticed.
+  const wearSlot = el("div");
   const metricGrid = el("div.cells.cells--metrics");
   const pairRow = el("div.cols.cols--2.cols--stretch");
   const loadSlot = el("div");
@@ -116,7 +119,7 @@ export function createOverview() {
   const identitySlot = el("div");
   const incidentsSlot = el("div");
   root.append(el("div.stack", {}, [
-    fleetSlot, statusSlot, pulseSlot, metricGrid, pairRow, loadSlot, signalsSlot, identitySlot, incidentsSlot,
+    fleetSlot, statusSlot, pulseSlot, wearSlot, metricGrid, pairRow, loadSlot, signalsSlot, identitySlot, incidentsSlot,
   ]));
 
   /* ── Build once, then only patch ─────────────────────────────────────── */
@@ -394,6 +397,14 @@ export function createOverview() {
         text: `${node.findings} finding${node.findings === 1 ? "" : "s"} · ${fmt.imageName(node.offender.name)}`,
         title: `${fmt.imageName(node.offender.name)} leads ${node.findings} finding${node.findings === 1 ? "" : "s"}`,
       };
+    } else if (node.prognosis_count) {
+      // The hardware outranks a quiet listener: one is a part on its way out,
+      // the other is something to go and look at.
+      alert = {
+        info: node.prognosis_severity !== "critical",
+        text: `${node.prognosis_count} wearing`,
+        title: `${node.prognosis_count} part${node.prognosis_count === 1 ? " is" : "s are"} wearing out — see The Prognosis`,
+      };
     } else if (node.pulse_count) {
       // Nothing is loading this machine, which is exactly when something
       // having stopped goes unnoticed: the card says it in the same slot.
@@ -642,6 +653,26 @@ export function createOverview() {
       render(pulseSlot, []);
     }
 
+    // The Prognosis rides the events tier, so it is in the snapshot; the node
+    // list fills in until this node has sent one.
+    const wear = state.prognosis || {};
+    const wearItems = (wear.items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
+    const wearCount = wear.available ? wearItems.length : (me.prognosis_count || 0);
+    const wearCritical = wear.available
+      ? wearItems.some((i) => i.severity === "critical") : me.prognosis_severity === "critical";
+    if (wearCount) {
+      const lead = wearItems[0];
+      const link = el("a", { href: "#prognosis",
+        text: lead ? lead.title : `${wearCount} part${wearCount === 1 ? " is" : "s are"} wearing out` });
+      render(wearSlot, note(wearCritical ? "crit" : "warn", el("div", {}, [
+        link,
+        document.createTextNode(wearCount > 1 ? ` — and ${wearCount - 1} more from the hardware's own counters.`
+          : " — from the hardware's own counters, not a threshold."),
+      ])));
+    } else {
+      render(wearSlot, []);
+    }
+
     const offenders = diagnosis.offenders || [];
     patchText(nodes.offMeta, offenders.length
       ? `top ${Math.min(8, offenders.length)} of ${offenders.length} · ranked by share of resources under pressure`
@@ -749,7 +780,7 @@ export function createOverview() {
   root.subscriptions = [
     store.on("resume", () => { if (root.isActive) refreshFleet(); }),
     store.on(["cpu", "memory", "gpu", "disk", "network", "pressures"], () => { if (root.isActive) updateFast(store.state); }),
-    store.on(["diagnosis", "nodes"], () => { if (root.isActive) updateDiagnosis(store.state); }),
+    store.on(["diagnosis", "nodes", "prognosis"], () => { if (root.isActive) updateDiagnosis(store.state); }),
     store.on(["system", "volumes"], () => { if (root.isActive) updateSlow(store.state); }),
     store.on("events", () => { if (root.isActive) updateEvents(store.state); }),
     // Node switch: clear the previous machine's traces rather than blending two.

@@ -47,6 +47,7 @@ export const icons = {
   bell: '<svg viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></svg>',
   calendar: '<svg viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
   compare: '<svg viewBox="0 0 24 24"><path d="M9 3.5v17M15 3.5v17"/><path d="M3.5 8l-1.5 2 1.5 2M20.5 8l1.5 2-1.5 2"/></svg>',
+  disk: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3.5"/><path d="M12 12l4.5 4.5"/></svg>',
 };
 
 const toneIcon = (tone) => ({

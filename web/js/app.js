@@ -17,6 +17,7 @@ import { createOverview } from "./views/overview.js";
 import { createDoctor } from "./views/doctor.js";
 import { createOutage } from "./views/outage.js";
 import { createPulse } from "./views/pulse.js";
+import { createPrognosis } from "./views/prognosis.js";
 import { createProcesses } from "./views/processes.js";
 import { createServices } from "./views/services.js";
 import { createStorage } from "./views/storage.js";
@@ -39,6 +40,7 @@ const FACTORIES = {
   doctor: createDoctor,
   outage: createOutage,
   pulse: createPulse,
+  prognosis: createPrognosis,
   processes: createProcesses,
   services: createServices,
   storage: createStorage,
@@ -58,6 +60,7 @@ const FACTORIES = {
 
 const TITLES = {
   overview: "Overview", doctor: "Lag Doctor", outage: "Outage Doctor", pulse: "The Pulse",
+  prognosis: "The Prognosis",
   processes: "Processes",
   services: "Services", storage: "Storage", network: "Network",
   ports: "Ports", map: "Map", events: "Events", coroner: "Coroner", sessions: "Sessions", sync: "Sync",
@@ -200,6 +203,16 @@ function updateBadges(state) {
   // list rather than a section of the snapshot.
   const me = (state.nodes || []).find((n) => n.name === store.node) || {};
   setBadge("badge-pulse", me.pulse_count || null, me.pulse_severity === "critical" ? null : "warn");
+
+  // The Prognosis rides the events tier (two minutes), so its count comes
+  // from the section when this node's snapshot has one and from the node
+  // list otherwise -- an agent that has not sent one yet must not show a
+  // reassuring zero.
+  const wear = state.prognosis || {};
+  const wearItems = (wear.items || []).filter((i) => i.severity === "warn" || i.severity === "critical");
+  setBadge("badge-prognosis", (wear.available ? wearItems.length : me.prognosis_count) || null,
+    (wear.available ? wearItems.some((i) => i.severity === "critical")
+      : me.prognosis_severity === "critical") ? null : "warn");
 
   const processes = state.process_table || {};
   patchText(bind["badge-processes"], processes.totals?.count ? String(processes.totals.count) : "");

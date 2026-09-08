@@ -386,6 +386,17 @@ export function createDoctor() {
         pill(`${key.replace(/_/g, " ")}: ${formatEvidence(key, value)}`, null, { mono: true }))));
     }
 
+    if (finding.hardware) {
+      // The medium under a storage finding. Context, not blame: the culprits
+      // below still rank who is asking for the IO, and this says the part
+      // answering them is on its way out.
+      node.append(el("div.finding__blame.tone-warn", {}, [
+        el("b", { text: "The hardware under this: " }),
+        el("a", { href: "#prognosis", text: finding.hardware.title || "see the Prognosis" }),
+        finding.hardware.device
+          ? document.createTextNode(` (${finding.hardware.device})`) : null,
+      ].filter(Boolean)));
+    }
     const culprits = finding.culprits || [];
     if (finding.external) {
       // Nobody on this machine is at fault: say who is, instead of ranking
