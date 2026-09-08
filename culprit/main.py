@@ -997,7 +997,12 @@ async def api_nodes_check_updates() -> dict[str, Any]:
     state = registry.remote_version_state()
     nodes = registry.status_list()
     broker.publish("nodes", nodes)
-    available = [n["name"] for n in nodes if n.get("update_available") is True]
+    # What the host would actually move, from the same rule Update all uses
+    # -- never the raw version comparison. A Docker agent behind the
+    # published version is *not* something this host can update: it updates
+    # through its image, and counting it would promise an action that does
+    # not exist. Same for pinned, offline, revoked and incapable nodes.
+    targets, skipped = nodes_module.update_targets(nodes)
     return {
         "published": state, "previous": before,
         "changed": (state.get("linux"), state.get("windows"))
@@ -1008,7 +1013,10 @@ async def api_nodes_check_updates() -> dict[str, Any]:
         "asked": bool(asked),
         "reached": bool(asked) and state.get("checked_at") is not None
                    and state.get("checked_at") != before.get("checked_at"),
-        "update_available": available,
+        "updatable": targets,
+        # Left out, with why -- but not the ones that are simply current;
+        # "already up to date" is not something to report as an exception.
+        "skipped": [s for s in skipped if s.get("reason") != "already up to date"],
     }
 
 
