@@ -6,6 +6,8 @@
 
 **A self-hosted health dashboard for Linux and Windows machines that names the process (or service) making a machine slow, tells you whether the number is even a problem, and lets you fix it from the browser.**
 
+**[Live demo](https://olayzen.github.io/culprit/)** · [Quick start](#quick-start) · [Add the machines to watch](#add-the-machines-to-watch)
+
 </div>
 
 ---
@@ -20,17 +22,9 @@
 
 ---
 
-> **Try it before you install anything:** **[olayzen.github.io/culprit](https://olayzen.github.io/culprit/)**
-> is the real dashboard running in your browser on a recording of a real five-machine
-> fleet -- no backend, nothing leaves the page. Every few minutes an ffmpeg transcode
-> saturates one node: watch the Lag Doctor name it, end it from the process dialog,
-> and read the verdict. Actions are simulated there, and the banner says so.
-
----
-
 ## Contents
 
-- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Quick start](#quick-start) · [Try it without installing](#try-it-without-installing) · [Add the machines to watch](#add-the-machines-to-watch)
+- [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Live demo](#live-demo) · [Quick start](#quick-start) · [Add the machines to watch](#add-the-machines-to-watch)
 - [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
@@ -213,6 +207,33 @@ on one machine or across a fleet, without building anything first.
 
 ---
 
+## Live demo
+
+**[Live demo](https://olayzen.github.io/culprit/)** -- the real dashboard, in your
+browser, on a recording of a five-machine fleet. No backend. Nothing leaves the
+page.
+
+Things to try:
+
+- Every few minutes an ffmpeg transcode saturates one node. Watch the **Lag
+  Doctor** name it.
+- Open the process from the Lag Doctor card, **end it**, and read the verdict
+  the host would have given.
+- One agent has gone quiet. The title bar says how stale its numbers are.
+- Change a setting, mark a finding as expected, throttle a process. Every
+  action plays out in the browser, and the banner says it is simulated.
+
+How it works: the demo is this repository's own `web/` served as a static site
+from the [`demo`](https://github.com/OlaYZen/culprit/tree/demo) branch, with an
+in-browser stand-in for the host answered from JSON recorded off a real fleet
+and scrubbed (hostnames, users, public addresses, MACs, machine ids). Numbers
+wander around their recorded values and one scripted incident repeats, so it
+has the liveness a recording cannot hold. Nothing there is live, and it never
+will be. The branch is never merged here; it is refreshed from `main` by its
+own `tools/build_demo.py`, and its README says how.
+
+---
+
 ## Quick start
 
 On the machine that will host the dashboard:
@@ -250,23 +271,6 @@ systemctl --user status|restart|stop culprit
 To reach it from other machines, bind all interfaces: `CULPRIT_HOST=0.0.0.0
 ./culprit.sh`. On anything but a trusted LAN, put TLS in front of it (see
 [Security & privacy](#security--privacy)).
-
-### Try it without installing
-
-The **[live demo](https://olayzen.github.io/culprit/)** is this repository's own
-`web/` served as a static site from the [`demo`](https://github.com/OlaYZen/culprit/tree/demo)
-branch, with an in-browser stand-in for the host: the same views, charts and
-dialogs, answered from JSON recorded off a real fleet and scrubbed (hostnames,
-users, public addresses, MACs, machine ids). It adds the liveness a recording
-cannot hold -- numbers that wander around their recorded values, one scripted
-incident that repeats, an agent that went quiet -- and every action (end task,
-renice, throttle, expectations, settings) plays out in that in-browser world,
-with the verdict watch judging it the way the host would. Nothing there is
-live, and it never will be: it is for seeing what the product does before you
-run it on a machine of your own.
-
-The branch is never merged here; it is refreshed from `main` by its own
-`tools/build_demo.py`, and its README says how.
 
 ### Add the machines to watch
 
