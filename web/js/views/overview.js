@@ -224,7 +224,9 @@ export function createOverview() {
   let fleetLoaded = false;
 
   async function refreshFleet() {
-    if (!root.isActive || fleetBusy) return;
+    // Paused means stopped, not slowed: the fleet grid is the one thing on
+    // this page that fetches on its own clock rather than through the store.
+    if (!root.isActive || fleetBusy || store.paused) return;
     if (!fleetLoaded) {
       pendingSlot(fleetSlot, el("div.sec", {}, [
         el("div.sec__head", {}, [el("div.sec__title", { text: "Fleet" })]), skeletonFleet(3),
@@ -722,6 +724,7 @@ export function createOverview() {
 
 
   root.subscriptions = [
+    store.on("resume", () => { if (root.isActive) refreshFleet(); }),
     store.on(["cpu", "memory", "gpu", "disk", "network", "pressures"], () => { if (root.isActive) updateFast(store.state); }),
     store.on("diagnosis", () => { if (root.isActive) updateDiagnosis(store.state); }),
     store.on(["system", "volumes"], () => { if (root.isActive) updateSlow(store.state); }),

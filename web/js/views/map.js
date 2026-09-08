@@ -404,8 +404,11 @@ export function createMap() {
     loadPortNames().then(() => { if (root.isActive && graph) renderAll(); });
     load();
     clearInterval(timer);
-    timer = setInterval(() => { if (root.isActive) load(); }, REFRESH_MS);
+    timer = setInterval(() => { if (root.isActive && !store.paused) load(); }, REFRESH_MS);
   };
-  root.subscriptions = [store.on("node", () => { if (root.isActive && graph) { renderFocus(graph.edges || []); draw(); } })];
+  root.subscriptions = [
+    store.on("node", () => { if (root.isActive && graph) { renderFocus(graph.edges || []); draw(); } }),
+    store.on("resume", () => { if (root.isActive) load(); }),
+  ];
   return root;
 }

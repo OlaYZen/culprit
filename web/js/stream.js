@@ -16,7 +16,10 @@
  * The "Live" switch pauses *rendering*, not sampling: the server keeps
  * collecting and the history keeps filling, so unpausing shows the truth rather
  * than resuming from a stale frame. While paused, incoming frames still update
- * the store — only the notifications are withheld.
+ * the store — only the notifications are withheld. A view that refreshes on
+ * its own timer (the fleet grid, the map) must check `store.paused` before
+ * fetching and redrawing, and refresh once on the "resume" event; otherwise
+ * the pause only slows the page instead of stopping it.
  */
 
 const SECTIONS = [
@@ -185,6 +188,8 @@ class Store {
       const sections = Array.from(this.pending);
       this.pending.clear();
       for (const section of sections) this.emit(section);
+      // Views with their own timers catch up here rather than on the next tick.
+      this.emit("resume");
     }
   }
 

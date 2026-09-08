@@ -391,7 +391,8 @@ function boot() {
   navigate(location.hash.slice(1) || "overview", { push: false });
 
   store.on("node", () => { if (store.node !== coronerBadgeNode) updateCoronerBadge(); });
-  setInterval(updateCoronerBadge, 60000);
+  store.on("resume", updateCoronerBadge);
+  setInterval(() => { if (!store.paused) updateCoronerBadge(); }, 60000);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
