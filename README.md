@@ -25,7 +25,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Live demo](#live-demo) · [Quick start](#quick-start) · [Add the machines to watch](#add-the-machines-to-watch)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [The Pulse](#the-pulse) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [The Prognosis](#the-prognosis) · [The Pulse](#the-pulse) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -164,6 +164,7 @@ one thing those tools leave to you: **the last mile of diagnosis, and the fix.**
 | Names **what breaks next** (fd / conntrack / inotify ceilings with the holder, next OOM victim, disk-full ETA with the writer) | ● | ◑ thresholds | ◑ thresholds | ◑ | ○ |
 | Shows **clients being turned away** (accept queue full, `ListenOverflows`) and names the listener | ● | ◑ node exporter counter, no port | ◑ counter | ○ | ○ |
 | Notices what **stopped happening** (a listener nobody reaches, a job that did not run, a worker gone idle) against the machine's **own rhythm** | ● | ◑ `nodata` triggers, per item, hand-written | ◑ `absent()`, per metric, hand-written | ○ | ○ |
+| Names the **part that is wearing out** (a disk reallocating, an SSD's endurance with a date, a DIMM correcting, a link that came up slow) from the hardware's own counters | ● | ◑ exporter + hand-written alerts | ◑ exporter + hand-written alerts | ◑ raw SMART charts | ○ |
 | **Remembers** whether an action helped last time; suggests what is routine | ● | ○ | ○ | ○ | ○ |
 | Pages on a **diagnosis**, not a threshold; "expected" windows | ● | ○ thresholds | ○ | ○ | ○ |
 | Honest about gaps, **no lying zeros** | ● | ○ | ○ | ○ | ○ |
@@ -391,6 +392,7 @@ letting them pass as live (and, if you have set up notifications, tells you).
 | **Services** | Every systemd unit (system *and* `--user`) with `Result` naming *why* it failed (oom-kill, timeout, exit-code), restart-loop counts and timers, plus **exact per-unit CPU / memory / IO / PSI from each cgroup**, and a **pressure-and-limits panel**: stall time inside each unit and container, CPU quota and how often it is hit, memory limit and how full it is, runtime caps |
 | **Outages** | The **Outage Doctor**: what is broken, not slow. A failed unit walked to the **dependency that failed first**, with the root's own journal line quoted; a unit that is running but **no longer listens** on the port it held; a TLS listener serving an **expired certificate** (one local handshake an hour, a forty-line DER parser, no library); the clock not synchronised; **DNS failing** at the resolver; a filesystem **remounted read-only**; `/boot` too full for the next kernel; storage errors; a pending reboot -- each with its root, its fix, how long it has held and what changed before, and for units a **Restart / Start / Reload button** whose outcome is verified against the next samples |
 | **Absence** | The **Pulse**: what **stopped happening**. Every other detector fires on a signal that is present; this one learns each machine's own rhythm -- one hourly bucket per listener, per running service and for the machine's own network, kept for weeks -- and names the things doing less than they normally do *at this hour of this weekday*: a **listener nobody reaches any more**, a service that is **running and idle**, a **timer that did not fire**, and -- from the run each scheduled job records -- one that **failed**, one **taking far longer than it takes**, one that **started before the last finished**, and one that **succeeded without doing anything** (exited 0 in a fifth of its usual time, having moved none of its usual bytes). **Cron** is judged the same way from its own schedules and journal lines, and a unit that **stopped writing to the log** while it stays active is its own signal -- the shape a deadlocked daemon has. Nothing crosses a threshold in any of those, so nothing else catches them. Every item quotes the baseline it was judged against (*0 connections for 42 min; the last 12 Tuesdays at 14:00 saw 180-400*), and below two same weekdays of history it says so instead of guessing |
+| **Hardware** | The **Prognosis**: what is **wearing out**, from the counters the hardware itself keeps. A disk's own SMART attributes read by id (5, 187, 188, 197, 198, 199 and the drive's `when_failed` flag -- never a vendor attribute whose meaning would have to be guessed), an SSD's **endurance estimate with a date** fitted over months of daily readings, the memory controller's **ECC counts per module**, a **PCIe link retrying** on its own error counters, a **SATA link that came up at half speed**, an **interface below the speed this machine has run it at**, and a **battery that no longer holds what it was built for**. A counter that *moved since the last read* is the finding; one that is not zero and has not moved is a warning that says since when; a zero is a fact, not a bill of health. Nothing is ever asked of the hardware: reads carry `-n standby`, so a sleeping disk is reported asleep with its last values and **left asleep**, and no self-test is ever started |
 | **Kernel** | What every busy kernel thread *is* (writeback, journal commit, reclaim, softirq, dm-crypt, RAID, ZFS, NFS…) and what it is a symptom of; `/proc/mdstat` sync progress; per-core interrupt and softirq rates naming the device behind a pinned core |
 | **Ceilings** | File descriptors per process against its own `nofile` limit, system-wide file handles, threads, PIDs, `nf_conntrack`, inotify watches and instances, TasksMax per unit, each with its current value, its ceiling, its holder and the sysctl that raises it; the OOM killer's own victim ranking |
 | **Changes** | A running record of what changed: units, timers, mounts, listeners, interfaces, routes, VPN, containers, quotas, packages, logins, newcomers among processes; attached to findings and incidents as *coincides with* |
@@ -707,6 +709,80 @@ box shows a page that says nothing is broken, and the checks strip says what
 was looked at. Outage items go out over the notification channels like
 findings, once while they hold and once when they clear.
 
+## The Prognosis
+
+Every doctor above reads software. All of them point at the hardware and none
+of them reads it: the Outage Doctor's storage item ends with *"check SMART and
+back up first"*, the Events view says *"SMART data and back up early"*, and the
+Coroner names a hardware error only once the machine is already dead.
+
+The Prognosis is the layer underneath. It reads the wear and error counters the
+hardware already keeps and says **which part is on its way out, how far along
+it is, and what it is costing today**:
+
+| It says | From |
+|---|---|
+| *sda is failing: Current_Pending_Sector (197) is 14, up from 3 at 03:10; Reallocated_Sector_Ct (5) is 27, unchanged since 3 Aug* | the drive's own SMART attributes, by id |
+| *nvme0n1 has used 91 % of its rated endurance. At 0.26 % a day over the last 90 days it reaches 100 % around 12 Oct* | `percentage_used`, fitted over months of daily readings |
+| *sda is losing frames on the wire, not on the platter* | attribute 199 (UDMA CRC) rising -- the cable, connector or backplane |
+| *DIMM_A2 is correcting memory errors: 4 in the last day* | the memory controller's own ECC counts, per module |
+| *The NVMe controller at 01:00.0 is retrying: 1 240 corrected link errors today* | PCIe AER counters |
+| *sda negotiated 3.0 Gbps on a 6.0 Gbps link* | the SATA link's own speed |
+| *BAT0 holds 68 % of the charge it was built for* | design capacity vs full charge |
+
+A SMART exporter can graph all of those numbers. What it leaves to you is the
+vendor semantics, the threshold and the sentence -- which is the whole job.
+
+**The rules it keeps, because they are what make it worth reading:**
+
+- **Read only. Never a self-test, never a wake-up.** Every read carries
+  `smartctl -n standby`, so a spun-down drive is reported *asleep, left asleep*
+  with the values from its last reading. There is no `-t` anywhere in the
+  collector at any setting. Waking someone's archive shelf every half hour is
+  not monitoring, and an operator has to turn on *Wake sleeping disks*
+  deliberately before one is touched at all.
+- **Standard attributes only, each quoted by id.** ATA 5, 187, 188, 197, 198
+  and 199, the drive's own `when_failed` flag, and the NVMe health log as the
+  specification defines it. Everything else the drive reports is in the table
+  to read and is never judged: a vendor attribute means what that vendor says
+  it means, and guessing is how monitoring tools invent failures.
+- **Rising beats non-zero beats absent.** A counter that moved since the last
+  read is the finding. One that is not zero and has not moved is a warning that
+  says *since when* -- and where the record only goes back so far, it says that
+  instead. A zero is a fact, not a bill of health.
+- **A forecast states its window.** *"91 %, 100 % around 12 October"* is said
+  only from at least fourteen daily readings, and always with the number of
+  days it was fitted over. Error counters are counted, never extrapolated.
+- **A guest says so.** On a VM the disks are the hypervisor's files, EDAC does
+  not exist and the links do not negotiate: the page marks the virtual disks,
+  judges none of them, and says to run an agent on the hypervisor instead.
+- **Nothing that cannot be read is rendered as fine.** Every source reports its
+  own availability with the exact thing that would unlock it (*smartctl is not
+  installed*, *needs CAP_SYS_RAWIO or root*, *no EDAC controller is
+  registered*), and the page never claims "ok" without having read something --
+  a link speed is not a health check.
+
+There are no buttons. Nothing here is fixed by restarting something, so an item
+offers the fix in words and the command to confirm it: *back up first, then
+`smartctl -a /dev/sda`*, and for a RAID member, that the rebuild after the swap
+reads every other member end to end -- which is when a second tired disk tends
+to fail.
+
+The rest of the tool joins on: a storage finding in the Lag Doctor gains *the
+hardware under this is not well* while keeping its culprits (a failing disk does
+not make the process hammering it innocent), the Outage Doctor's storage item
+quotes what SMART said instead of telling you to go and read it, and the Coroner
+gets the week of counters before a death -- evidence under *storage stopped
+answering*, context under *stopped without warning*, and never a change of
+verdict, because a machine with a reallocating drive can still be unplugged by a
+cleaner.
+
+The host keeps one row per device per day for over a year, which is what makes
+*unchanged since 3 August* and an endurance date possible at all; a year of a
+ten-disk box is under four thousand rows.
+
+---
+
 ## The Pulse
 
 Three doctors ask what is *there*: a stall, a failure, a death. The Pulse asks
@@ -886,6 +962,8 @@ disk), ~230 processes, 209 systemd units, a 1.3 GB journal:
 | proc · full table, per-unit cgroups, kernel state + lag scoring | 2 s | ~35-55 ms |
 | slow · units + cgroups, mounts, sockets, probes, sync | 20 s | ~0.5-1.2 s |
 | events · journal, crash files, pending reboot | 120 s | ~0.6-1 s warm |
+| events · the Prognosis's sysfs sweep (links, NICs, ECC, AER, batteries) | 120 s | ~3 ms |
+| events · the Prognosis's SMART pass, one `smartctl -j` per disk | 30 min | one call per disk |
 
 **Total: well under 5% of one core, ~65 MB resident.** A watched machine's agent
 depends only on psutil and the standard library, opens no ports, and sends a few
@@ -935,6 +1013,24 @@ Culprit tells you what it *can't* do as plainly as what it can:
   facts and are checked from the first report. A health check that keeps one
   connection alive can also keep a dead service looking busy; the comparison is
   of magnitude, not presence, but a low-rate probe is a known blind spot.
+- **A guest cannot see the hardware it runs on.** On a VM the disks are the
+  hypervisor's files, EDAC is absent and the SATA links do not negotiate, so
+  the Prognosis marks the virtual disks as such, judges none of them, and says
+  to run an agent on the hypervisor instead of rendering a fiction as healthy.
+- **Hardware RAID controllers are not read** in this version: a disk behind
+  `megaraid`, `cciss` or `3ware` is reported as one smartctl could not open,
+  with that reason, rather than silently omitted. USB bridges work wherever
+  smartctl's own `--scan-open` can address them.
+- **Vendor SMART attributes are shown, never judged.** Attribute 231 means
+  "SSD life left" on one drive and "temperature" on the next, so only the
+  standard ids and the drive's own `when_failed` flag reach a verdict;
+  everything else is in the table to read. Where a raw field is packed (some
+  Seagates), the row says so rather than reporting twelve billion reallocated
+  sectors.
+- **An endurance date needs fourteen daily readings** and names the window it
+  was fitted over; below that the wear is shown without a date. Error counters
+  are counted, never extrapolated -- a disk that reallocated fourteen sectors
+  today says nothing about tomorrow.
 - **Commit charge is shown always but alerted on only under strict overcommit:**
   under the default policy, `Committed_AS` over `CommitLimit` is normal, and
   alarming on it would be confident nonsense.
