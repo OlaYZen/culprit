@@ -48,7 +48,10 @@ LIMIT = 400          # newest commits served; the view lists them all
 _SEP_FIELD = "\x1f"
 _SEP_RECORD = "\x1e"
 _SUBJECT = re.compile(r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?: (?P<summary>.+)$")
-_VERSION_LINE = re.compile(r'^([-+])\s*"version"\s*:\s*"([^"]+)"', re.M)
+# Either layout of version.json: the key on its own line, or the whole
+# object on one line ('+{"version": "0.44.1-b"}'), which a shell one-liner
+# once wrote and which silently dropped five versions from the grouping.
+_VERSION_LINE = re.compile(r'^([-+])\s*\{?\s*"version"\s*:\s*"([^"]+)"', re.M)
 
 AGENT_REPO_URL = "https://github.com/OlaYZen/culprit-agent.git"
 AGENT_MIRROR = ROOT / "data" / "culprit-agent.git"
