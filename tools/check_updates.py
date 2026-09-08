@@ -107,6 +107,23 @@ def check_remote_version_fetch() -> None:
         registry.refresh_remote_version()
         check("a call after the window elapsed refetches", calls["n"] == 2)
 
+        # What the check reports as updatable is update_targets' answer, not
+        # the raw version comparison: a Docker agent behind the published
+        # version is not something this host can move, and counting it would
+        # promise an action that does not exist.
+        docker_fleet = [
+            {"name": "dock-01", "enabled": True, "online": True, "container": "docker",
+             "update_capable": True, "update_available": True, "agent_version": "0.19.0-b"},
+            {"name": "web-01", "enabled": True, "online": True, "container": None,
+             "update_capable": True, "update_available": True, "agent_version": "0.19.0-b"},
+        ]
+        picked, left_out = nodes_mod.update_targets(docker_fleet)
+        check("a containerised agent behind the published version is not "
+              "updatable, however far behind it is",
+              picked == ["web-01"]
+              and any(s["name"] == "dock-01" and "image" in s["reason"] for s in left_out),
+              str(left_out))
+
         # The Nodes view's "Check for updates": the half-hour window is for a
         # background task, not for someone who has just pushed a release. A
         # few seconds ago is inside that window and outside the button's floor.
