@@ -910,6 +910,9 @@ account and no telemetry.
   operator` sets one from the CLI (default `admin`, matching the single tier
   every account had before roles existed); **Settings › Users** manages roles
   for everyone else. Culprit always keeps at least one admin.
+- **Sign in with Authentik:** an OpenID Connect provider can be a second way
+  in (see below). Accounts it opens are ordinary dashboard users; ones it
+  *creates* have no password and are marked so in Users.
 - **Agents:** per-node bearer tokens, SHA-256-hashed at rest, constant-time
   verified, individually revocable. Reports are size-capped and strictly
   sanitised before they touch host state.
@@ -925,6 +928,51 @@ account and no telemetry.
   undeclared address gets a `400`, not silent trust, so a visitor can never spoof
   the address the login limiter keys on. An optional Host allow-list shuts DNS
   rebinding.
+
+### Sign in with Authentik
+
+Culprit speaks OpenID Connect, built and tested against
+[Authentik](https://goauthentik.io) (any OIDC issuer works the same way). It is
+off until an admin fills in **Settings › Sign-in**; then the login page offers
+*Continue with Authentik* under the password form.
+
+On the Authentik side, create an **OAuth2/OpenID provider** — client type
+**Confidential**, signing key set, scopes `openid`, `profile` and `email` — and
+an **application** that uses it. The redirect URI must be exactly what the
+Sign-in page shows (`https://<how your browser reaches Culprit>/api/auth/oidc/callback`;
+Authentik matches it strictly, so reach the dashboard the way your users will
+and copy it from there). The **issuer URL** is the application's OpenID
+configuration issuer, `https://<authentik>/application/o/<application-slug>/`,
+*with* the trailing slash; **Check issuer** on the Sign-in page reads its
+discovery document and lists the endpoints it found. Leave the provider's
+*subject mode* alone once people have signed in: it is the stable id every link
+hangs on, and changing it makes every identity a stranger.
+
+Who gets in is two separate decisions. Authentik's application policies decide
+*who may use the application*. Culprit's **Create an account on first sign-in**
+switch — **off by default** — decides whether someone it vouches for, whom no
+account here is linked to, gets one on the spot (with the role you pick, and
+optionally only from the e-mail domains you list). With it off, only two kinds
+of account open this way: one an admin **linked by e-mail** in Users, claimed
+at that person's first sign-in when the provider marks the address verified;
+or one its owner **connected** themselves from Account, behind their password.
+An account the provider created has no password: it shows as such in Users, a
+password login for it is refused in the same time as any wrong password, and an
+admin can give it one from the CLI (`python -m culprit users add <name>`) or
+remove it. Unlinking such an account revokes its sessions, because nothing
+else could open it.
+
+What the host does with the provider's answer: the authorization-code flow
+with PKCE, a signed ten-minute state cookie and a nonce, then the ID token's
+claims (`iss`, `aud`, `exp`, `nonce`, `sub`) checked and its `sub` cross-checked
+against the userinfo endpoint. There is no JOSE library and no signature check:
+the token is read straight out of the token endpoint's TLS response, which the
+OpenID Connect spec allows a client to rely on instead — so the issuer must be
+`https://` (plain `http://` only for a loopback issuer, a development setup).
+The client secret is write-only through the API and lives in `config.json`,
+which is now written `600`. Failures come back to the login page as one of a
+fixed set of sentences, never the provider's own text. Culprit's *Sign out*
+clears its own session only; it does not sign you out of Authentik.
 
 A suite of security tools ships with the host (`tools/audit_security.py`,
 `check_security.py`, `check_auth.py`, `check_ingest.py`); run them before you
