@@ -42,7 +42,7 @@ import { api, store } from "../stream.js";
 import {
   combobox, confirmAction, emptyState, icons, inlineResult, note, pendingSlot, readySlot, segmented, setBusy, skeletonSection, subnav, switchControl,
 } from "../ui.js";
-import { canAdminister, canOperate, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
+import { canAdminister, canOperate, codeRow, kv, kvs, pill, section, subhead, viewHead } from "./shared.js";
 
 const SAVE_LABEL = "Save changes";
 
@@ -128,6 +128,7 @@ const PAGES = [
   { key: "sampling", label: "Sampling", icon: icons.timer },
   { key: "account", label: "Account", icon: icons.user },
   { key: "users", label: "Users", icon: icons.user },
+  { key: "signin", label: "Sign-in", icon: icons.lock },
   { key: "network", label: "Network", icon: icons.shield },
   { key: "pulse", label: "The Pulse", icon: icons.timer },
   { key: "prognosis", label: "The Prognosis", icon: icons.disk },
@@ -136,7 +137,19 @@ const PAGES = [
 ];
 
 // Pages that edit configuration get the form + Save bar; the rest act.
-const SAVES = new Set(["general", "deployment", "sampling", "network", "notifications", "pulse", "prognosis"]);
+const SAVES = new Set(["general", "deployment", "sampling", "signin", "network", "notifications", "pulse", "prognosis"]);
+
+// What the provider round-trip can say when it comes back to the Account
+// page (?oidc=<code>): a fixed set, mirrored from oidc.ERRORS on the host.
+const LINK_MESSAGES = {
+  linked: ["Connected. Signing in with the provider now opens this account.", "ok"],
+  session: ["You were no longer signed in as the account you started connecting — sign in and try again.", "error"],
+  linked_elsewhere: ["That identity is already connected to another account.", "error"],
+  taken: ["This account is already connected to a provider identity.", "error"],
+  denied: ["The provider did not approve the sign-in.", "error"],
+  expired: ["That took longer than ten minutes — try again.", "error"],
+  rate_limited: ["Too many attempts from your address — wait a few minutes.", "error"],
+};
 
 const ROLE_HINT = {
   viewer: "Read-only: sees every dashboard and history view, no actions.",
@@ -170,6 +183,7 @@ export function createSettings() {
     deploy: el("div"), autoUpdate: el("div"),
     sampling: el("div.stack"),
     account: el("div"), users: el("div"),
+    signin: el("div"), signinCheck: el("div"),
     trust: el("div"), nodes: el("div"),
     notify: el("div"), delivery: el("div"),
     pulse: el("div"), pulseNodes: el("div"),
@@ -182,6 +196,7 @@ export function createSettings() {
     sampling: [slots.sampling],
     account: [slots.account],
     users: [slots.users],
+    signin: [slots.signin, slots.signinCheck],
     network: [slots.trust, slots.nodes],
     notifications: [slots.notify, slots.delivery],
     pulse: [slots.pulse, slots.pulseNodes],
@@ -413,6 +428,8 @@ export function createSettings() {
     }
     pendingSlot(slots.account, skeletonSection("Account", 4));
     pendingSlot(slots.users, skeletonSection("Users", 4));
+    pendingSlot(slots.signin, skeletonSection("Sign in with a provider", 6));
+    pendingSlot(slots.signinCheck, skeletonSection("Redirect URI and check", 3));
     pendingSlot(slots.trust, skeletonSection("Network trust", 5));
     pendingSlot(slots.nodes, skeletonSection("Nodes and access", 3));
     pendingSlot(slots.pulse, skeletonSection("The Pulse", 5));
@@ -434,13 +451,14 @@ export function createSettings() {
       renderSampling();
       renderAccount();
       renderUsers();
+      renderSignin();
       renderTrust();
       renderNodes();
       renderPulse();
       renderPrognosis();
       renderNotify();
       renderExpectations();
-      for (const page of Object.values(pages)) if (page.bar) { page.bar.node.hidden = false; touch(page); }
+      for (const page of Object.values(pages)) if (page.bar && !page.locked) { page.bar.node.hidden = false; touch(page); }
       head.setPending(false);
     } catch (error) {
       head.setPending(false);
@@ -765,7 +783,7 @@ export function createSettings() {
   /* ── Account ─────────────────────────────────────────────────────── */
   /** The signed-in account. Never rebuilt from a live update while it is
    *  being filled in; `force` is for deliberate re-seeds after a rename. */
-  function renderAccount(force = false) {
+  async function renderAccount(force = false) {
     if (!force && (slots.account.contains(document.activeElement)
         || [...slots.account.querySelectorAll("input")].some((i) => i.value && i.value !== i.getAttribute("value")))) {
       return;
@@ -779,6 +797,13 @@ export function createSettings() {
       return;
     }
     const username = auth.username;
+    let acct = { has_password: true, identity: null, providers: [] };
+    try {
+      acct = await api("/api/account");
+    } catch (error) {
+      readySlot(slots.account, section({ title: "Account", body: emptyState("Could not load", error.message) }));
+      return;
+    }
     const nameInput = el("input", { type: "text", id: "acct-username", value: username, autocomplete: "off", spellcheck: "false" });
     const namePw = el("input", { type: "password", id: "acct-name-pw", autocomplete: "current-password" });
     const nameResult = el("div.result");
@@ -825,9 +850,83 @@ export function createSettings() {
       setBusy(pwBtn, false, "Update password");
     });
 
-    readySlot(slots.account, section({
-      title: "Account", meta: `signed in as ${username}`,
-      body: el("div.cols.cols--2", {}, [
+    // The provider identity this account signs in with (Settings > Sign-in
+    // configures the provider). Connecting starts a round-trip that leaves
+    // the page; the outcome comes back as ?oidc=<code> and is shown once.
+    const provider = (acct.providers || [])[0];
+    const providerName = provider?.label || "the provider";
+    const identity = acct.identity;
+    const linkResult = el("div.result");
+    const params = new URLSearchParams(location.search);
+    if (params.has("oidc")) {
+      const [message, tone] = LINK_MESSAGES[params.get("oidc")] || ["Connecting to the provider failed. Try again.", "error"];
+      inlineResult(linkResult, message, tone);
+      history.replaceState(null, "", location.pathname + location.hash);
+    }
+    const signinBlock = el("div", {}, [subhead(`Sign in with ${providerName}`)]);
+    if (identity?.subject_set) {
+      const facts = kvs([
+        kv("Connected as", identity.email || identity.display || identity.subject, { mono: !identity.email && !identity.display }),
+        kv("Connected", fmt.dateTime(identity.linked_at)),
+        kv("Last sign-in", identity.last_login ? fmt.ago(identity.last_login) : fmt.dash),
+      ]);
+      const aside = el("div");
+      signinBlock.append(el("div.cols.cols--2", {}, [facts, aside]));
+      if (acct.has_password) {
+        const unlinkPw = el("input", { type: "password", id: "acct-unlink-pw", autocomplete: "current-password" });
+        const unlinkBtn = el("button.btn", { type: "button" }, ["Disconnect"]);
+        unlinkBtn.addEventListener("click", () => {
+          confirmAction({
+            title: `Disconnect ${providerName}?`,
+            message: "Signing in with the provider will no longer open this account. Your password keeps working.",
+            confirmLabel: "Disconnect", danger: true,
+            onConfirm: async () => {
+              await api("/api/account/oidc", { method: "DELETE", body: JSON.stringify({ current_password: unlinkPw.value }) });
+              setTimeout(() => renderAccount(true), 600);
+              return "Disconnected.";
+            },
+          });
+        });
+        aside.append(
+          fieldRow({ id: unlinkPw.id, label: "Current password", unit: "to confirm", input: unlinkPw }),
+          el("div.formrow", { style: { marginTop: "12px" } }, [unlinkBtn, linkResult]),
+        );
+      } else {
+        aside.append(el("div.faint.small", { style: { lineHeight: "1.55" },
+          text: "This is the only way into this account: it has no password, so the identity cannot be disconnected from here. "
+              + "An admin can set a password from the CLI (python -m culprit users add <name>)." }), linkResult);
+      }
+    } else if (identity) {
+      signinBlock.append(
+        kvs([kv("Pending", `${identity.email} may claim this account at its first sign-in`, { tone: "info" })]),
+        linkResult,
+      );
+    } else if (provider && acct.has_password) {
+      const linkPw = el("input", { type: "password", id: "acct-link-pw", autocomplete: "current-password" });
+      const linkBtn = el("button.btn", { type: "button" }, [`Connect ${providerName}`]);
+      linkBtn.addEventListener("click", async () => {
+        setBusy(linkBtn, true, "Leaving for the provider…");
+        try {
+          const payload = await api("/api/account/oidc/link", { method: "POST", body: JSON.stringify({ current_password: linkPw.value }) });
+          window.location.href = payload.url;
+          return;
+        } catch (error) {
+          inlineResult(linkResult, error.message, "error");
+        }
+        setBusy(linkBtn, false, `Connect ${providerName}`);
+      });
+      signinBlock.append(
+        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "6px" },
+          text: `You leave for ${providerName}, sign in there, and come back here with the identity connected to this account.` }),
+        fieldRow({ id: linkPw.id, label: "Current password", unit: "to confirm", input: linkPw }),
+        el("div.formrow", { style: { marginTop: "12px" } }, [linkBtn, linkResult]),
+      );
+    } else {
+      signinBlock.append(el("div.faint.small", { text: "No sign-in provider is configured on this host." }), linkResult);
+    }
+
+    const credentials = acct.has_password
+      ? [
         el("div", {}, [
           subhead("Change username"),
           fieldRow({ id: nameInput.id, label: "Username", input: nameInput }),
@@ -841,8 +940,24 @@ export function createSettings() {
           fieldRow({ id: confPw.id, label: "Confirm new password", input: confPw }),
           el("div.formrow", { style: { marginTop: "12px" } }, [pwBtn, pwResult]),
         ]),
+      ]
+      : [el("div", {}, [
+        subhead("Password"),
+        note("info", el("span", {}, [
+          `This account was created by ${providerName} and has no password, so there is nothing to change here. `,
+          "An admin can give it one from the CLI: ", el("code", { text: `python -m culprit users add ${username}` }), ".",
+        ])),
+      ])];
+
+    readySlot(slots.account, section({
+      title: "Account", meta: `signed in as ${username}`,
+      body: el("div.stack", {}, [
+        el("div.cols.cols--2", {}, credentials),
+        signinBlock,
       ]),
-      foot: "Both changes require your current password. Renaming re-issues your session automatically — you stay signed in.",
+      foot: acct.has_password
+        ? "Every change here requires your current password. Renaming re-issues your session automatically — you stay signed in."
+        : "Renaming needs a password, so it is not offered for this account; an admin can rename or remove it from Users.",
     }));
   }
 
@@ -892,11 +1007,13 @@ export function createSettings() {
     });
 
     const table = el("table.tbl.tbl--tight");
-    table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead>";
+    table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>Sign-in</th><th>Created</th><th></th></tr></thead>";
     const tbody = el("tbody");
     const rowResult = el("div.result");
+    const providerName = config?.oidc_label || "Authentik";
     for (const user of list) {
       const isSelf = user.username === me;
+      const signin = signinCell(user, providerName, rowResult);
       const seg = segmented({
         options: ROLE_OPTIONS, value: user.role,
         onChange: async (role) => {
@@ -930,11 +1047,61 @@ export function createSettings() {
       tbody.append(el("tr", {}, [
         el("td", { text: user.username + (isSelf ? " (you)" : "") }),
         el("td", {}, [seg]),
+        el("td", {}, [signin]),
         el("td.faint", { text: fmt.dateTime(user.created_at) }),
         el("td.n", {}, [remove]),
       ]));
     }
     table.append(tbody);
+
+    /** The identity column: what the account signs in with, and the admin's
+     *  two verbs on it -- link an e-mail address the provider will vouch
+     *  for (claimed at that person's first sign-in), or unlink. */
+    function signinCell(user, label, result) {
+      const cell = el("div.formrow", { style: { gap: "6px", flexWrap: "wrap" } });
+      const identity = user.identity;
+      if (!user.has_password) cell.append(pill("no password", "warn"));
+      if (identity) {
+        cell.append(identity.subject_set
+          ? pill(`${label} · ${identity.email || identity.display || "linked"}`, "ok")
+          : pill(`pending · ${identity.email}`, "info"));
+        const unlink = el("button.btn.btn--sm", { type: "button", title: `Remove the ${label} identity from this account` }, ["Unlink"]);
+        unlink.addEventListener("click", () => {
+          confirmAction({
+            title: `Unlink ${user.username} from ${label}?`,
+            message: user.has_password
+              ? "Signing in with the provider will no longer open this account; the password keeps working."
+              : "This account has no password, so it can no longer sign in at all and its open sessions stop working. Remove it, or give it a password from the CLI afterwards.",
+            confirmLabel: "Unlink", danger: !user.has_password,
+            onConfirm: async () => {
+              const payload = await api(`/api/users/${encodeURIComponent(user.username)}/identities/oidc`, { method: "DELETE" });
+              renderUsers();
+              return payload.note || `'${user.username}' unlinked.`;
+            },
+          });
+        });
+        cell.append(unlink);
+        return cell;
+      }
+      const email = el("input", { type: "email", placeholder: "e-mail at the provider", autocomplete: "off", spellcheck: "false",
+        style: { width: "16em" }, "aria-label": `E-mail to link ${user.username} to` });
+      const link = el("button.btn.btn--sm", { type: "button", title: "Whoever the provider vouches for under this address may claim the account at their first sign-in" }, ["Link"]);
+      link.addEventListener("click", async () => {
+        const value = email.value.trim();
+        if (!value) { inlineResult(result, "Enter the e-mail address the provider knows this person by.", "error"); return; }
+        setBusy(link, true, "Linking…");
+        try {
+          await api(`/api/users/${encodeURIComponent(user.username)}/identities/oidc`, { method: "PUT", body: JSON.stringify({ email: value }) });
+          inlineResult(result, `'${user.username}' may now be claimed by ${value} at their first sign-in.`, "ok");
+          renderUsers();
+        } catch (error) {
+          inlineResult(result, error.message, "error");
+        }
+        setBusy(link, false, "Link");
+      });
+      cell.append(el("div.input", {}, [email]), link);
+      return cell;
+    }
 
     readySlot(slots.users, section({
       title: "Users", meta: `${list.length} account${list.length === 1 ? "" : "s"}`,
@@ -949,7 +1116,134 @@ export function createSettings() {
         el("div.formrow", { style: { marginTop: "12px" } }, [roleSeg, addBtn, addResult]),
       ]),
       foot: "A role change applies as soon as you pick it and takes effect on that account's next request. Culprit always keeps "
-          + "at least one admin, so the last one cannot be demoted or removed.",
+          + "at least one admin, so the last one cannot be demoted or removed. Sign-in links an account to the identity a "
+          + "provider vouches for (Settings › Sign-in); an account the provider created has no password and shows as such.",
+    }));
+  }
+
+  /* ── Sign-in ─────────────────────────────────────────────────────── */
+  /** The OpenID Connect provider (built for Authentik; any issuer works).
+   *  Admin-only like Users: the tab renders for everyone and says why it is
+   *  empty. The client secret is write-only, the same idiom as the SMTP
+   *  password. The second section is what the admin needs on the provider's
+   *  side -- the exact redirect URI -- and a live check of the issuer. */
+  function renderSignin() {
+    const page = pages.signin;
+    if (!canAdminister()) {
+      page.locked = true;
+      page.bar.node.hidden = true;
+      readySlot(slots.signin, section({
+        title: "Sign in with a provider",
+        body: emptyState("Admin access required",
+          `Your account is ${store.state.auth?.role || "not signed in"} — only an admin can configure how people sign in.`),
+      }));
+      readySlot(slots.signinCheck, []);
+      return;
+    }
+    page.locked = false;
+    const missing = () => ["oidc_issuer", "oidc_client_id"].filter((k) => !config[k]).concat(config.oidc_client_secret_set ? [] : ["oidc_client_secret"]);
+    const signinMeta = () => (!config.oidc_enabled ? "off" : missing().length ? "on, but incomplete" : `on — ${config.oidc_label || "Authentik"}`);
+    const FIELD_NAMES = { oidc_issuer: "the issuer URL", oidc_client_id: "the client ID", oidc_client_secret: "the client secret" };
+    const status = el("div");
+    const renderStatus = () => {
+      const gaps = missing();
+      render(status, config.oidc_enabled && gaps.length
+        ? note("warn", el("span", { text: `Switched on, but not offered on the login page until ${gaps.map((k) => FIELD_NAMES[k]).join(", ")} ${gaps.length === 1 ? "is" : "are"} filled in.` }), { margin: true })
+        : []);
+    };
+    renderStatus();
+
+    const secretRow = textField(page, "oidc_client_secret", {
+      label: "Client secret", password: true, value: "",
+      placeholder: config.oidc_client_secret_set ? "unchanged (set)" : "not set",
+      help: "Stored in config.json (mode 600); never shown again here. Blank leaves it as it is.",
+    });
+    const secretInput = secretRow.querySelector("input");
+    page.fields.get("oidc_client_secret").synced = () => {
+      secretInput.value = "";
+      secretInput.placeholder = config.oidc_client_secret_set ? "unchanged (set)" : "not set";
+    };
+
+    const node = section({
+      title: "Sign in with a provider", meta: signinMeta(),
+      body: el("div", {}, [
+        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "12px" },
+          text: "OpenID Connect, built for Authentik (any issuer works). People sign in at the provider and come back with a session here; "
+              + "which account that opens is decided below. The issuer must be https: the host trusts the provider's TLS in place of "
+              + "a token-signature library." }),
+        status,
+        el("div.cols.cols--2", {}, [
+          el("div", {}, [
+            el("div.checkgroup", { style: { marginBottom: "12px" } }, [
+              boolField(page, "oidc_enabled", { label: "Offer it on the login page", title: "The password form stays; this adds a second way in" }),
+            ]),
+            textField(page, "oidc_label", { label: "Button label", placeholder: "Authentik", help: "“Continue with …” on the login page." }),
+            textField(page, "oidc_issuer", { label: "Issuer URL", placeholder: "https://auth.example.com/application/o/culprit/",
+              help: "Authentik: the application's OpenID configuration issuer, with its trailing slash. Discovery is read from <issuer>/.well-known/openid-configuration." }),
+            textField(page, "oidc_client_id", { label: "Client ID" }),
+            secretRow,
+            textField(page, "oidc_scopes", { label: "Scopes", unit: "space-separated", help: "openid is required; profile supplies the username, email the address that pre-links match on." }),
+          ]),
+          el("div", {}, [
+            subhead("Who gets an account"),
+            el("div.checkgroup", { style: { marginBottom: "12px" } }, [
+              boolField(page, "oidc_auto_create", { label: "Create an account on first sign-in",
+                title: "Off: only accounts an admin linked by e-mail (Users), or a signed-in person connected from Account, can sign in this way" }),
+            ]),
+            choiceField(page, "oidc_default_role", { label: "Role for new accounts", options: ROLE_OPTIONS }),
+            el("div", { style: { marginTop: "12px" } }, [
+              listField(page, "oidc_allowed_domains", { label: "Allowed e-mail domains", unit: "one per line, empty = any", placeholder: "example.com",
+                help: "Applied when an account is created and when a pre-link is claimed, using the address the provider marks verified. "
+                    + "An identity that is already linked is never re-checked." }),
+            ]),
+          ]),
+        ]),
+      ]),
+      foot: "Off by default on purpose: with an issuer anyone can register at, creating accounts on sight would let anyone in as a viewer. "
+          + "Gate who may use the application on the provider's side; decide here whether they get an account.",
+    });
+    page.after = () => { node.metaNode.textContent = signinMeta(); renderStatus(); renderUsers(); };
+    readySlot(slots.signin, node);
+
+    const checkNode = el("div");
+    const checkResult = el("div.result");
+    const check = el("button.btn", { type: "button", title: "Fetch the issuer's discovery document now" }, ["Check issuer"]);
+    check.addEventListener("click", async () => {
+      setBusy(check, true, "Checking…");
+      checkNode.replaceChildren();
+      try {
+        const out = await api("/api/oidc/test", { method: "POST", body: "{}" });
+        if (!out.ok) {
+          inlineResult(checkResult, out.error || "The issuer could not be read.", "error");
+        } else {
+          inlineResult(checkResult, out.configured ? "The issuer answers; the provider is ready." : "The issuer answers; fill in the rest and save.", "ok");
+          render(checkNode, kvs([
+            kv("Issuer", out.issuer || fmt.dash, { mono: true }),
+            kv("Authorization", out.authorization_endpoint || fmt.dash, { mono: true }),
+            kv("Token", out.token_endpoint || fmt.dash, { mono: true }),
+            kv("Userinfo", out.userinfo_endpoint || fmt.dash, { mono: true }),
+            kv("PKCE S256", out.pkce_s256 === null ? "not advertised" : out.pkce_s256 ? "advertised" : "not supported", { tone: out.pkce_s256 ? "ok" : "warn" }),
+            kv("Scopes offered", (out.scopes_supported || []).join(" ") || fmt.dash, { mono: true }),
+          ]));
+        }
+      } catch (error) {
+        inlineResult(checkResult, error.message, "error");
+      }
+      setBusy(check, false, "Check issuer");
+    });
+    readySlot(slots.signinCheck, section({
+      title: "Redirect URI and check",
+      body: el("div", {}, [
+        el("div.faint.small", { style: { lineHeight: "1.55", marginBottom: "8px" },
+          text: "Register this exact redirect URI on the provider (Authentik matches it strictly). It is this host as your browser reaches it now — "
+              + "behind a proxy or under another name, open the dashboard that way and copy it from there." }),
+        codeRow(`${location.origin}/api/auth/oidc/callback`),
+        el("div.formrow", { style: { marginTop: "12px" } }, [check, checkResult]),
+        checkNode,
+      ]),
+      foot: "Authentik: create an OAuth2/OpenID provider (confidential client, this redirect URI, scopes openid profile email) and an application "
+          + "using it; the issuer URL is the application's, with its trailing slash. Leave the subject mode as it is once people have signed in: "
+          + "changing it changes every identity.",
     }));
   }
 
@@ -1021,8 +1315,9 @@ export function createSettings() {
         { tone: node.enabled === false || expectedOff ? null : node.online ? "ok" : "crit" }));
     }
     const foot = el("span");
-    foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view. Dashboard users are the one thing "
-      + "that stays on the CLI (<code>python -m culprit users add &lt;name&gt;</code>) — someone must exist before anyone can sign in to create anyone.";
+    foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view; dashboard users in <strong>Users</strong>, "
+      + "and how they sign in under <strong>Sign-in</strong>. The first user is the one thing that stays on the CLI "
+      + "(<code>python -m culprit users add &lt;name&gt;</code>) — someone must exist before anyone can sign in to create anyone.";
     readySlot(slots.nodes, section({
       title: "Nodes and access", meta: `${list.filter((n) => n.online).length} of ${list.length} online`, body: kvs(rows), foot,
     }));
