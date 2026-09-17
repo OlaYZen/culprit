@@ -934,7 +934,11 @@ account and no telemetry.
 Culprit speaks OpenID Connect, built and tested against
 [Authentik](https://goauthentik.io) (any OIDC issuer works the same way). It is
 off until an admin fills in **Settings › Sign-in**; then the login page offers
-*Continue with Authentik* under the password form.
+*Continue with Authentik* under the password form. For the whole thing done
+once with every value written out — provider, application, the `email_verified`
+scope mapping Authentik needs, Culprit's form, who gets an account, and what each
+login-page sentence means — see
+[docs/sign-in-with-authentik.md](docs/sign-in-with-authentik.md).
 
 On the Authentik side, create an **OAuth2/OpenID provider** — client type
 **Confidential**, signing key set, scopes `openid`, `profile` and `email` — and
