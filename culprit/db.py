@@ -32,7 +32,7 @@ from typing import Any, Iterable, Sequence
 
 log = logging.getLogger("culprit.db")
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 ROLES = ("viewer", "operator", "admin")
 
@@ -268,6 +268,31 @@ CREATE TABLE IF NOT EXISTS users (
     created_at    REAL NOT NULL,
     role          TEXT NOT NULL DEFAULT 'admin'   -- viewer | operator | admin
 );
+
+-- A dashboard user's identity at an external sign-in provider (OpenID
+-- Connect, see oidc.py). One row per user per provider: `subject` is the
+-- provider's stable id for the person (Authentik: a hash of its user id by
+-- default), and it is NULL for a *pending* link -- an admin naming the
+-- e-mail address that may claim this account at its first sign-in. The
+-- foreign key cascades, so removing or renaming a user carries its identity
+-- along without any code (foreign_keys is ON at open). An account created
+-- by a provider has no password: its password_hash holds an unusable
+-- sentinel (`none$...`), which verify_password refuses by scheme and which
+-- still serves as the session-signing input auth.py mixes in.
+CREATE TABLE IF NOT EXISTS identities (
+    provider   TEXT NOT NULL,
+    username   TEXT NOT NULL REFERENCES users(username)
+               ON DELETE CASCADE ON UPDATE CASCADE,
+    subject    TEXT,
+    email      TEXT,
+    display    TEXT,
+    linked_at  REAL NOT NULL,
+    last_login REAL,
+    PRIMARY KEY (provider, username),
+    UNIQUE (provider, subject)
+);
+
+CREATE INDEX IF NOT EXISTS idx_identities_email ON identities(provider, email);
 
 -- Enrolled agent nodes. Only the SHA-256 of each token is stored -- the
 -- plaintext token is shown exactly once, at enrollment, and cannot be
@@ -1250,18 +1275,35 @@ class History:
             (new, old)) > 0
 
     def list_users(self) -> list[dict[str, Any]]:
-        return [dict(row) for row in self._query(
-            "SELECT username, created_at, role FROM users ORDER BY username")]
+        """Every user with `has_password` (False for an account that only a
+        sign-in provider can open) and `identity` -- its linked provider
+        identity (`subject_set` False while an admin's e-mail pre-link is
+        still unclaimed), or None."""
+        users = [dict(row) for row in self._query(
+            "SELECT username, created_at, role, password_hash FROM users "
+            "ORDER BY username")]
+        linked: dict[str, dict[str, Any]] = {}
+        for row in self._query(
+                "SELECT provider, username, subject, email, display, "
+                "linked_at, last_login FROM identities ORDER BY provider"):
+            linked.setdefault(row["username"], _identity_row(row))
+        for user in users:
+            user["has_password"] = _is_password_hash(user.pop("password_hash"))
+            user["identity"] = linked.get(user["username"])
+        return users
 
     def verify_user(self, username: str, password: str) -> bool:
         rows = self._query("SELECT password_hash FROM users WHERE username = ?",
                            (username,))
-        if not rows:
-            # Burn comparable time so a missing user is not distinguishable
-            # from a wrong password by response latency: exactly one scrypt,
-            # against a hash computed once. (Hashing a fresh dummy here as
-            # well would cost two scrypts -- a 2x latency tell that
-            # tools/check_security.py measures.)
+        if not rows or not _is_password_hash(rows[0]["password_hash"]):
+            # Burn comparable time so a missing user -- or one that has no
+            # password because a sign-in provider created it -- is not
+            # distinguishable from a wrong password by response latency:
+            # exactly one scrypt, against a hash computed once. (Hashing a
+            # fresh dummy here as well would cost two scrypts -- a 2x
+            # latency tell that tools/check_security.py measures; and
+            # verify_password's own early return for a non-scrypt scheme
+            # would be the opposite tell, a reply 45 ms too fast.)
             verify_password(password, _dummy_hash())
             return False
         return verify_password(password, rows[0]["password_hash"])
@@ -1286,6 +1328,143 @@ class History:
     def user_count(self) -> int:
         rows = self._query("SELECT COUNT(*) AS n FROM users")
         return int(rows[0]["n"]) if rows else 0
+
+    # ----------------------------------------------------------- identities
+    # Accounts opened by an external sign-in provider (oidc.py). Deliberately
+    # not named list_*/... : the two public OIDC routes in main.py must touch
+    # no dashboard data, and tools/audit_security.py reads their source for
+    # the data-access verbs.
+    def add_identity_user(self, username: str, role: str) -> bool:
+        """Create a user with no password (an unusable sentinel hash). A plain
+        INSERT that fails on an existing name -- never add_user, whose upsert
+        would reset a real account's password to the sentinel on a collision.
+        """
+        if role not in ROLES:
+            raise ValueError(f"unknown role: {role!r}")
+        if self.user_exists(username):
+            return False
+        return self._execute(
+            "INSERT INTO users (username, password_hash, created_at, role) "
+            "VALUES (?, ?, ?, ?)",
+            (username, login_key_sentinel(), time.time(), role)) > 0
+
+    def has_password(self, username: str) -> bool:
+        """False for a user only a sign-in provider can open (sentinel hash)
+        -- and for an unknown user."""
+        stored = self.password_hash(username)
+        return bool(stored) and _is_password_hash(stored)
+
+    def rotate_login_key(self, username: str) -> bool:
+        """Re-randomise a password-less account's sentinel, which is the
+        session-signing input auth.py mixes in: every session of the account
+        is revoked, exactly as a password change would. A no-op (False) for
+        an account that has a real password -- that one revokes by changing
+        it."""
+        stored = self.password_hash(username)
+        if not stored or _is_password_hash(stored):
+            return False
+        return self._execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (login_key_sentinel(), username)) > 0
+
+    def identity_user(self, provider: str, subject: str) -> dict[str, Any] | None:
+        """The identity row claimed by `subject` at `provider`, or None."""
+        rows = self._query(
+            "SELECT provider, username, subject, email, display, linked_at, "
+            "last_login FROM identities WHERE provider = ? AND subject = ?",
+            (provider, subject))
+        return _identity_row(rows[0]) if rows else None
+
+    def identity_of(self, username: str, provider: str) -> dict[str, Any] | None:
+        """A user's identity at `provider` (claimed or pending), or None."""
+        rows = self._query(
+            "SELECT provider, username, subject, email, display, linked_at, "
+            "last_login FROM identities WHERE provider = ? AND username = ?",
+            (provider, username))
+        return _identity_row(rows[0]) if rows else None
+
+    def link_identity(self, username: str, provider: str, subject: str,
+                      email: str | None, display: str | None) -> bool:
+        """Bind a claimed subject to a user. False when the user already has
+        an identity at this provider, the subject belongs to another user,
+        or the user does not exist."""
+        if not subject or not self.user_exists(username):
+            return False
+        if self.identity_of(username, provider) or \
+                self.identity_user(provider, subject):
+            return False
+        now = time.time()
+        return self._execute(
+            "INSERT INTO identities (provider, username, subject, email, "
+            "display, linked_at, last_login) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (provider, username, subject, email, display, now, now)) > 0
+
+    def prelink_identity(self, username: str, provider: str, email: str) -> bool:
+        """An admin's word that whoever the provider vouches for under this
+        e-mail address may claim `username` at their first sign-in. Replaces
+        an earlier pending address; refused when the user's identity is
+        already claimed (unlink first) or the user does not exist."""
+        email = (email or "").strip().lower()
+        if not email or not self.user_exists(username):
+            return False
+        current = self.identity_of(username, provider)
+        if current and current["subject_set"]:
+            return False
+        return self._execute(
+            "INSERT INTO identities (provider, username, subject, email, "
+            "display, linked_at, last_login) VALUES (?, ?, NULL, ?, NULL, ?, NULL) "
+            "ON CONFLICT(provider, username) DO UPDATE SET "
+            "email = excluded.email, linked_at = excluded.linked_at",
+            (provider, username, email, time.time())) > 0
+
+    def claim_identity(self, provider: str, email: str, subject: str,
+                       display: str | None) -> str | None:
+        """First sign-in of a pre-linked address: the pending row whose e-mail
+        matches (case-insensitively) takes the subject and becomes a claimed
+        link. Returns the username, or None when nothing was pending for the
+        address (or the subject is already someone else's)."""
+        email = (email or "").strip().lower()
+        if not email or not subject or self.identity_user(provider, subject):
+            return None
+        rows = self._query(
+            "SELECT username FROM identities WHERE provider = ? AND "
+            "subject IS NULL AND lower(email) = ? ORDER BY linked_at LIMIT 1",
+            (provider, email))
+        if not rows:
+            return None
+        username = rows[0]["username"]
+        changed = self._execute(
+            "UPDATE identities SET subject = ?, email = ?, display = ?, "
+            "last_login = ? WHERE provider = ? AND username = ? AND subject IS NULL",
+            (subject, email, display, time.time(), provider, username))
+        return username if changed else None
+
+    def pending_identity(self, provider: str, email: str) -> str | None:
+        """The username an admin pre-linked to this e-mail address that no
+        subject has claimed yet, or None."""
+        email = (email or "").strip().lower()
+        if not email:
+            return None
+        rows = self._query(
+            "SELECT username FROM identities WHERE provider = ? AND "
+            "subject IS NULL AND lower(email) = ? ORDER BY linked_at LIMIT 1",
+            (provider, email))
+        return rows[0]["username"] if rows else None
+
+    def touch_identity(self, provider: str, subject: str,
+                       email: str | None = None,
+                       display: str | None = None) -> None:
+        """Record a sign-in (and the provider's current e-mail / name)."""
+        self._execute(
+            "UPDATE identities SET last_login = ?, "
+            "email = COALESCE(?, email), display = COALESCE(?, display) "
+            "WHERE provider = ? AND subject = ?",
+            (time.time(), email, display, provider, subject))
+
+    def unlink_identity(self, username: str, provider: str) -> bool:
+        return self._execute(
+            "DELETE FROM identities WHERE provider = ? AND username = ?",
+            (provider, username)) > 0
 
     def session_secret(self) -> bytes:
         """Stable per-installation secret for signing session cookies.
@@ -1445,6 +1624,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # v10: the Pulse's hourly activity buckets (a new table only).
         # v11: the runs of each timer's service (a new table only).
         # v12: the Prognosis's wear rows (a new table only).
+        # v13: linked sign-in identities (a new table only).
         for column in ("pinned_version TEXT", "pinned_ref TEXT", "platform TEXT",
                        "intermittent INTEGER NOT NULL DEFAULT 0"):
             try:
@@ -1495,6 +1675,30 @@ def hash_password(password: str) -> str:
     salt = secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1)
     return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+NO_PASSWORD_SCHEME = "none"
+
+
+def login_key_sentinel() -> str:
+    """The password_hash of an account that has no password (one a sign-in
+    provider created): three `$`-separated parts like a real hash, so every
+    parser reads it cleanly, with a scheme verify_password refuses outright.
+    The random middle is what auth.py's session key mixes in, so
+    re-generating it (History.rotate_login_key) revokes the account's
+    sessions the way a password change does."""
+    return f"{NO_PASSWORD_SCHEME}${secrets.token_hex(16)}$-"
+
+
+def _is_password_hash(stored: str | None) -> bool:
+    """True when the stored value is a real scrypt hash a password can match."""
+    return bool(stored) and stored.startswith("scrypt$")
+
+
+def _identity_row(row: Any) -> dict[str, Any]:
+    out = dict(row)
+    out["subject_set"] = out.get("subject") is not None
+    return out
 
 
 _DUMMY_HASH: str | None = None

@@ -111,8 +111,17 @@ def _cmd_users(args: argparse.Namespace) -> int:
             for user in users:
                 created = time.strftime("%Y-%m-%d",
                                         time.localtime(user["created_at"]))
+                extra = []
+                if not user["has_password"]:
+                    extra.append("no password")
+                identity = user.get("identity")
+                if identity:
+                    who = identity.get("email") or identity.get("subject") or "?"
+                    state = "" if identity["subject_set"] else "pending "
+                    extra.append(f"{state}{identity['provider']}: {who}")
                 print(f"  {user['username']:<24} {user['role']:<8} "
-                      f"(created {created})")
+                      f"(created {created})"
+                      + (f"  {' · '.join(extra)}" if extra else ""))
         return 0
     finally:
         history.close()
