@@ -288,7 +288,8 @@ def test_limiter(r: Runner, tmp: Path) -> None:
             and auth.login("olai", "correct horse", "10.0.0.2") is not None)
     # Window expiry: age the attempts artificially.
     with auth._lock:
-        auth._attempts["10.0.0.1"] = [t - auth._WINDOW_S - 1 for t in auth._attempts["10.0.0.1"]]
+        auth._attempts[("login", "10.0.0.1")] = [
+            t - auth._WINDOW_S - 1 for t in auth._attempts[("login", "10.0.0.1")]]
     r.check("attempts older than the window are forgotten",
             auth.login("olai", "correct horse", "10.0.0.1") is not None)
     r.check("limiter is applied before the hash (unknown user counts too)",

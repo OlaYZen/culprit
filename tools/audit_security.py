@@ -39,6 +39,7 @@ GREEN, RED, YELLOW, BLUE, BOLD, RESET = (
 # Mirrors check_security.py: what may be reachable without a session.
 EXPECTED_PUBLIC_PATHS = frozenset({
     "/login", "/api/login", "/api/auth", "/api/healthz", "/favicon.svg",
+    "/api/auth/oidc/start", "/api/auth/oidc/callback",
 })
 EXPECTED_AGENT_PATHS = frozenset({"/api/agents/report"})
 EXPECTED_PUBLIC_PREFIXES = ("/assets/",)

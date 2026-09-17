@@ -29,6 +29,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from . import config as config_module
+from . import oidc
 from . import trust
 from .auth import SESSION_COOKIE, Auth, ensure_default_user
 from .coroner import Coroner
@@ -379,6 +380,20 @@ def _harden(request: Request, response):  # noqa: ANN001, ANN201
     return response
 
 
+def _set_session(response, request: Request, value: str):  # noqa: ANN001, ANN201
+    """The session cookie, with the flags tools/audit_security.py checks on
+    every set_cookie: HttpOnly (no script reads it), Lax (sent on the
+    top-level navigations a sign-in needs, never on cross-site subrequests)
+    and Secure whenever the page itself came over TLS."""
+    response.set_cookie(
+        SESSION_COOKIE, value,
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+        max_age=7 * 24 * 3600, path="/",
+    )
+    return response
+
+
 @app.get("/login", include_in_schema=False)
 async def login_page() -> FileResponse:
     return FileResponse(config_module.WEB_DIR / "login.html",
@@ -423,7 +438,93 @@ async def api_auth(request: Request) -> dict[str, Any]:
     assert auth is not None
     user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
     role = auth.role_of(user) if user else None
-    return {"enabled": auth.enabled, "username": user, "role": role}
+    return {"enabled": auth.enabled, "username": user, "role": role,
+            "providers": _providers()}
+
+
+def _providers() -> list[dict[str, str]]:
+    """The sign-in providers the login page may offer: one, when it is
+    fully configured. Public information (a label and a path)."""
+    cfg = config_module.get()
+    if not oidc.configured(cfg):
+        return []
+    return [{"id": oidc.PROVIDER, "label": cfg.oidc_label or "Authentik",
+             "start": oidc.START_PATH}]
+
+
+def _callback_uri(request: Request) -> str:
+    """Where the provider sends the browser back: this host as the browser
+    reached it (behind a declared proxy the middleware already rewrote the
+    scheme), never `deploy_host`, which is the address agents use."""
+    return f"{request.url.scheme}://{request.url.netloc}{oidc.CALLBACK_PATH}"
+
+
+def _state_cookie(response, request: Request, value: str | None):  # noqa: ANN001, ANN201
+    """The ten-minute state cookie of one provider round-trip (None clears
+    it). Scoped to the two OIDC paths; Lax, because the callback is a
+    cross-site top-level navigation from the provider and Strict would not
+    send it."""
+    if value is None:
+        response.delete_cookie(oidc.STATE_COOKIE, path=oidc.STATE_PATH)
+        return response
+    response.set_cookie(
+        oidc.STATE_COOKIE, value,
+        httponly=True, samesite="lax",
+        secure=request.url.scheme == "https",
+        max_age=oidc.STATE_TTL_S, path=oidc.STATE_PATH,
+    )
+    return response
+
+
+@app.get(oidc.START_PATH, include_in_schema=False)
+async def api_oidc_start(request: Request):  # noqa: ANN201
+    """Leave for the provider. Public and login-mode only: linking an
+    identity to the signed-in account starts from the session-gated
+    /api/account/oidc/link instead, which re-proves the password. Touches
+    no dashboard data (tools/audit_security.py reads this source)."""
+    assert auth is not None
+    cfg = config_module.get()
+    if not oidc.configured(cfg):
+        raise HTTPException(404, "no sign-in provider is configured")
+    loop = asyncio.get_running_loop()
+    try:
+        url, cookie = await loop.run_in_executor(
+            None, lambda: oidc.begin(cfg, redirect_uri=_callback_uri(request),
+                                     secret=auth.secret()))
+    except oidc.OIDCError as exc:
+        log.warning("oidc start failed: %s (%s)", exc.code, exc.detail)
+        return _state_cookie(RedirectResponse(f"/login?error={exc.code}", 303),
+                             request, None)
+    return _state_cookie(RedirectResponse(url, status_code=303), request, cookie)
+
+
+@app.get(oidc.CALLBACK_PATH, include_in_schema=False)
+async def api_oidc_callback(request: Request):  # noqa: ANN201
+    """Back from the provider. The account work -- which user this is,
+    whether one is created -- is `Auth.oidc_finish`, run off the loop; this
+    handler only turns its answer into a redirect, and touches no dashboard
+    data itself (tools/audit_security.py reads this source). Every outcome
+    clears the state cookie; only a success sets a session, and a failure
+    carries nothing but one of oidc.ERRORS' codes in the URL."""
+    assert auth is not None
+    cfg = config_module.get()
+    addr = request.client.host if request.client else "?"
+    params = request.query_params
+    session_user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
+    user, error, mode = await asyncio.get_running_loop().run_in_executor(
+        None, auth.oidc_finish, cfg, request.cookies.get(oidc.STATE_COOKIE),
+        params.get("code"), params.get("state"), params.get("error"), addr,
+        session_user)
+    if mode == "link":
+        outcome = "linked" if user else (error or "state")
+        response = RedirectResponse(f"/?oidc={outcome}#settings/account", 303)
+        return _state_cookie(response, request, None)
+    if not user:
+        response = RedirectResponse(f"/login?error={error or 'state'}", 303)
+        return _state_cookie(response, request, None)
+    response = RedirectResponse("/", status_code=303)
+    _set_session(response, request, auth.issue_session(user))
+    return _state_cookie(response, request, None)
 
 
 # ------------------------------------------------------------------- account
@@ -431,6 +532,82 @@ async def api_auth(request: Request) -> dict[str, Any]:
 # is the signed-in account. Both re-verify the current password: changing a
 # credential is exactly where a borrowed, still-signed-in session should have to
 # prove it is the account owner.
+@app.get("/api/account", summary="The signed-in account, its password state "
+                                  "and its linked sign-in identity")
+async def api_account(request: Request) -> dict[str, Any]:
+    assert history is not None and auth is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    return {
+        "username": user,
+        "role": getattr(request.state, "role", None),
+        "has_password": history.has_password(user),
+        "identity": history.identity_of(user, oidc.PROVIDER),
+        "providers": _providers(),
+    }
+
+
+@app.post("/api/account/oidc/link", summary="Start linking the signed-in "
+                                            "account to the provider")
+async def api_account_oidc_link(
+    request: Request,
+    current_password: str = Body(..., embed=True),
+) -> JSONResponse:
+    """Answers the provider URL for the browser to navigate to (a fetch
+    cannot follow a cross-origin redirect) and sets the state cookie in
+    link mode, carrying the account; the callback then binds the identity
+    that comes back to exactly that account, and only while the same
+    session is still there. Re-proves the password like every other
+    credential change on this account."""
+    assert auth is not None and history is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    cfg = config_module.get()
+    if not oidc.configured(cfg):
+        raise HTTPException(404, "no sign-in provider is configured")
+    loop = asyncio.get_running_loop()
+    if not await loop.run_in_executor(None, history.verify_user, user,
+                                      current_password):
+        raise HTTPException(403, "current password is incorrect")
+    current = history.identity_of(user, oidc.PROVIDER)
+    if current and current["subject_set"]:
+        raise HTTPException(409, "this account is already linked")
+    try:
+        url, cookie = await loop.run_in_executor(
+            None, lambda: oidc.begin(cfg, redirect_uri=_callback_uri(request),
+                                     secret=auth.secret(), mode="link", user=user))
+    except oidc.OIDCError as exc:
+        raise HTTPException(502, oidc.error_text(exc.code))
+    return _state_cookie(JSONResponse({"ok": True, "url": url}), request, cookie)
+
+
+@app.delete("/api/account/oidc", summary="Disconnect the signed-in account "
+                                         "from the provider")
+async def api_account_oidc_unlink(
+    request: Request,
+    current_password: str = Body(..., embed=True),
+) -> dict[str, Any]:
+    assert auth is not None and history is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    if not history.has_password(user):
+        raise HTTPException(
+            409, "this account has no password, so disconnecting it would "
+                 "leave no way to sign in -- an admin can set one from the "
+                 "CLI first (python -m culprit users add <name>)")
+    loop = asyncio.get_running_loop()
+    if not await loop.run_in_executor(None, history.verify_user, user,
+                                      current_password):
+        raise HTTPException(403, "current password is incorrect")
+    if not history.unlink_identity(user, oidc.PROVIDER):
+        raise HTTPException(404, "this account is not linked")
+    log.info("oidc identity unlinked by %s", user)
+    return {"ok": True, "username": user}
+
+
 @app.post("/api/account/password", summary="Change the signed-in user's password")
 async def api_account_password(
     request: Request,
@@ -556,6 +733,57 @@ async def api_user_role(name: str, request: Request,
     log.info("user '%s' role changed to %s by %s", name, role,
              getattr(request.state, "user", "?"))
     return {"ok": True, "username": name, "role": role}
+
+
+_EMAIL = re.compile(r"^[^@\s]{1,128}@[^@\s]{1,253}$")
+
+
+@app.put("/api/users/{name}/identities/oidc",
+         summary="Pre-link a user to the e-mail address the provider will "
+                 "vouch for",
+         dependencies=[Depends(require_role("admin"))])
+async def api_user_prelink(name: str, request: Request,
+                           email: str = Body(..., embed=True)) -> dict[str, Any]:
+    """An admin's word that whoever the provider vouches for under this
+    address may claim the account at their first sign-in (when the provider
+    marks the address verified). Replaces an earlier pending address; a
+    claimed link must be removed first."""
+    assert history is not None
+    email = email.strip().lower()
+    if not _EMAIL.match(email):
+        raise HTTPException(422, "not an e-mail address")
+    if not history.user_exists(name):
+        raise HTTPException(404, f"no such user '{name}'")
+    if not history.prelink_identity(name, oidc.PROVIDER, email):
+        raise HTTPException(409, "this account is already linked to a "
+                                 "provider identity -- unlink it first")
+    log.info("user '%s' pre-linked to %s by %s", name, email,
+             getattr(request.state, "user", "?"))
+    return {"ok": True, "username": name,
+            "identity": history.identity_of(name, oidc.PROVIDER)}
+
+
+@app.delete("/api/users/{name}/identities/oidc",
+            summary="Remove a user's provider identity",
+            dependencies=[Depends(require_role("admin"))])
+async def api_user_unlink(name: str, request: Request) -> dict[str, Any]:
+    """For an account with no password this is the end of its access: the
+    sessions it holds are revoked (the sign-in sentinel is re-randomised)
+    and the answer says so, rather than leaving a signed-in ghost."""
+    assert history is not None and auth is not None
+    if not history.user_exists(name):
+        raise HTTPException(404, f"no such user '{name}'")
+    if not history.unlink_identity(name, oidc.PROVIDER):
+        raise HTTPException(404, f"'{name}' is not linked")
+    note = None
+    if not history.has_password(name):
+        history.rotate_login_key(name)
+        auth.invalidate(name)
+        note = (f"'{name}' has no password, so it can no longer sign in; its "
+                "sessions were revoked. Remove the account, or give it a "
+                "password from the CLI.")
+    log.info("user '%s' unlinked by %s", name, getattr(request.state, "user", "?"))
+    return {"ok": True, "username": name, "note": note}
 
 
 @app.delete("/api/users/{name}", summary="Remove a dashboard user",
@@ -1793,6 +2021,49 @@ def _lockout_guard(request: Request, patch: dict[str, Any]) -> dict[str, str]:
                    "Include it, or save from a connection that stays allowed."}
 
 
+_WRITE_ONLY = ("notify_smtp_password", "oidc_client_secret")
+
+
+def _oidc_lockout_guard(request: Request, patch: dict[str, Any]) -> dict[str, str]:
+    """Switching the provider off from an account that has no password
+    would lock that very account out -- the same shape as the trust guard,
+    and refused the same way. (Whether *other* password-less accounts lose
+    access is the admin's call; only the saving one cannot be undone from
+    the browser.)"""
+    if patch.get("oidc_enabled") or history is None:
+        return {}
+    user = getattr(request.state, "user", None)
+    if not user or history.has_password(user):
+        return {}
+    return {"oidc_enabled": "not saved: your account has no password and signs "
+                            "in through the provider, so this would lock you "
+                            "out. Have an admin set a password first, or save "
+                            "from a password account."}
+
+
+@app.post("/api/oidc/test", summary="Fetch the provider's discovery document",
+          dependencies=[Depends(require_role("admin"))])
+async def api_oidc_test(request: Request) -> dict[str, Any]:
+    """What Settings > Sign-in's *Check issuer* runs: discovery, forced,
+    reported as the endpoints found (or the reason it failed) plus the
+    redirect URI this host will present -- so the admin can compare it with
+    what the provider has registered. No secret is involved."""
+    cfg = config_module.get()
+    problem = "oidc_issuer" in oidc.missing(cfg)
+    if problem:
+        return {"ok": False, "error": "no issuer is configured",
+                "redirect_uri": _callback_uri(request)}
+    try:
+        doc = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: oidc.discover(cfg.oidc_issuer, force=True))
+    except oidc.OIDCError as exc:
+        return {"ok": False, "error": exc.detail or oidc.error_text(exc.code),
+                "redirect_uri": _callback_uri(request)}
+    return {"ok": True, "redirect_uri": _callback_uri(request),
+            "configured": oidc.configured(cfg), "missing": oidc.missing(cfg),
+            **oidc.summary(doc)}
+
+
 @app.put("/api/settings", dependencies=[Depends(require_role("admin"))])
 async def api_put_settings(
     request: Request,
@@ -1816,24 +2087,28 @@ async def api_put_settings(
     """
     if not isinstance(patch, dict) or not patch:
         raise HTTPException(400, "expected a non-empty object of settings")
-    # The SMTP password is write-only: the form never has it, so an empty
-    # string means "leave it", and only an explicit null clears it.
-    if "notify_smtp_password" in patch:
-        if patch["notify_smtp_password"] is None:
-            patch["notify_smtp_password"] = ""
-        elif patch["notify_smtp_password"] == "":
-            patch.pop("notify_smtp_password")
-            if not patch:
-                return JSONResponse({"ok": True, "persisted": persist,
-                                     "config": _public_config()})
+    # The two secrets are write-only: the form never has them, so an empty
+    # string means "leave it", and only an explicit null clears one.
+    for key in _WRITE_ONLY:
+        if key in patch:
+            if patch[key] is None:
+                patch[key] = ""
+            elif patch[key] == "":
+                patch.pop(key)
+    if not patch:
+        return JSONResponse({"ok": True, "persisted": persist,
+                             "config": _public_config()})
+    blocked: dict[str, str] = {}
     if "trusted_proxies" in patch or "trusted_hosts" in patch:
         blocked = _lockout_guard(request, patch)
-        if blocked:
-            return JSONResponse(
-                status_code=422,
-                content={"ok": False, "field_errors": blocked, "errors": [],
-                         "config": _public_config()},
-            )
+    if "oidc_enabled" in patch and not blocked:
+        blocked = _oidc_lockout_guard(request, patch)
+    if blocked:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "field_errors": blocked, "errors": [],
+                     "config": _public_config()},
+        )
     cfg, errors = config_module.update(patch, persist=persist)
     if errors:
         field_errors: dict[str, str] = {}
@@ -1999,6 +2274,9 @@ def _public_config() -> dict[str, Any]:
     # whether one is set.
     payload["notify_smtp_password_set"] = bool(payload.get("notify_smtp_password"))
     payload["notify_smtp_password"] = ""
+    # Same for the provider's client secret.
+    payload["oidc_client_secret_set"] = bool(payload.get("oidc_client_secret"))
+    payload["oidc_client_secret"] = ""
     payload["history_enabled"] = bool(history and history.ready
                                       and history.recording)
     payload["history_error"] = history.error if history else None

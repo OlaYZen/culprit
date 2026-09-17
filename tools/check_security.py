@@ -77,6 +77,7 @@ GREEN, RED, YELLOW, BLUE, DIM, BOLD, RESET = (
 # because "open" is the one property a route should never acquire by accident.
 EXPECTED_PUBLIC_PATHS = frozenset({
     "/login", "/api/login", "/api/auth", "/api/healthz", "/favicon.svg",
+    "/api/auth/oidc/start", "/api/auth/oidc/callback",
 })
 EXPECTED_AGENT_PATHS = frozenset({"/api/agents/report"})
 EXPECTED_PUBLIC_PREFIXES = ("/assets/",)

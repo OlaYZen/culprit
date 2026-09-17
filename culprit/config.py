@@ -164,6 +164,29 @@ class Config:
     notify_resolved: bool = True       # send a follow-up when a finding clears
     notify_offline: bool = True        # send when an agent stops reporting
 
+    # --- sign in with a provider (host only) -------------------------------
+    # OpenID Connect, built for Authentik (any OIDC issuer works). See
+    # oidc.py for the flow and auth.py for what happens to the person. The
+    # issuer must be https:// -- the flow trusts the token endpoint's TLS
+    # instead of a JOSE library. The client secret is write-only through the
+    # API (main._public_config masks it); config.json is written mode 600.
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""              # e.g. https://auth.example.com/application/o/culprit/
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""       # never returned by the API
+    oidc_scopes: str = "openid profile email"
+    oidc_label: str = "Authentik"      # the login page's "Continue with ..."
+    # Whether a person the provider vouches for, whom no account here is
+    # linked to, gets an account on the spot. Off: only accounts an admin
+    # pre-linked by e-mail (or a signed-in user linked from Settings >
+    # Account) can sign in -- the safe default for an issuer anyone can
+    # register with.
+    oidc_auto_create: bool = False
+    oidc_default_role: str = "viewer"
+    # Empty = any address. Applied to auto-creation and to claiming a
+    # pre-link, never to an identity that is already linked.
+    oidc_allowed_domains: list[str] = field(default_factory=list)
+
     # --- the Pulse (host only) --------------------------------------------
     # The doctor for absence: what stopped happening, judged against the
     # machine's own rhythm. Accumulation runs whenever history does (a few KB
@@ -268,6 +291,9 @@ EDITABLE = {
     "pulse_hold_minutes", "pulse_timer_grace_minutes",
     "prognosis_enabled", "prognosis_smart_interval_minutes",
     "prognosis_wake_disks", "wear_retention_days",
+    "oidc_enabled", "oidc_issuer", "oidc_client_id", "oidc_client_secret",
+    "oidc_scopes", "oidc_label", "oidc_auto_create", "oidc_default_role",
+    "oidc_allowed_domains",
 }
 
 # Text fields with a shape: the validator returns the cleaned value or
@@ -311,7 +337,69 @@ def _branch_name(value: str) -> str:
     return value
 
 
+def _issuer_url(value: str) -> str:
+    """An OpenID Connect issuer. https is load-bearing (oidc.py explains);
+    http passes only for a loopback issuer, a development setup."""
+    from . import oidc
+    value = value.strip()
+    if not value:
+        return value
+    if len(value) > 512:
+        raise ValueError("too long")
+    problem = oidc.issuer_problem(value)
+    if problem:
+        raise ValueError(problem)
+    return value
+
+
+_SCOPE = re.compile(r"^[A-Za-z0-9._:/-]+$")
+
+
+def _scopes(value: str) -> str:
+    """Space-separated scope tokens; openid is what makes it OpenID Connect
+    at all, so it cannot be dropped."""
+    tokens = value.split()
+    if not tokens:
+        raise ValueError("at least 'openid' is required")
+    for token in tokens:
+        if not _SCOPE.match(token) or len(token) > 64:
+            raise ValueError(f"not a scope name: {token!r}")
+    if "openid" not in tokens:
+        raise ValueError("must include 'openid'")
+    return " ".join(dict.fromkeys(tokens))
+
+
+def _role(value: str) -> str:
+    value = value.strip().lower()
+    if value not in ("viewer", "operator", "admin"):
+        raise ValueError("expected viewer, operator or admin")
+    return value
+
+
+_DOMAIN = re.compile(r"^[a-z0-9-]+(\.[a-z0-9-]+)+$")
+
+
+def _domains(entries: list[str]) -> list[str]:
+    """E-mail domains, lower-cased and de-duplicated."""
+    out: list[str] = []
+    for entry in entries:
+        domain = entry.strip().lower().lstrip("@")
+        if not domain:
+            continue
+        if not _DOMAIN.match(domain) or len(domain) > 253:
+            raise ValueError(f"not a domain name: {entry.strip()!r}")
+        if domain not in out:
+            out.append(domain)
+    return out
+
+
 TEXT_VALIDATORS: dict[str, Any] = {
+    "oidc_issuer": _issuer_url,
+    "oidc_client_id": _short_text,
+    "oidc_client_secret": _short_text,
+    "oidc_scopes": _scopes,
+    "oidc_label": _short_text,
+    "oidc_default_role": _role,
     "agent_update_branch": _branch_name,
     "notify_ntfy_url": _url_or_empty,
     "notify_webhook_url": _url_or_empty,
@@ -327,6 +415,7 @@ TEXT_VALIDATORS: dict[str, Any] = {
 LIST_FIELDS: dict[str, Any] = {
     "trusted_proxies": trust.clean_proxies,
     "trusted_hosts": trust.parse_hosts,
+    "oidc_allowed_domains": _domains,
 }
 
 # Accepted ranges for editable numeric fields, used by the API to reject
@@ -537,6 +626,9 @@ def update(patch: dict[str, Any], persist: bool = True) -> tuple[Config, list[st
                 CONFIG_PATH.write_text(
                     json.dumps(cfg.to_dict(), indent=2) + "\n", encoding="utf-8"
                 )
+                # It holds the SMTP password and the OIDC client secret:
+                # readable by this user only, like the database.
+                os.chmod(CONFIG_PATH, 0o600)
             except OSError as exc:
                 errors.append(f"could not write config.json: {exc}")
     return _current, errors
