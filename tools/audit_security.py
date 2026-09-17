@@ -294,10 +294,15 @@ def audit_frontend(rep: Report) -> None:
         problems.append("login is not a POST to /api/login")
     if re.search(r"""method\s*=\s*["']get["']""", login, re.I):
         problems.append("a GET form (credentials would land in the URL and logs)")
+    if re.search(r"""fetch\(\s*["'][^"']*oidc/start""", login):
+        problems.append("the provider start is fetched (it must be a navigation: an href)")
+    if "/api/auth/oidc/start" in login and not re.search(r"""href\s*=\s*["']/api/auth/oidc/start""", login):
+        problems.append("the provider start is referenced without an href")
     if problems:
         rep.add("HIGH", "login-form", "web/login.html", "; ".join(problems))
     else:
-        rep.ok("login-form", "password field, autocomplete hints, POSTs to /api/login")
+        rep.ok("login-form", "password field, autocomplete hints, POSTs to /api/login, "
+                             "provider start is a link")
 
 
 # -------------------------------------------------------------- python
@@ -637,7 +642,9 @@ def audit_repo(rep: Report) -> None:
         rep.ok("repo", f"{len(tracked)} tracked files: no credentials, no runtime state")
 
     # Modes on the files that hold hashes and tokens.
-    candidates = [ROOT / "agent.json", ROOT / "tools_auth.json"]
+    # config.json holds the SMTP password and the OIDC client secret, so it
+    # is written 600 like the database (config.update chmods it).
+    candidates = [ROOT / "agent.json", ROOT / "tools_auth.json", ROOT / "config.json"]
     if (ROOT / "data").exists():
         candidates += sorted((ROOT / "data").glob("*.db*"))
     for candidate in candidates:

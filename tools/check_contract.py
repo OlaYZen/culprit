@@ -478,6 +478,10 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
             "config.pulse_enabled", "config.pulse_retention_days",
             "config.pulse_quiet_ratio", "config.pulse_hold_minutes",
             "config.pulse_timer_grace_minutes",
+            "config.oidc_enabled", "config.oidc_issuer", "config.oidc_client_id",
+            "config.oidc_client_secret_set", "config.oidc_scopes", "config.oidc_label",
+            "config.oidc_auto_create", "config.oidc_default_role",
+            "config.oidc_allowed_domains",
             "access.client", "access.peer", "access.host", "access.scheme",
             "access.via_proxy", "access.runtime_proxies", "access.always_hosts",
             "config.cpu_high", "config.cpu_queue_per_core",
@@ -493,6 +497,13 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         ],
         "/api/notify/status": ["channels", "sent", "failed", "dropped",
                                "last_sent", "last_error", "active_findings"],
+        "/api/account": ["username", "role", "has_password", "identity", "providers"],
+        "/api/users": ["users[].username", "users[].role", "users[].created_at",
+                       "users[].has_password", "users[].identity"],
+    },
+    # The login page is not a view, but it reads /api/auth like one.
+    "login": {
+        "/api/auth": ["enabled", "username", "role", "providers"],
     },
 }
 

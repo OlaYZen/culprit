@@ -370,7 +370,15 @@ def check_auth_state(ctx: Ctx) -> None:
     ctx.auth_enabled = bool(data.get("enabled"))
     # role is None whenever username is (no session, or auth off), so it
     # never carries more than username already does.
-    extra = set(data) - {"enabled", "username", "role"}
+    extra = set(data) - {"enabled", "username", "role", "providers"}
+    # `providers` is the login page's second way in: a label and a path
+    # per configured sign-in provider, nothing about the provider itself.
+    providers = data.get("providers")
+    if providers is not None and (
+            not isinstance(providers, list)
+            or any(not isinstance(p, dict) or set(p) - {"id", "label", "start"} for p in providers)):
+        ctx.report.add("HIGH", "auth-state",
+                       f"/api/auth providers carry more than id/label/start: {providers!r}"[:200])
     if extra:
         ctx.report.add("WARN", "auth-state",
                        f"/api/auth (public) exposes extra keys: {sorted(extra)}")
@@ -456,6 +464,24 @@ def check_public_routes(ctx: Ctx) -> None:
             if r.status == 200:
                 ctx.report.add("HIGH", "public-routes", "GET /api/login returns 200")
             continue
+        if path.startswith("/api/auth/oidc/"):
+            # The provider round-trip: start is a 303 to the provider (404
+            # while none is configured) and the callback, without a state
+            # cookie, is a 303 back to the login page -- never a 200 and
+            # never a session. check_oidc covers the cookie variants.
+            r = ctx.http.req("GET", path)
+            leaving = path.endswith("/start")
+            if leaving and r.status not in (303, 404):
+                ctx.report.add("HIGH", "public-routes", f"GET {path} -> {r.status} "
+                               "(expected 303 to the provider, or 404 unconfigured)")
+            elif leaving and r.status == 303 and not (r.header("location") or "").startswith(("https://", "http://")):
+                ctx.report.add("HIGH", "public-routes", f"GET {path} -> 303 to {r.header('location')!r}, not a provider URL")
+            elif not leaving and (r.status != 303 or not (r.header("location") or "").startswith("/login?error=")):
+                ctx.report.add("HIGH", "public-routes", f"GET {path} -> {r.status} {r.header('location') or ''} "
+                               "(expected 303 to /login?error=...)")
+            if "culprit_session=" in (r.header("set-cookie") or ""):
+                ctx.report.add("CRIT", "public-routes", f"GET {path} set a session cookie")
+            continue
         r = ctx.http.req("GET", path)
         if r.status != 200:
             ctx.report.add("WARN", "public-routes", f"GET {path} -> {r.status} "
@@ -466,6 +492,54 @@ def check_public_routes(ctx: Ctx) -> None:
         expect_gated(ctx, "GET", path, "api-docs")
     ctx.report.ok("public-routes", "login page, health, favicon reachable; "
                   "API docs and schema gated")
+
+
+def check_oidc(ctx: Ctx) -> None:
+    """The provider callback with every state cookie a stranger can bring:
+    none, garbage, a forged signature, a stale-looking one -- each must
+    303 back to /login?error=<code> with no session cookie and no 5xx. The
+    state param without the cookie is nothing; the cookie is the proof the
+    round-trip started here."""
+    rep = ctx.report
+    cases = [
+        ("no cookie", None),
+        ("garbage", "not-a-state"),
+        ("forged", "eyJzIjoiYWJjIiwibiI6IngiLCJ2IjoieCIsIm0iOiJsb2dpbiIsImV4cCI6OTk5OTk5OTk5OX0." + "0" * 64),
+        ("empty", ""),
+        ("huge", "a" * 8192 + "." + "b" * 64),
+    ]
+    bad = 0
+    for label, cookie in cases:
+        headers = {"Cookie": f"culprit_oidc={cookie}"} if cookie is not None else None
+        r = ctx.http.req("GET", "/api/auth/oidc/callback?code=abc&state=abc", headers=headers)
+        location = r.header("location") or ""
+        if r.status >= 500:
+            bad += 1
+            rep.add("HIGH", "oidc-callback", f"{label}: callback crashed ({r.status})")
+        elif r.status != 303 or not location.startswith("/login?error="):
+            bad += 1
+            rep.add("HIGH", "oidc-callback", f"{label}: {r.status} {location!r} (expected 303 to /login?error=...)")
+        if "culprit_session=" in (r.header("set-cookie") or ""):
+            bad += 1
+            rep.add("CRIT", "oidc-callback", f"{label}: a session cookie was issued")
+        if re.search(r"[<>]|traceback", r.text, re.I):
+            bad += 1
+            rep.add("WARN", "oidc-callback", f"{label}: the response body carries markup or a traceback")
+    # The error code in the redirect is one of a fixed set, never echoed input.
+    r = ctx.http.req("GET", "/api/auth/oidc/callback?error=%3Cscript%3E&state=x")
+    location = r.header("location") or ""
+    if not re.fullmatch(r"/login\?error=[a-z_]+", location):
+        bad += 1
+        rep.add("HIGH", "oidc-callback", f"error redirect is not a fixed code: {location!r}")
+    if ctx.cookie:
+        settings = ctx.http.req("GET", "/api/settings", cookie=ctx.cookie).json() or {}
+        cfg = settings.get("config") or {}
+        if cfg.get("oidc_client_secret"):
+            bad += 1
+            rep.add("CRIT", "oidc-callback", "/api/settings carries the OIDC client secret")
+    if not bad:
+        rep.ok("oidc-callback", f"{len(cases)} stranger cookies -> /login?error=<code>, "
+               "no session, fixed codes only, secret never served")
 
 
 def check_path_bypass(ctx: Ctx) -> None:
@@ -1005,6 +1079,16 @@ def check_authenticated_writes(ctx: Ctx) -> None:
     expect("PUT", "/api/settings", {}, (400,), "empty patch")
     expect("PUT", "/api/settings", [], (400, 422), "array patch")
     expect("PUT", "/api/settings", {"retention_days": 10 ** 9}, (422,), "absurd retention")
+    expect("PUT", "/api/settings", {"oidc_issuer": "http://idp.example/"}, (422,), "plain-http OIDC issuer")
+    expect("PUT", "/api/settings", {"oidc_default_role": "root"}, (422,), "unknown OIDC default role")
+    expect("PUT", "/api/settings", {"oidc_scopes": "profile"}, (422,), "OIDC scopes without openid")
+    expect("PUT", "/api/settings", {"oidc_allowed_domains": ["no spaces allowed"]}, (422,), "bad OIDC domain")
+    expect("PUT", "/api/users/sectest-nope/identities/oidc", {"email": "x@y.z"}, (404,), "pre-link unknown user")
+    expect("DELETE", "/api/users/sectest-nope/identities/oidc", None, (404,), "unlink unknown user")
+    expect("POST", "/api/account/oidc/link", {"current_password": "definitely-wrong"}, (403, 404),
+           "link with a wrong password")
+    expect("DELETE", "/api/account/oidc", {"current_password": "definitely-wrong"}, (403, 404, 409),
+           "unlink with a wrong password")
     # Node settings: unknown node, non-settable key.
     expect("PUT", "/api/nodes/sectest-nope/settings", {"interval_fast": 1},
            (404,), "settings for unknown node")
@@ -1942,6 +2026,7 @@ def main() -> int:
             section("Gate")
             check_route_gate(ctx)
             check_public_routes(ctx)
+            check_oidc(ctx)
             check_path_bypass(ctx)
             check_proxy_trust(ctx)
             check_host_trust(ctx)

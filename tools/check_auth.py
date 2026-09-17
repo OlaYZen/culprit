@@ -42,6 +42,7 @@ import os
 import stat
 import sys
 import tempfile
+import urllib.parse
 import time
 from pathlib import Path
 
@@ -441,7 +442,10 @@ def test_startup(r: Runner, tmp: Path) -> None:
                        ("/assets", "session"), ("/api/agents/report", "agent"),
                        ("/api/agents/report/", "session"), ("//api/snapshot", "session"),
                        ("/API/snapshot", "session"), ("/api/auth/", "session"),
-                       ("/login/", "session")):
+                       ("/login/", "session"),
+                       ("/api/auth/oidc/start", "open"), ("/api/auth/oidc/callback", "open"),
+                       ("/api/auth/oidc/", "session"), ("/api/auth/oidc/callback/", "session"),
+                       ("/api/account", "session"), ("/api/oidc/test", "session")):
         r.check(f"gate {path} -> {want}", auth.gate(path) == want, auth.gate(path))
     history.close()
     r.summary("startup safety", "exposed-without-users refusal, default user, gate table")
@@ -486,7 +490,236 @@ def test_config(r: Runner) -> None:
     config_module.update({"trusted_proxies": [], "trusted_hosts": []}, persist=False)
     r.check("default: no trusted proxies", config_module.Config().trusted_proxies == [])
     r.check("default: Host check off", config_module.Config().trusted_hosts == [])
+    r.check("oidc: http issuer rejected", bool(errors({"oidc_issuer": "http://idp.example/"})))
+    r.check("oidc: loopback http issuer allowed",
+            not errors({"oidc_issuer": "http://127.0.0.1:9000/application/o/x/"}))
+    r.check("oidc: scopes without openid rejected", bool(errors({"oidc_scopes": "profile email"})))
+    r.check("oidc: unknown role rejected", bool(errors({"oidc_default_role": "root"})))
+    r.check("oidc: bad domain rejected", bool(errors({"oidc_allowed_domains": ["not a domain"]})))
+    cfg, errs = config_module.update({"oidc_allowed_domains": "@Example.COM\nx.org, example.com"}, persist=False)
+    r.check("oidc: domains lower-cased and de-duplicated",
+            not errs and cfg.oidc_allowed_domains == ["example.com", "x.org"], f"{errs} {cfg.oidc_allowed_domains}")
+    config_module.update({"oidc_issuer": "", "oidc_allowed_domains": []}, persist=False)
+    r.check("default: provider off, no auto-create, viewer",
+            not config_module.Config().oidc_enabled and not config_module.Config().oidc_auto_create
+            and config_module.Config().oidc_default_role == "viewer")
+    keys = _public_config_keys()
+    from culprit.main import _public_config
+    r.check("public config masks the client secret",
+            "oidc_client_secret_set" in keys and _public_config()["oidc_client_secret"] == "")
     r.summary("config patches", "locked fields, ranges, types, trust lists; defaults bind loopback")
+
+
+def test_oidc(r: Runner, tmp: Path) -> None:
+    """The provider flow against a fake issuer: oidc.py's protocol half and
+    auth.py's account half, with the network replaced by a dict."""
+    import base64
+    import json
+    from culprit import oidc
+    from culprit.auth import Auth, derive_username
+    from culprit.config import Config
+    r.section("provider sign-in (OIDC)")
+    ISS = "https://idp.example/application/o/culprit/"
+    DOC = {"issuer": ISS,
+           "authorization_endpoint": "https://idp.example/application/o/authorize/",
+           "token_endpoint": "https://idp.example/application/o/token/",
+           "userinfo_endpoint": "https://idp.example/application/o/userinfo/",
+           "code_challenge_methods_supported": ["S256"]}
+
+    def b64(obj: dict) -> str:  # type: ignore[type-arg]
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+    class FakeIdP:
+        def __init__(self) -> None:
+            self.claims: dict = {}   # type: ignore[type-arg]
+            self.userinfo: dict = {}  # type: ignore[type-arg]
+            self.doc = dict(DOC)
+            self.token_status: int | None = None
+            self.form: dict = {}  # type: ignore[type-arg]
+
+        def __call__(self, url, data=None, headers=None, timeout=None):  # type: ignore[no-untyped-def]
+            if url.endswith("openid-configuration"):
+                return dict(self.doc)
+            if url == DOC["token_endpoint"]:
+                if self.token_status:
+                    raise oidc.FetchError("HTTP 400", self.token_status, {"error": "invalid_grant"})
+                self.form = {k: v for k, v in (p.split("=", 1) for p in data.decode().split("&"))}
+                self.basic = headers.get("Authorization", "")
+                return {"id_token": f"{b64({'alg': 'RS256'})}.{b64(self.claims)}.sig",
+                        "access_token": "at", "token_type": "Bearer"}
+            if url == DOC["userinfo_endpoint"]:
+                self.bearer = headers.get("Authorization", "")
+                return dict(self.userinfo)
+            raise oidc.FetchError("unknown " + url)
+
+    def refuses(fn, *args):  # type: ignore[no-untyped-def]
+        try:
+            fn(*args)
+        except oidc.OIDCError:
+            return True
+        return False
+
+    idp = FakeIdP()
+    cfg = Config(oidc_enabled=True, oidc_issuer=ISS, oidc_client_id="cid", oidc_client_secret="sec")
+    history = fresh_history(tmp, "oidc.db")
+    history.add_user("olai", "correct horse")
+    auth = Auth(history)
+    secret = auth.secret()
+    r.check("configured needs every field", oidc.configured(cfg)
+            and not oidc.configured(Config(oidc_enabled=True, oidc_issuer=ISS, oidc_client_id="cid"))
+            and oidc.missing(Config()) == ["oidc_issuer", "oidc_client_id", "oidc_client_secret"])
+
+    def trip(cfg, *, mode="login", user=None, session_user=None, sub="sub-1",  # type: ignore[no-untyped-def]
+             email="Anna@Example.com", verified=True, pu="anna", tamper=None, error_param=None,
+             addr="1.2.3.4", code="code123"):
+        url, cookie = oidc.begin(cfg, redirect_uri="https://h/api/auth/oidc/callback", secret=secret,
+                                 mode=mode, user=user, fetch=idp)
+        st = oidc.read_state(cookie, secret)
+        idp.claims = {"iss": ISS, "aud": "cid", "exp": time.time() + 300, "iat": time.time(),
+                      "nonce": st["n"], "sub": sub}
+        idp.userinfo = {"sub": sub, "email": email, "email_verified": verified,
+                        "preferred_username": pu, "name": pu}
+        if tamper:
+            tamper(idp, st)
+        return auth.oidc_finish(cfg, cookie, code, st["s"], error_param, addr, session_user, fetch=idp), url, st
+
+    # begin: PKCE, nonce, state, the cookie's shape
+    (out, url, st) = trip(cfg)
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+    r.check("authorize URL carries S256 PKCE, nonce, state, redirect_uri, openid scope",
+            q["code_challenge_method"] == "S256" and q["code_challenge"] == oidc.pkce_challenge(st["v"])
+            and q["nonce"] == st["n"] and q["state"] == st["s"]
+            and q["redirect_uri"] == "https://h/api/auth/oidc/callback" and "openid" in q["scope"].split())
+    r.check("token exchange sends the verifier, the redirect URI and Basic client credentials",
+            idp.form.get("code_verifier") == st["v"] and idp.form.get("grant_type") == "authorization_code"
+            and urllib.parse.unquote(idp.form.get("redirect_uri", "")) == "https://h/api/auth/oidc/callback"
+            and idp.basic.startswith("Basic ") and idp.bearer == "Bearer at")
+    r.check("auto-create off: a stranger is refused as not_linked and nothing is created",
+            out == (None, "not_linked", "login") and history.user_count() == 1)
+
+    # state cookie
+    url, cookie = oidc.begin(cfg, redirect_uri="x", secret=secret, fetch=idp)
+    good = oidc.read_state(cookie, secret)
+    r.check("state cookie round-trips", good["s"] and good["n"] and good["v"] and good["m"] == "login")
+    r.check("tampered signature refused", refuses(oidc.read_state, cookie[:-1] + ("0" if cookie[-1] != "0" else "1"), secret))
+    r.check("tampered body refused", refuses(oidc.read_state, "e30" + cookie[3:], secret))
+    r.check("another install's secret refused", refuses(oidc.read_state, cookie, b"other-secret"))
+    r.check("expired state refused as 'expired'",
+            auth.oidc_finish(cfg, oidc.sign_state({**good, "exp": time.time() - 1}, secret), "c", good["s"],
+                             None, "1.2.3.9", fetch=idp)[1] == "expired")
+    r.check("no cookie -> state", auth.oidc_finish(cfg, None, "c", "s", None, "1.2.3.9", fetch=idp)[1] == "state")
+    r.check("state parameter mismatch -> state",
+            auth.oidc_finish(cfg, cookie, "c", "not-the-state", None, "1.2.3.9", fetch=idp)[1] == "state")
+    r.check("provider error -> denied, no exchange",
+            trip(cfg, error_param="access_denied")[0] == (None, "denied", "login"))
+    idp.token_status = 400
+    r.check("refused exchange -> exchange", trip(cfg)[0][1] == "exchange")
+    idp.token_status = None
+
+    # claims
+    def claim_case(name, fn, code):  # type: ignore[no-untyped-def]
+        out = trip(cfg, sub="sub-9", tamper=fn)[0]
+        r.check(f"{name} -> {code}", out[1] == code and out[0] is None, str(out))
+    claim_case("wrong iss", lambda i, st: i.claims.__setitem__("iss", "https://evil/"), "id_token")
+    claim_case("aud for another client", lambda i, st: i.claims.__setitem__("aud", "other"), "id_token")
+    claim_case("multiple aud without azp", lambda i, st: i.claims.__setitem__("aud", ["cid", "other"]), "id_token")
+    claim_case("expired token", lambda i, st: i.claims.__setitem__("exp", time.time() - 120), "id_token")
+    claim_case("missing sub", lambda i, st: i.claims.pop("sub"), "id_token")
+    claim_case("wrong nonce", lambda i, st: i.claims.__setitem__("nonce", "zzz"), "nonce")
+    claim_case("userinfo sub differs", lambda i, st: i.userinfo.__setitem__("sub", "else"), "userinfo")
+    r.check("nothing was linked by any of those", history.identity_user("oidc", "sub-9") is None)
+    r.check("...and each of them counted against the address's oidc bucket",
+            len(auth._attempts.get(("oidc", "1.2.3.4"), [])) >= 7)
+    auth._clear("oidc", "1.2.3.4")   # the rest of the test is about accounts, not floods
+    r.check("discovery: issuer mismatch refused",
+            refuses(oidc.Discovery().get, "https://idp.example/other/", idp))
+    bad = FakeIdP(); bad.doc["token_endpoint"] = "http://idp.example/token"
+    r.check("discovery: a plain-http endpoint refused", refuses(oidc.Discovery().get, ISS, bad))
+    r.check("issuer must be https (loopback http excepted)",
+            oidc.issuer_problem("http://idp.example/") and not oidc.issuer_problem("https://idp.example/")
+            and not oidc.issuer_problem("http://localhost:9000/x/"))
+
+    # pre-link by e-mail, claimed at first sign-in
+    r.check("pre-link by e-mail", history.prelink_identity("olai", "oidc", "anna@example.com")
+            and history.identity_of("olai", "oidc")["subject_set"] is False)
+    r.check("unverified e-mail cannot claim", trip(cfg, verified=False)[0] == (None, "email_unverified", "login"))
+    r.check("claim: case-insensitive e-mail match opens the account",
+            trip(cfg)[0] == ("olai", None, "login") and history.identity_of("olai", "oidc")["subject"] == "sub-1")
+    r.check("second sign-in resolves by subject",
+            trip(cfg, email="renamed@example.com")[0] == ("olai", None, "login")
+            and history.identity_of("olai", "oidc")["email"] == "renamed@example.com")
+    r.check("a claimed link cannot be re-pre-linked", not history.prelink_identity("olai", "oidc", "x@y.z"))
+
+    # auto-create
+    cfg2 = Config(**{**cfg.to_dict(), "oidc_auto_create": True, "oidc_allowed_domains": ["example.com"],
+                     "oidc_default_role": "operator"})
+    out = trip(cfg2, sub="sub-2", email="olai@example.com", pu="Olai")[0]
+    r.check("auto-create: username derived, collision suffixed, role from config, no password",
+            out == ("olai-2", None, "login") and history.user_role("olai-2") == "operator"
+            and not history.has_password("olai-2") and history.identity_user("oidc", "sub-2")["username"] == "olai-2")
+    r.check("auto-create: other domain refused", trip(cfg2, sub="sub-3", email="x@other.org", pu="x")[0][1] == "domain")
+    r.check("auto-create: unverified e-mail refused when domains are listed",
+            trip(cfg2, sub="sub-3", verified=False)[0][1] == "email_unverified")
+    r.check("auto-create: no e-mail refused when domains are listed",
+            trip(cfg2, sub="sub-3", email=None)[0][1] == "domain")
+    r.check("auto-create: accents folded, e-mail local part as fallback",
+            trip(cfg2, sub="sub-4", email="Jörg.Müller@example.com", pu=None)[0] == ("jorg.muller", None, "login"))
+    r.check("password login for a provider-created account fails in one scrypt",
+            not history.verify_user("olai-2", "anything") and auth.login("olai-2", "x", "5.5.5.5") is None)
+    r.check("add_identity_user never overwrites an existing account",
+            not history.add_identity_user("olai", "viewer") and history.verify_user("olai", "correct horse"))
+
+    # limiter: its own bucket, before the exchange
+    for _ in range(auth._MAX_ATTEMPTS):
+        auth.oidc_finish(cfg, None, "c", "s", None, "9.9.9.9", fetch=idp)
+    idp.form = {}
+    out = trip(cfg, addr="9.9.9.9")[0]
+    r.check("oidc bucket: locked after the failures, before any exchange",
+            out[1] == "rate_limited" and idp.form == {})
+    r.check("oidc bucket: password login from that address unaffected",
+            auth.login("olai", "correct horse", "9.9.9.9") is not None)
+    r.check("oidc bucket: other addresses unaffected", trip(cfg)[0] == ("olai", None, "login"))
+
+    # link mode
+    history.add_user("bob", "password123", "viewer")
+    r.check("link: session must be the account that started it",
+            trip(cfg, mode="link", user="bob", session_user="olai", sub="sub-5")[0] == (None, "session", "link"))
+    r.check("link: someone else's identity refused",
+            trip(cfg, mode="link", user="bob", session_user="bob", sub="sub-1")[0] == (None, "linked_elsewhere", "link"))
+    r.check("link: binds the identity", trip(cfg, mode="link", user="bob", session_user="bob", sub="sub-5")[0] == ("bob", None, "link")
+            and history.identity_user("oidc", "sub-5")["username"] == "bob")
+    r.check("link: a second identity refused as taken",
+            trip(cfg, mode="link", user="bob", session_user="bob", sub="sub-6")[0] == (None, "taken", "link"))
+    r.check("link: mode survives a failed state read (login)",
+            auth.oidc_finish(cfg, None, "c", "s", None, "7.7.7.7", fetch=idp)[2] == "login")
+
+    # revocation and cascade
+    session = auth.issue_session("olai-2")
+    r.check("a provider-created account gets a normal session", auth.verify_session(session) == "olai-2")
+    history.unlink_identity("olai-2", "oidc")
+    r.check("rotate_login_key revokes it", history.rotate_login_key("olai-2") and (auth.invalidate("olai-2") or True)
+            and auth.verify_session(session) is None)
+    r.check("rotate_login_key is a no-op for a password account", not history.rotate_login_key("olai"))
+    r.check("rename carries the identity", history.rename_user("bob", "bobby")
+            and history.identity_user("oidc", "sub-5")["username"] == "bobby")
+    r.check("remove drops the identity", history.remove_user("bobby") and history.identity_user("oidc", "sub-5") is None)
+    users = {u["username"]: u for u in history.list_users()}
+    r.check("list_users carries has_password and identity",
+            users["olai"]["has_password"] and users["olai"]["identity"]["subject"] == "sub-1"
+            and users["olai-2"]["has_password"] is False and users["olai-2"]["identity"] is None)
+
+    # derive_username
+    r.check("derive_username: charset, length, fallback, suffixes",
+            derive_username(oidc.Identity(sub="ab:cd", preferred_username="::"), lambda n: False) == "abcd"
+            and derive_username(oidc.Identity(sub="x" * 100), lambda n: False) == "x" * 40
+            and derive_username(oidc.Identity(sub="!!!"), lambda n: False) == "user"
+            and derive_username(oidc.Identity(sub="s", preferred_username="Olai"), lambda n: n in ("olai", "olai-2")) == "olai-3"
+            and ":" not in derive_username(oidc.Identity(sub="a:b:c"), lambda n: False))
+    r.check("every error code has a sentence", all(oidc.error_text(c) for c in oidc.ERRORS)
+            and oidc.error_text("made-up") == oidc.ERRORS["state"])
+    history.close()
+    r.summary("provider sign-in (OIDC)", "PKCE + nonce + signed state, every claim check, "
+              "pre-link claim, auto-create rules, link mode, its own limiter bucket, revocation")
 
 
 def test_trust(r: Runner) -> None:
@@ -619,6 +852,7 @@ def main() -> int:
         test_inflate(r)
         test_startup(r, tmp)
         test_config(r)
+        test_oidc(r, tmp)
         test_trust(r)
     took = time.perf_counter() - started
     print(f"\n{BOLD}summary{RESET}  {r.passed} passed  {len(r.failed)} failed  "
