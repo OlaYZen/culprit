@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import os
+import stat
 import threading
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -470,6 +471,14 @@ def load() -> Config:
             raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             raw = {}
+        # A file written before secrets lived in it (the SMTP password, the
+        # OIDC client secret) may still be world-readable; tighten it here
+        # rather than only on the next save, which may never come.
+        try:
+            if stat.S_IMODE(CONFIG_PATH.stat().st_mode) & 0o077:
+                os.chmod(CONFIG_PATH, 0o600)
+        except OSError:
+            pass
         known = {f.name: f for f in fields(Config)}
         for key, value in (raw or {}).items():
             spec = known.get(key)
