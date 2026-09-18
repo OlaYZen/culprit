@@ -1,6 +1,6 @@
 """Authentication for the dashboard and the agent ingest endpoint.
 
-Two independent mechanisms, because the two callers are different animals:
+Three independent mechanisms, because the callers are different animals:
 
 * **People** sign in with a username/password (scrypt-hashed in SQLite -- see
   db.py) and get an HMAC-signed session cookie: `user:expiry:signature`,
@@ -12,6 +12,16 @@ Two independent mechanisms, because the two callers are different animals:
 * **Agents** authenticate every report with a bearer token `<name>.<secret>`;
   only the SHA-256 of the secret is stored. A token identifies exactly one
   node and can be revoked without touching any other.
+
+* **Scripts** acting for a person carry an API key, `Authorization: Bearer
+  ck_<id>.<secret>`, stored like an agent token (SHA-256 only, shown once).
+  A key belongs to a user and carries a role cap; what it may do is the
+  lower of that cap and the owner's *current* role, read per request, so a
+  demotion reaches the person's keys as fast as it reaches their session and
+  removing the account removes them. A key is deliberately independent of
+  the password (rotating a password must not break the backup check), which
+  is why minting one re-proves the password and why a key can never mint or
+  revoke keys or touch the account's credentials (main.require_session).
 
 People can also arrive through an OpenID Connect provider (oidc.py does the
 protocol; `Auth.oidc_finish` below decides which account that is). Such a
@@ -45,7 +55,7 @@ import unicodedata
 from typing import Any, Callable
 
 from . import oidc
-from .db import History
+from .db import API_KEY_PREFIX, History
 
 log = logging.getLogger("culprit.auth")
 
@@ -82,6 +92,7 @@ class Auth:
         self._secret: bytes | None = None
         self._attempts: dict[str, list[float]] = {}
         self._keys: dict[str, tuple[float, bytes, str]] = {}
+        self._key_touched: dict[str, float] = {}
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ state
@@ -346,6 +357,46 @@ class Auth:
         if name:
             self.history.touch_agent(name, addr)
         return name
+
+    # --------------------------------------------------------------- API keys
+    # last_used is a courtesy for the person reviewing their keys, not an
+    # audit log: a script polling once a second must not become a SQLite
+    # write per request, so it is stamped at most once a minute per key.
+    _TOUCH_EVERY_S = 60.0
+
+    def verify_api_key(self, authorization: str | None,
+                       addr: str | None) -> dict[str, Any] | None:
+        """'Bearer ck_<id>.<secret>' -> {id, name, username, role}, or None.
+
+        `role` is the effective one: the lower of the key's cap and its
+        owner's current role. No limiter sits in front of this: the secret
+        is 256 random bits, so there is nothing to brute-force, and a
+        per-address lockout would let one misconfigured script behind a NAT
+        switch off everyone else's automation."""
+        if not authorization or not authorization.startswith("Bearer "):
+            return None
+        token = authorization[7:].strip()
+        if not token.startswith(API_KEY_PREFIX):
+            return None
+        key = self.history.verify_api_key(token)
+        if key is None:
+            return None
+        cap, owner = key.pop("role"), key.pop("owner_role")
+        key["role"] = cap if ROLE_RANK.get(cap, -1) <= ROLE_RANK.get(owner, -1) else owner
+        now = time.monotonic()
+        with self._lock:
+            due = now - self._key_touched.get(key["id"], -1e9) >= self._TOUCH_EVERY_S
+            if due:
+                # Only ids that verified land here, so forged ones cannot
+                # grow the map; revoked ones are dropped in forget_api_key.
+                self._key_touched[key["id"]] = now
+        if due:
+            self.history.touch_api_key(key["id"], addr)
+        return key
+
+    def forget_api_key(self, key_id: str) -> None:
+        with self._lock:
+            self._key_touched.pop(key_id, None)
 
     # -------------------------------------------------------------- gate check
     def gate(self, path: str) -> str:
