@@ -502,7 +502,7 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
                        "users[].has_password", "users[].identity"],
         # API keys: the account's own, and the admin's list of everyone's.
         # Row fields are checked only when a key exists ([] satisfies them).
-        "/api/account/keys": ["keys", "limit", "roles", "needs_password",
+        "/api/account/keys": ["keys", "limit", "roles",
                               "keys[].id", "keys[].prefix", "keys[].name", "keys[].role",
                               "keys[].effective_role", "keys[].created_at", "keys[].expires_at",
                               "keys[].expired", "keys[].last_used", "keys[].last_addr"],

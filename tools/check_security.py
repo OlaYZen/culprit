@@ -1301,18 +1301,19 @@ def check_api_key_lifecycle(ctx: Ctx) -> None:
     it takes effect on the very next request. Revoked again whatever
     happens."""
     rep = ctx.report
-    if not (ctx.args.active and ctx.cookie and ctx.args.password):
+    if not (ctx.args.active and ctx.cookie):
         return
     c = ctx.cookie
     label = f"sectest-{secrets.token_hex(3)}"
+    # The session is the whole proof (an SSO account has no password to
+    # ask for) -- which makes "only a session" the thing to prove: no
+    # credential at all must not mint one.
+    r = ctx.http.req("POST", "/api/account/keys", json_body={"name": label, "role": "viewer"})
+    if r.status != 401:
+        rep.add("CRIT" if r.status < 300 else "HIGH", "api-key-mint",
+                f"minting with no credential -> {r.status} (expected 401)")
     r = ctx.http.req("POST", "/api/account/keys", cookie=c,
-                     json_body={"name": label, "role": "viewer",
-                                "current_password": "wrong-" + secrets.token_hex(4)})
-    if r.status != 403:
-        rep.add("HIGH", "api-key-mint", f"minting with a wrong password -> {r.status} (expected 403)")
-    r = ctx.http.req("POST", "/api/account/keys", cookie=c,
-                     json_body={"name": label, "role": "viewer", "expires_days": 1,
-                                "current_password": ctx.args.password})
+                     json_body={"name": label, "role": "viewer", "expires_days": 1})
     made = r.json() or {}
     token = made.get("token")
     key_id = (made.get("key") or {}).get("id")
@@ -1345,13 +1346,13 @@ def check_api_key_lifecycle(ctx: Ctx) -> None:
         # Session-only: no key, of any role, manages keys or credentials.
         expect("GET", "/api/account/keys", 403, "a key cannot list keys")
         expect("POST", "/api/account/keys", 403, "a key cannot mint a key",
-               body={"name": "x", "role": "viewer", "current_password": ctx.args.password})
+               body={"name": "x", "role": "viewer"})
         expect("DELETE", f"/api/account/keys/{key_id}", 403, "a key cannot revoke a key")
         expect("GET", "/api/keys", 403, "a key cannot list everyone's keys")
         expect("POST", "/api/account/password", 403, "a key cannot change the password",
-               body={"current_password": ctx.args.password, "new_password": ctx.args.password})
+               body={"current_password": ctx.args.password or "x", "new_password": "x" * 12})
         expect("POST", "/api/account/username", 403, "a key cannot rename the account",
-               body={"new_username": label, "current_password": ctx.args.password})
+               body={"new_username": label, "current_password": ctx.args.password or "x"})
         # The listing is metadata; the secret exists only in the mint response.
         listing = ctx.http.req("GET", "/api/account/keys", cookie=c)
         secret = token.split(".", 1)[1]
@@ -1362,8 +1363,7 @@ def check_api_key_lifecycle(ctx: Ctx) -> None:
         me = ctx.http.req("GET", "/api/account", cookie=c).json() or {}
         if me.get("role") in ("viewer", "operator"):
             over = ctx.http.req("POST", "/api/account/keys", cookie=c,
-                                json_body={"name": label + "-over", "role": "admin",
-                                           "current_password": ctx.args.password})
+                                json_body={"name": label + "-over", "role": "admin"})
             if over.status != 403:
                 bad += 1
                 rep.add("CRIT", "api-key", f"a {me.get('role')} minted an admin key -> {over.status}")
