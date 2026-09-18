@@ -18,6 +18,10 @@ every property the security design promises:
 * login limiter: locks the address after 8 failures even for the right
   password, other addresses unaffected, success clears the count
 * agent tokens: shape, revoke, rotate, delete, malformed inputs
+* API keys: shape, the role cap (never above the owner, and following a
+  demotion at once), expiry, owner-scoped revocation, the cascade with the
+  account, the throttled last-used stamp, a key presented beside a cookie is
+  judged alone, and every credential route refuses a key (require_session)
 * command results: an agent can only resolve its own node's commands
 * report inflation: a gzip bomb is refused at the ceiling, in bounded time
 * startup safety: default user creation and the exposed-without-users refusal
@@ -341,6 +345,131 @@ def test_agents(r: Runner, tmp: Path) -> None:
                 (_valid_agent_name(candidate) is None) == want_ok)
     history.close()
     r.summary("agent tokens", "shape, revoke, rotate, delete, malformed inputs, name rules")
+
+
+def test_api_keys(r: Runner, tmp: Path) -> None:
+    import re
+    from types import SimpleNamespace
+
+    from culprit import main as main_module
+    from culprit.auth import Auth
+    from culprit.db import API_KEY_PREFIX, MAX_API_KEYS_PER_USER
+    r.section("API keys")
+    history = fresh_history(tmp, "keys.db")
+    auth = Auth(history)
+    history.add_user("root", "rootpass-1", "admin")
+    history.add_user("olga", "olgapass-1", "operator")
+    history.add_user("vera", "verapass-1", "viewer")
+
+    key_id, token = history.add_api_key("olga", "grafana", "operator")
+    r.check("token is ck_<12 hex>.<secret>",
+            bool(re.fullmatch(r"ck_[0-9a-f]{12}\.[\w-]{43}", token))
+            and token.startswith(f"{API_KEY_PREFIX}{key_id}."))
+    got = auth.verify_api_key(f"Bearer {token}", "10.0.0.7")
+    r.check("verify -> owner, effective role, id, name",
+            got == {"id": key_id, "name": "grafana", "username": "olga", "role": "operator"},
+            repr(got))
+    listed = history.list_api_keys("olga")[0]
+    r.check("list omits the hash", "token_hash" not in listed)
+    r.check("first use stamps last_used/last_addr",
+            listed["last_used"] and listed["last_addr"] == "10.0.0.7")
+    history._execute("UPDATE api_keys SET last_used = NULL WHERE id = ?", (key_id,))
+    auth.verify_api_key(f"Bearer {token}", "10.0.0.8")
+    r.check("the stamp is throttled (no write per request)",
+            history.list_api_keys("olga")[0]["last_used"] is None)
+    r.check("unknown role / unknown user mint nothing",
+            history.add_api_key("olga", "x", "root") is None
+            and history.add_api_key("ghost", "x", "viewer") is None)
+
+    secret = token.split(".", 1)[1]
+    agent_token = history.add_agent("web-01")
+    for bad in ("", "Bearer", f"Basic {token}", f"bearer {token}", f"Bearer {token}x",
+                f"Bearer {token[:-1]}", f"Bearer ck_{key_id}.", f"Bearer ck_.{secret}",
+                f"Bearer ck_{key_id}{secret}", f"Bearer ck_000000000000.{secret}",
+                f"Bearer {key_id}.{secret}", f"Bearer {agent_token}",
+                f"Bearer ck_{key_id}.{secret} extra"):
+        r.check(f"rejects {bad[:30]!r}", auth.verify_api_key(bad, None) is None)
+    r.check("rejects None", auth.verify_api_key(None, None) is None)
+    r.check("a key is not an agent token",
+            auth.verify_agent(f"Bearer {token}", None) is None)
+
+    # The cap: the lower of the key's role and the owner's, read per request.
+    history.set_role("olga", "viewer")
+    r.check("demoting the owner demotes the key at once",
+            auth.verify_api_key(f"Bearer {token}", None)["role"] == "viewer")
+    history.set_role("olga", "admin")
+    r.check("promoting the owner never lifts the key past its cap",
+            auth.verify_api_key(f"Bearer {token}", None)["role"] == "operator")
+
+    # Expiry.
+    _, soon = history.add_api_key("vera", "short", "viewer", time.time() + 60)
+    r.check("an unexpired key verifies", auth.verify_api_key(f"Bearer {soon}", None) is not None)
+    history._execute("UPDATE api_keys SET expires_at = ? WHERE username = 'vera'",
+                     (time.time() - 1,))
+    r.check("an expired key fails like an unknown one",
+            auth.verify_api_key(f"Bearer {soon}", None) is None)
+
+    # Revocation is scoped; the password is not part of a key.
+    r.check("cannot revoke someone else's key through the self-service path",
+            not history.remove_api_key(key_id, "vera")
+            and auth.verify_api_key(f"Bearer {token}", None) is not None)
+    history.set_password("olga", "another-pass-1")
+    r.check("a password change leaves keys working (they are revoked one by one)",
+            auth.verify_api_key(f"Bearer {token}", None) is not None)
+    history.rename_user("olga", "olga2")
+    r.check("a rename carries the keys along",
+            (auth.verify_api_key(f"Bearer {token}", None) or {}).get("username") == "olga2")
+    r.check("the owner revokes their own", history.remove_api_key(key_id, "olga2")
+            and auth.verify_api_key(f"Bearer {token}", None) is None)
+    _, gone = history.add_api_key("olga2", "cascade", "viewer")
+    history.remove_user("olga2")
+    r.check("removing the account removes its keys",
+            auth.verify_api_key(f"Bearer {gone}", None) is None
+            and history.list_api_keys("olga2") == [])
+    r.check("the per-user ceiling is sane", 1 <= MAX_API_KEYS_PER_USER <= 100)
+
+    # The gate's view: a presented key is judged alone.
+    saved = main_module.auth
+    main_module.auth = auth
+    try:
+        _, root_key = history.add_api_key("root", "ci", "viewer")
+        cookie = auth.issue_session("root")
+
+        def request(authorization: str | None, with_cookie: bool):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                headers={"authorization": authorization} if authorization else {},
+                cookies={"culprit_session": cookie} if with_cookie else {},
+                client=SimpleNamespace(host="10.0.0.9"))
+        user, role, key = main_module._identify(request(None, True))
+        r.check("a cookie alone is the session", (user, role, key) == ("root", "admin", None))
+        user, role, key = main_module._identify(request(f"Bearer {root_key}", True))
+        r.check("a key beside a cookie is judged as the key",
+                (user, role) == ("root", "viewer") and key is not None)
+        r.check("a wrong key beside a good cookie is refused, not ignored",
+                main_module._identify(request(f"Bearer {root_key}x", True)) == (None, None, None))
+        r.check("an agent token beside a cookie is not a key (the session stands)",
+                main_module._identify(request(f"Bearer {agent_token}", True))[0] == "root")
+        r.check("an agent token alone opens nothing",
+                main_module._identify(request(f"Bearer {agent_token}", False)) == (None, None, None))
+    finally:
+        main_module.auth = saved
+
+    # Which routes refuse a key is a property of the route.
+    session_only = set()
+    for route in main_module.app.routes:
+        deps = getattr(getattr(route, "dependant", None), "dependencies", None) or []
+        if any(getattr(d.call, "session_only", False) for d in deps):
+            session_only.add(route.path)
+    credential_routes = {
+        "/api/account/keys", "/api/account/keys/{key_id}", "/api/keys", "/api/keys/{key_id}",
+        "/api/account/password", "/api/account/username", "/api/account/oidc/link",
+        "/api/account/oidc"}
+    r.check("every credential route is session-only",
+            credential_routes <= session_only, str(sorted(credential_routes - session_only)))
+    r.check("and nothing else is", session_only == credential_routes,
+            str(sorted(session_only - credential_routes)))
+    history.close()
+    r.summary("API keys", "shape, cap, expiry, revocation, cascade, precedence, session-only routes")
 
 
 def test_commands(r: Runner) -> None:
@@ -848,6 +977,7 @@ def main() -> int:
         test_roles(r, tmp)
         test_limiter(r, tmp)
         test_agents(r, tmp)
+        test_api_keys(r, tmp)
         test_commands(r)
         test_inflate(r)
         test_startup(r, tmp)

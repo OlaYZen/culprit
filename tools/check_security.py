@@ -24,7 +24,9 @@ Safe mode never changes server state and spends at most five of the eight login
 failures the host allows per source address per five minutes, so a dashboard
 user on the same address is never locked out by a scan. `--active` adds the
 checks that do mutate: enrolling (and deleting) a throwaway agent to prove the
-token lifecycle end to end, creating a throwaway operator through /api/users
+token lifecycle end to end, minting (and revoking) a throwaway API key to
+prove it opens exactly what its role allows, can never manage keys or the
+account's credentials, and dies with its revocation, creating a throwaway operator through /api/users
 to prove that role can really complete an operator-only write (the refusal
 side of every role at every route is `tools/check_role_matrix.py`'s job, run
 separately -- this only proves access granted is access that works), a real
@@ -281,7 +283,7 @@ def section(title: str) -> None:
 
 def fill_path(path: str) -> str:
     return (path.replace("{name}", "sectest-nope").replace("{pid}", "1")
-            .replace("{path:path}", "x"))
+            .replace("{key_id}", "0" * 12).replace("{path:path}", "x"))
 
 
 def is_public(path: str) -> bool:
@@ -370,7 +372,13 @@ def check_auth_state(ctx: Ctx) -> None:
     ctx.auth_enabled = bool(data.get("enabled"))
     # role is None whenever username is (no session, or auth off), so it
     # never carries more than username already does.
-    extra = set(data) - {"enabled", "username", "role", "providers"}
+    # `via` / `api_key` say how the caller was recognised (a script's
+    # "who am I"); with no credential sent, as here, both must be empty.
+    extra = set(data) - {"enabled", "username", "role", "providers", "via", "api_key"}
+    if data.get("via") or data.get("api_key"):
+        ctx.report.add("HIGH", "auth-state",
+                       "/api/auth names a credential with none sent: "
+                       f"via={data.get('via')!r} api_key={data.get('api_key')!r}")
     # `providers` is the login page's second way in: a label and a path
     # per configured sign-in provider, nothing about the provider itself.
     providers = data.get("providers")
@@ -895,7 +903,10 @@ def check_session_forgery(ctx: Ctx) -> None:
         flipped = head + ":" + ("0" if sig[0] != "0" else "1") + sig[1:]
         user_part, _, _ = head.rpartition(":")
         stale = f"{user_part}:{int(time.time()) - 10}:{sig}"
-        swapped = "root:" + ctx.cookie.split(":", 1)[1]
+        # Another name than the cookie's own, or "rewritten" is a no-op and
+        # a scan signed in as root reports its own valid cookie as forged.
+        other = "root" if user_part != "root" else "admin"
+        swapped = f"{other}:" + ctx.cookie.split(":", 1)[1]
         for name, cookie in (("flipped signature", flipped),
                              ("expiry rewritten", stale),
                              ("username rewritten", swapped)):
@@ -1234,6 +1245,140 @@ def check_agent_ingest_unauth(ctx: Ctx) -> None:
                 "(expected 401 before the body is read)")
     if not bad:
         rep.ok("agent-ingest", f"{len(cases) + 1} bad-credential reports rejected with 401")
+
+
+def check_api_key_unauth(ctx: Ctx) -> None:
+    """The other bearer credential: `Authorization: Bearer ck_<id>.<secret>`
+    on the session-gated routes. Every shape that is not a minted key must
+    bounce exactly like no credential at all."""
+    rep = ctx.report
+    if not ctx.auth_enabled:
+        return
+    secret = secrets.token_urlsafe(32)
+    cases = [
+        ("made-up key", {"Authorization": f"Bearer ck_{secrets.token_hex(6)}.{secret}"}),
+        ("empty secret", {"Authorization": f"Bearer ck_{secrets.token_hex(6)}."}),
+        ("empty id", {"Authorization": f"Bearer ck_.{secret}"}),
+        ("prefix only", {"Authorization": "Bearer ck_"}),
+        ("no dot", {"Authorization": f"Bearer ck_{secrets.token_hex(6)}{secret}"}),
+        ("sql in id", {"Authorization": f"Bearer ck_' OR '1'='1.{secret}"}),
+        ("wildcard id", {"Authorization": f"Bearer ck_%.{secret}"}),
+        ("huge key", {"Authorization": "Bearer ck_" + "a" * 6000}),
+        ("x-api-key header", {"X-API-Key": f"ck_{secrets.token_hex(6)}.{secret}"}),
+        ("key as query", {}),
+    ]
+    for name in ctx.agent_names[:2]:
+        cases.append((f"agent-shaped bearer {name!r}",
+                      {"Authorization": f"Bearer {name}.{secret}"}))
+    bad = 0
+    for label, headers in cases:
+        target = "/api/nodes"
+        if label == "key as query":
+            target += f"?api_key=ck_{secrets.token_hex(6)}.{secret}"
+        r = safe_req(ctx, "GET", target, headers=headers)
+        if r is None or r.status == 431:
+            continue    # the server refused the request line / headers outright
+        if r.status != 401:
+            bad += 1
+            rep.add("CRIT" if r.status < 300 else "HIGH", "api-key",
+                    f"{label} -> {r.status}: {r.text[:100]!r}")
+    # A key-shaped bearer is not an agent token either.
+    r = ctx.http.req("POST", "/api/agents/report", body=b"{}",
+                     headers={"Content-Type": "application/json",
+                              "Authorization": f"Bearer ck_{secrets.token_hex(6)}.{secret}"})
+    if r.status != 401:
+        bad += 1
+        rep.add("HIGH", "api-key", f"key-shaped bearer on the agent ingest -> {r.status}")
+    if not bad:
+        rep.ok("api-key", f"{len(cases) + 1} forged or misplaced keys rejected with 401")
+
+
+def check_api_key_lifecycle(ctx: Ctx) -> None:
+    """--active: mint a throwaway viewer key as the signed-in user and prove
+    the promises made about it -- it reads, it cannot act above its cap, it
+    cannot manage keys or credentials (a leaked key must not be able to
+    leave another behind), the listing never carries a secret, and revoking
+    it takes effect on the very next request. Revoked again whatever
+    happens."""
+    rep = ctx.report
+    if not (ctx.args.active and ctx.cookie and ctx.args.password):
+        return
+    c = ctx.cookie
+    label = f"sectest-{secrets.token_hex(3)}"
+    r = ctx.http.req("POST", "/api/account/keys", cookie=c,
+                     json_body={"name": label, "role": "viewer",
+                                "current_password": "wrong-" + secrets.token_hex(4)})
+    if r.status != 403:
+        rep.add("HIGH", "api-key-mint", f"minting with a wrong password -> {r.status} (expected 403)")
+    r = ctx.http.req("POST", "/api/account/keys", cookie=c,
+                     json_body={"name": label, "role": "viewer", "expires_days": 1,
+                                "current_password": ctx.args.password})
+    made = r.json() or {}
+    token = made.get("token")
+    key_id = (made.get("key") or {}).get("id")
+    if r.status != 200 or not token or not key_id:
+        rep.add("WARN", "api-key-mint", f"could not mint a throwaway key -> {r.status}: {r.text[:120]!r}")
+        return
+    bearer = {"Authorization": f"Bearer {token}"}
+    bad = 0
+
+    def expect(method: str, target: str, want: int, why: str, body: Any = None,
+               cookie: str | None = None) -> None:
+        nonlocal bad
+        got = ctx.http.req(method, target, headers=bearer, json_body=body, cookie=cookie)
+        if got.status != want:
+            bad += 1
+            level = "CRIT" if 200 <= got.status < 300 and want >= 400 else "HIGH"
+            rep.add(level, "api-key", f"{why}: {method} {target} -> {got.status} (expected {want})")
+
+    try:
+        expect("GET", "/api/nodes", 200, "a viewer key reads")
+        who = ctx.http.req("GET", "/api/auth", headers=bearer).json() or {}
+        if who.get("via") != "api_key" or who.get("role") != "viewer":
+            bad += 1
+            rep.add("HIGH", "api-key", f"/api/auth does not describe the key: {who!r}")
+        # Beside the signed-in cookie the key must still be judged alone:
+        # the cookie here may well be an admin's.
+        expect("POST", "/api/nodes/check-updates", 403, "a viewer key beside a session cookie is still a viewer", cookie=c)
+        expect("PUT", "/api/settings", 403, "a viewer key cannot write settings", body={"process_count": 50})
+        expect("GET", "/api/users", 403, "a viewer key cannot list users")
+        # Session-only: no key, of any role, manages keys or credentials.
+        expect("GET", "/api/account/keys", 403, "a key cannot list keys")
+        expect("POST", "/api/account/keys", 403, "a key cannot mint a key",
+               body={"name": "x", "role": "viewer", "current_password": ctx.args.password})
+        expect("DELETE", f"/api/account/keys/{key_id}", 403, "a key cannot revoke a key")
+        expect("GET", "/api/keys", 403, "a key cannot list everyone's keys")
+        expect("POST", "/api/account/password", 403, "a key cannot change the password",
+               body={"current_password": ctx.args.password, "new_password": ctx.args.password})
+        expect("POST", "/api/account/username", 403, "a key cannot rename the account",
+               body={"new_username": label, "current_password": ctx.args.password})
+        # The listing is metadata; the secret exists only in the mint response.
+        listing = ctx.http.req("GET", "/api/account/keys", cookie=c)
+        secret = token.split(".", 1)[1]
+        if secret in listing.text or "token_hash" in listing.text:
+            bad += 1
+            rep.add("CRIT", "api-key", "the key listing carries the secret or its hash")
+        # More access than the owner has is refused (admins have no "more").
+        me = ctx.http.req("GET", "/api/account", cookie=c).json() or {}
+        if me.get("role") in ("viewer", "operator"):
+            over = ctx.http.req("POST", "/api/account/keys", cookie=c,
+                                json_body={"name": label + "-over", "role": "admin",
+                                           "current_password": ctx.args.password})
+            if over.status != 403:
+                bad += 1
+                rep.add("CRIT", "api-key", f"a {me.get('role')} minted an admin key -> {over.status}")
+    finally:
+        gone = ctx.http.req("DELETE", f"/api/account/keys/{key_id}", cookie=c)
+        if gone.status != 200:
+            rep.add("WARN", "api-key", f"could not revoke throwaway key {key_id} -> {gone.status}; "
+                    f"remove it: python -m culprit keys revoke {key_id}")
+    after = ctx.http.req("GET", "/api/nodes", headers=bearer)
+    if after.status != 401:
+        bad += 1
+        rep.add("CRIT", "api-key", f"a revoked key still opens /api/nodes -> {after.status}")
+    if not bad:
+        rep.ok("api-key", "throwaway key: reads as viewer, capped beside a cookie, refused on every "
+               "key and credential route, no secret in the listing, dead on revocation")
 
 
 def check_agent_lifecycle(ctx: Ctx) -> None:
@@ -2042,6 +2187,7 @@ def main() -> int:
             check_login(ctx)
             check_session_forgery(ctx)
             check_agent_ingest_unauth(ctx)
+            check_api_key_unauth(ctx)
 
         if want("robustness"):
             section("Robustness")
@@ -2056,6 +2202,7 @@ def main() -> int:
             check_password_revocation(ctx)
             if want("active"):
                 check_agent_lifecycle(ctx)
+                check_api_key_lifecycle(ctx)
                 check_agent_isolation(ctx)
                 check_role_gate(ctx)
                 check_update_guard(ctx)

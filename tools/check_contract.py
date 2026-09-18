@@ -500,10 +500,19 @@ CONTRACT: dict[str, dict[str, list[str]]] = {
         "/api/account": ["username", "role", "has_password", "identity", "providers"],
         "/api/users": ["users[].username", "users[].role", "users[].created_at",
                        "users[].has_password", "users[].identity"],
+        # API keys: the account's own, and the admin's list of everyone's.
+        # Row fields are checked only when a key exists ([] satisfies them).
+        "/api/account/keys": ["keys", "limit", "roles", "needs_password",
+                              "keys[].id", "keys[].prefix", "keys[].name", "keys[].role",
+                              "keys[].effective_role", "keys[].created_at", "keys[].expires_at",
+                              "keys[].expired", "keys[].last_used", "keys[].last_addr"],
+        "/api/keys": ["keys", "keys[].id", "keys[].prefix", "keys[].username", "keys[].name",
+                      "keys[].role", "keys[].effective_role", "keys[].expires_at",
+                      "keys[].expired", "keys[].last_used", "keys[].last_addr"],
     },
     # The login page is not a view, but it reads /api/auth like one.
     "login": {
-        "/api/auth": ["enabled", "username", "role", "providers"],
+        "/api/auth": ["enabled", "username", "role", "providers", "via", "api_key"],
     },
 }
 
