@@ -20,7 +20,7 @@ URI**. Everything else is deciding who gets an account.
 ## 1. Copy the redirect URI from Culprit
 
 Open Culprit the way your users will — through the proxy, under the public
-name — and go to **Settings › Sign-in**. The bottom of the page shows the
+name — and go to **Settings › SSO**. The bottom of the page shows the
 redirect URI for that host:
 
 ```
@@ -109,9 +109,9 @@ application at all. Binding a group here is the right place to keep the
 neighbours out; Culprit only decides what happens to people Authentik lets
 through.
 
-## 4. Fill in Culprit's Sign-in page
+## 4. Fill in Culprit's SSO page
 
-**Settings › Sign-in**, signed in as an admin:
+**Settings › SSO**, signed in as an admin:
 
 | Field | Value |
 |---|---|
@@ -135,7 +135,7 @@ Nothing signs in yet. Culprit has to know which account a provider identity
 opens, and there are three ways, from most to least restrictive.
 
 **Link an existing account by e-mail** (the default posture). In **Settings ›
-Users**, next to `ada`, enter `ada@example.com` under *Sign-in*. The row shows
+Users**, next to `ada`, enter `ada@example.com` under *SSO*. The row shows
 `pending · ada@example.com`. The first time Ada signs in through Authentik with
 that address marked verified, her identity claims the account and the row
 changes from pending to linked. From then on the link is by subject, and the
@@ -177,7 +177,7 @@ provider's own text never does. The ones you will meet during setup:
 | *No account here is linked to that identity, and this host does not create accounts on first sign-in.* | Working as intended: nothing in step 5 matched. Pre-link the e-mail, connect from Account, or turn on account creation. |
 | *The provider does not vouch for that e-mail address, so it cannot claim an account here.* | `email_verified` came back false. Do the scope mapping in step 2. Authentik's log shows a clean flow, which is what makes this one confusing. |
 | *That identity is already linked to another account.* | The subject is linked to a different Culprit user. Unlink it there first. |
-| Authentik shows **Redirect URI Error** and Culprit never sees anything | The redirect URI in the provider is not exactly what Culprit's Sign-in page shows. |
+| Authentik shows **Redirect URI Error** and Culprit never sees anything | The redirect URI in the provider is not exactly what Culprit's SSO page shows. |
 
 Two log lines answer most of the rest. Culprit's host, at `WARNING`, names the
 refusal code: `oidc login refused (email_unverified) for sub …`. Authentik's

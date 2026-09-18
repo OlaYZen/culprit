@@ -112,10 +112,12 @@ Authorization: Bearer ck_3017f38dcebf.9BqqzQ0Ej8pjqsl-wu2ViuwSrQ8mfciaTxJPbQVH9u
   appears in the response that minted it and never again; a lost key is
   revoked and replaced. The `ck_<id>` prefix is not secret and is how a key is
   matched to its row in Settings.
-- **Creating one re-proves the password.** A key outlives the session that made
-  it, so a borrowed, still-signed-in browser must not be able to leave one
-  behind. (An account created by a sign-in provider has no password and nothing
-  further to prove.)
+- **Being signed in is all it takes to create one.** No password is asked
+  for: an account that signs in through SSO has none, and the same action
+  should not cost differently depending on how you signed in. The other side
+  of that is worth knowing — anyone at your unlocked, signed-in browser can
+  make a key — so the list shows every key with when and from where it was
+  last used, and revoking one is a click.
 - **It cannot manage credentials.** The routes marked **session only** — the
   key routes themselves and the account's password, username and provider link
   — answer a key with `403`, whatever its role. A leaked key can therefore
@@ -369,7 +371,8 @@ reaches a URL.
 ## Account
 
 The signed-in account's own credentials. The four that change something are
-**session only** and re-prove the current password.
+**session only** and re-prove the current password (API keys, below, ask for
+the session alone).
 
 ### GET /api/account
 
@@ -448,8 +451,7 @@ A key as the API shows it — the secret is never part of it:
 
 ```jsonc
 {"keys": [ … ], "limit": 25,
- "roles": ["viewer", "operator"],   // the caps this account may hand out
- "needs_password": true}            // false for a provider-created account
+ "roles": ["viewer", "operator"]}   // the caps this account may hand out
 ```
 
 ### POST /api/account/keys
@@ -464,7 +466,6 @@ the token.**
 | `name` | string | 1–64 printable characters; what will use it |
 | `role` | string | `viewer` (default), `operator`, `admin` — never above your own |
 | `expires_days` | int \| null | 1–3650, or `null` / omitted for no expiry |
-| `current_password` | string | required when `needs_password` |
 
 ```jsonc
 {"ok": true, "key": { … },
@@ -473,7 +474,7 @@ the token.**
  "note": "this token is shown once; only its hash is stored"}
 ```
 
-`403` wrong password, or a role above your own · `409` 25 keys already ·
+`403` a role above your own · `409` 25 keys already ·
 `422` bad name, role or expiry.
 
 ### DELETE /api/account/keys/{key_id}
@@ -1196,7 +1197,7 @@ applies to the running host without writing `config.json`).
 
 **Access:** admin
 
-Settings › Sign-in's *Check issuer*: fetch the provider's discovery document
+Settings › SSO's *Check issuer*: fetch the provider's discovery document
 and report the endpoints found (or why not) plus the redirect URI this host
 will present. `{"ok", "redirect_uri", "configured", "missing": […], …}` or
 `{"ok": false, "error", "redirect_uri"}`. No secret is involved.

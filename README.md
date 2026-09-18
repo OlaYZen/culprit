@@ -909,9 +909,9 @@ curl -s -H "Authorization: Bearer $KEY" http://culprit.lan:8787/api/fleet \
 An **API key** is a person's standing credential for scripts. It acts as its
 owner under a role cap — `viewer` unless you say otherwise, never more than
 your own role, and demoted with you the moment you are. Only its hash is
-stored, so it is shown once; making one asks for your password, because a key
-outlives the session that made it; and no key can create or revoke keys or
-change an account's credentials, so a leaked key cannot leave another behind.
+stored, so it is shown once; being signed in is all it takes to make one (an
+SSO account has no password to ask for); and no key can create or revoke keys
+or change an account's credentials, so a leaked key cannot leave another behind.
 Keys keep working across a password change and are revoked one by one, by
 their owner or an admin (or `python -m culprit keys revoke <id>`).
 
@@ -967,7 +967,7 @@ account and no telemetry.
 
 Culprit speaks OpenID Connect, built and tested against
 [Authentik](https://goauthentik.io) (any OIDC issuer works the same way). It is
-off until an admin fills in **Settings › Sign-in**; then the login page offers
+off until an admin fills in **Settings › SSO**; then the login page offers
 *Continue with Authentik* under the password form. For the whole thing done
 once with every value written out — provider, application, the `email_verified`
 scope mapping Authentik needs, Culprit's form, who gets an account, and what each
@@ -977,11 +977,11 @@ login-page sentence means — see
 On the Authentik side, create an **OAuth2/OpenID provider** — client type
 **Confidential**, signing key set, scopes `openid`, `profile` and `email` — and
 an **application** that uses it. The redirect URI must be exactly what the
-Sign-in page shows (`https://<how your browser reaches Culprit>/api/auth/oidc/callback`;
+SSO page shows (`https://<how your browser reaches Culprit>/api/auth/oidc/callback`;
 Authentik matches it strictly, so reach the dashboard the way your users will
 and copy it from there). The **issuer URL** is the application's OpenID
 configuration issuer, `https://<authentik>/application/o/<application-slug>/`,
-*with* the trailing slash; **Check issuer** on the Sign-in page reads its
+*with* the trailing slash; **Check issuer** on the SSO page reads its
 discovery document and lists the endpoints it found. Leave the provider's
 *subject mode* alone once people have signed in: it is the stable id every link
 hangs on, and changing it makes every identity a stranger.
