@@ -25,7 +25,7 @@
 ## Contents
 
 - [Why Culprit](#why-culprit) · [How it compares](#how-it-compares) · [Live demo](#live-demo) · [Quick start](#quick-start) · [Add the machines to watch](#add-the-machines-to-watch)
-- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [The Prognosis](#the-prognosis) · [The Pulse](#the-pulse) · [Security & privacy](#security--privacy)
+- [What it watches](#what-it-watches) · [The Lag Doctor](#the-lag-doctor) · [The Coroner](#the-coroner) · [The Map](#the-map) · [The Outage Doctor](#the-outage-doctor) · [The Prognosis](#the-prognosis) · [The Pulse](#the-pulse) · [The API](#the-api) · [Security & privacy](#security--privacy)
 - [Privilege, named](#privilege-named) · [Performance](#performance) · [Notes & limits](#notes--limits)
 
 ---
@@ -894,6 +894,36 @@ existing.
 
 ---
 
+## The API
+
+Everything the dashboard shows or does goes through one HTTP API, so all of it
+can be scripted — a status board, a Grafana panel, a Home Assistant sensor, a
+cron job that restarts a unit and waits for the verdict.
+
+```bash
+KEY=ck_3017f38dcebf.9Bqqz…        # Settings › Account › API keys
+curl -s -H "Authorization: Bearer $KEY" http://culprit.lan:8787/api/fleet \
+  | jq '.nodes[] | {name, online, status, headline}'
+```
+
+An **API key** is a person's standing credential for scripts. It acts as its
+owner under a role cap — `viewer` unless you say otherwise, never more than
+your own role, and demoted with you the moment you are. Only its hash is
+stored, so it is shown once; making one asks for your password, because a key
+outlives the session that made it; and no key can create or revoke keys or
+change an account's credentials, so a leaked key cannot leave another behind.
+Keys keep working across a password change and are revoked one by one, by
+their owner or an admin (or `python -m culprit keys revoke <id>`).
+
+**[docs/API.md](docs/API.md)** documents every route: authentication and roles,
+errors, the node snapshot section by section, each endpoint's parameters and
+response, and recipes. `tools/check_api_docs.py` compares it with the running
+app's routes and the access each one enforces, so it cannot quietly go stale.
+The same surface is machine-readable at `/api/openapi.json` and browsable at
+`/api/docs`, where **Authorize** takes a key.
+
+---
+
 ## Security & privacy
 
 Self-hosted and private by design: your data lives in one SQLite file on your own
@@ -910,6 +940,10 @@ account and no telemetry.
   operator` sets one from the CLI (default `admin`, matching the single tier
   every account had before roles existed); **Settings › Users** manages roles
   for everyone else. Culprit always keeps at least one admin.
+- **API keys:** `Authorization: Bearer ck_…` for scripts ([The API](#the-api)):
+  hashed at rest like agent tokens, capped at a role no higher than the
+  owner's, optional expiry, refused on every route that manages keys or
+  credentials, individually revocable, removed with the account.
 - **Sign in with Authentik:** an OpenID Connect provider can be a second way
   in (see below). Accounts it opens are ordinary dashboard users; ones it
   *creates* have no password and are marked so in Users.
