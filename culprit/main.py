@@ -777,7 +777,7 @@ async def api_account_username(
 # A person's standing credential for scripts: `Authorization: Bearer ck_...`
 # on any gated route, acting as its owner under a role cap (auth.py). Every
 # route here is session-only (require_session): a key cannot list, mint or
-# revoke keys. The token is in the response to the request that minted it,
+# revoke keys, and a signed-in session is all that minting one asks for. The token is in the response to the request that minted it,
 # once, like an agent's.
 _KEY_ID = re.compile(r"^[0-9a-f]{12}$")
 MAX_KEY_DAYS = 3650
@@ -814,7 +814,6 @@ async def api_account_keys(request: Request) -> dict[str, Any]:
         "limit": MAX_API_KEYS_PER_USER,
         # The caps this account may hand out: its own role and below.
         "roles": [r for r in ROLES if ROLE_RANK[r] <= ROLE_RANK.get(role, -1)],
-        "needs_password": history.has_password(user),
     }
 
 
@@ -825,13 +824,14 @@ async def api_account_key_create(
     name: str = Body(..., embed=True, max_length=256),
     role: str = Body("viewer", embed=True, max_length=16),
     expires_days: int | None = Body(None, embed=True),
-    current_password: str = Body("", embed=True, max_length=1024),
 ) -> dict[str, Any]:
     """The key acts as this account, capped at `role` (never above the
-    account's own). Re-proves the password like every other credential
-    change here -- a key outlives the session that made it, so a borrowed
-    browser must not be able to leave one behind. An account that has no
-    password (a provider created it) has nothing further to prove."""
+    account's own). The session is the whole proof: an account that signs
+    in through a provider has no password to ask for, and asking only the
+    accounts that have one would make the same action cost differently
+    depending on how a person happened to sign in. What keeps a key
+    honest is on the other side -- it is listed with its last use, revoked
+    in one click by its owner or an admin, and can never mint another."""
     assert history is not None
     user = getattr(request.state, "user", None)
     if not user:
@@ -848,10 +848,6 @@ async def api_account_key_create(
     if expires_days is not None and not (1 <= expires_days <= MAX_KEY_DAYS):
         raise HTTPException(422, f"expires_days must be 1-{MAX_KEY_DAYS}, or "
                                  "null for a key that does not expire")
-    if history.has_password(user):
-        if not await asyncio.get_running_loop().run_in_executor(
-                None, history.verify_user, user, current_password):
-            raise HTTPException(403, "current password is incorrect")
     if history.count_api_keys(user) >= MAX_API_KEYS_PER_USER:
         raise HTTPException(409, f"too many keys ({MAX_API_KEYS_PER_USER}); "
                                  "revoke one first")
@@ -2263,7 +2259,7 @@ def _oidc_lockout_guard(request: Request, patch: dict[str, Any]) -> dict[str, st
 @app.post("/api/oidc/test", summary="Fetch the provider's discovery document",
           dependencies=[Depends(require_role("admin"))])
 async def api_oidc_test(request: Request) -> dict[str, Any]:
-    """What Settings > Sign-in's *Check issuer* runs: discovery, forced,
+    """What Settings > SSO's *Check issuer* runs: discovery, forced,
     reported as the endpoints found (or the reason it failed) plus the
     redirect URI this host will present -- so the admin can compare it with
     what the provider has registered. No secret is involved."""

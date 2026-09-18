@@ -19,9 +19,10 @@ Three independent mechanisms, because the callers are different animals:
   lower of that cap and the owner's *current* role, read per request, so a
   demotion reaches the person's keys as fast as it reaches their session and
   removing the account removes them. A key is deliberately independent of
-  the password (rotating a password must not break the backup check), which
-  is why minting one re-proves the password and why a key can never mint or
-  revoke keys or touch the account's credentials (main.require_session).
+  the password (rotating a password must not break the backup check, and an
+  account a provider opened has none), so minting one asks for nothing but
+  the session -- and a key can never mint or revoke keys or touch the
+  account's credentials (main.require_session).
 
 People can also arrive through an OpenID Connect provider (oidc.py does the
 protocol; `Auth.oidc_finish` below decides which account that is). Such a
