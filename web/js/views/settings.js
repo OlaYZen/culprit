@@ -128,7 +128,7 @@ const PAGES = [
   { key: "sampling", label: "Sampling", icon: icons.timer },
   { key: "account", label: "Account", icon: icons.user },
   { key: "users", label: "Users", icon: icons.user },
-  { key: "signin", label: "Sign-in", icon: icons.lock },
+  { key: "sso", label: "SSO", icon: icons.lock },
   { key: "network", label: "Network", icon: icons.shield },
   { key: "pulse", label: "The Pulse", icon: icons.timer },
   { key: "prognosis", label: "The Prognosis", icon: icons.disk },
@@ -137,7 +137,7 @@ const PAGES = [
 ];
 
 // Pages that edit configuration get the form + Save bar; the rest act.
-const SAVES = new Set(["general", "deployment", "sampling", "signin", "network", "notifications", "pulse", "prognosis"]);
+const SAVES = new Set(["general", "deployment", "sampling", "sso", "network", "notifications", "pulse", "prognosis"]);
 
 // What the provider round-trip can say when it comes back to the Account
 // page (?oidc=<code>): a fixed set, mirrored from oidc.ERRORS on the host.
@@ -196,7 +196,7 @@ export function createSettings() {
     sampling: [slots.sampling],
     account: [slots.account, slots.keys],
     users: [slots.users, slots.allKeys],
-    signin: [slots.signin, slots.signinCheck],
+    sso: [slots.signin, slots.signinCheck],
     network: [slots.trust, slots.nodes],
     notifications: [slots.notify, slots.delivery],
     pulse: [slots.pulse, slots.pulseNodes],
@@ -266,6 +266,7 @@ export function createSettings() {
   const tabs = subnav({ label: "Settings pages", items: PAGES, value: current, onChange: (key) => { location.hash = `#settings/${key}`; } });
   root.append(tabs, ...Object.values(pages).map((p) => p.node));
   root.setPage = (key) => {
+    if (key === "signin") key = "sso";   // the page's name before it was SSO; old links still land
     if (key && !pages[key]) return;
     if (key) current = key;
     for (const [name, page] of Object.entries(pages)) page.node.hidden = name !== current;
@@ -854,7 +855,7 @@ export function createSettings() {
       setBusy(pwBtn, false, "Update password");
     });
 
-    // The provider identity this account signs in with (Settings > Sign-in
+    // The provider identity this account signs in with (Settings > SSO
     // configures the provider). Connecting starts a round-trip that leaves
     // the page; the outcome comes back as ?oidc=<code> and is shown once.
     const provider = (acct.providers || [])[0];
@@ -993,8 +994,9 @@ export function createSettings() {
     });
   }
 
-  /** The signed-in account's keys: a standing credential for scripts, which
-   *  is why making one asks for the password and the token is shown once.
+  /** The signed-in account's keys: a standing credential for scripts, shown
+   *  once. Being signed in is all it takes to make one -- an account that
+   *  came through SSO has no password to ask for.
    *  Like the account form, never rebuilt under someone typing. */
   async function renderKeys(force = false) {
     if (!force && slots.keys.contains(document.activeElement)) return;
@@ -1052,7 +1054,6 @@ export function createSettings() {
     }
 
     const nameInput = el("input", { type: "text", id: "key-new-name", autocomplete: "off", spellcheck: "false", maxlength: "64", placeholder: "what will use it — grafana, backup check" });
-    const pwInput = el("input", { type: "password", id: "key-new-pw", autocomplete: "current-password" });
     let role = "viewer";
     let expiry = "";
     const roleSeg = segmented({ label: "Access", options: roles, value: role, onChange: (v) => { role = v; } });
@@ -1062,13 +1063,12 @@ export function createSettings() {
     addBtn.addEventListener("click", async () => {
       const name = nameInput.value.trim();
       if (!name) { inlineResult(addResult, "Name the key after what will use it.", "error"); nameInput.focus(); return; }
-      if (payload.needs_password && !pwInput.value) { inlineResult(addResult, "Enter your current password to confirm.", "error"); pwInput.focus(); return; }
       setBusy(addBtn, true, "Creating…");
       addResult.replaceChildren();
       try {
         const made = await api("/api/account/keys", {
           method: "POST",
-          body: JSON.stringify({ name, role, expires_days: expiry ? Number(expiry) : null, current_password: pwInput.value }),
+          body: JSON.stringify({ name, role, expires_days: expiry ? Number(expiry) : null }),
         });
         // Re-render the list first, then put the token where the new list
         // cannot wipe it: it exists on screen exactly once.
@@ -1081,9 +1081,6 @@ export function createSettings() {
       setBusy(addBtn, false, "Create key");
     });
 
-    const form = [fieldRow({ id: nameInput.id, label: "Name", input: nameInput })];
-    if (payload.needs_password) form.push(fieldRow({ id: pwInput.id, label: "Current password", unit: "to confirm", input: pwInput }));
-
     readySlot(slots.keys, section({
       title: "API keys", meta: `${keys.length} of ${payload.limit}`,
       body: el("div", {}, [
@@ -1091,7 +1088,7 @@ export function createSettings() {
         list,
         el("div.formrow", { style: { marginTop: "8px" } }, [rowResult]),
         subhead("Create a key"),
-        el("div.cols.cols--2", {}, form),
+        el("div.cols.cols--2", {}, [fieldRow({ id: nameInput.id, label: "Name", input: nameInput })]),
         el("div.formrow", { style: { marginTop: "12px", flexWrap: "wrap" } }, [roleSeg, expirySeg, addBtn, addResult]),
       ]),
       foot: "A key acts as you, limited to the access you give it and never more than your own role — change your role and your "
@@ -1211,7 +1208,7 @@ export function createSettings() {
     });
 
     const table = el("table.tbl.tbl--tight");
-    table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>Sign-in</th><th>Created</th><th></th></tr></thead>";
+    table.innerHTML = "<thead><tr><th>Username</th><th>Role</th><th>SSO</th><th>Created</th><th></th></tr></thead>";
     const tbody = el("tbody");
     const rowResult = el("div.result");
     const providerName = config?.oidc_label || "Authentik";
@@ -1322,19 +1319,19 @@ export function createSettings() {
         el("div.formrow", { style: { marginTop: "12px" } }, [roleSeg, addBtn, addResult]),
       ]),
       foot: "A role change applies as soon as you pick it and takes effect on that account's next request. Culprit always keeps "
-          + "at least one admin, so the last one cannot be demoted or removed. Sign-in links an account to the identity a "
-          + "provider vouches for (Settings › Sign-in); an account the provider created has no password and shows as such.",
+          + "at least one admin, so the last one cannot be demoted or removed. SSO links an account to the identity a "
+          + "provider vouches for (Settings › SSO); an account the provider created has no password and shows as such.",
     }));
   }
 
-  /* ── Sign-in ─────────────────────────────────────────────────────── */
+  /* ── SSO ─────────────────────────────────────────────────────────── */
   /** The OpenID Connect provider (built for Authentik; any issuer works).
    *  Admin-only like Users: the tab renders for everyone and says why it is
    *  empty. The client secret is write-only, the same idiom as the SMTP
    *  password. The second section is what the admin needs on the provider's
    *  side -- the exact redirect URI -- and a live check of the issuer. */
   function renderSignin() {
-    const page = pages.signin;
+    const page = pages.sso;
     if (!canAdminister()) {
       page.locked = true;
       page.bar.node.hidden = true;
@@ -1522,7 +1519,7 @@ export function createSettings() {
     }
     const foot = el("span");
     foot.innerHTML = "Agents and their tokens are managed in the <strong>Nodes</strong> view; dashboard users in <strong>Users</strong>, "
-      + "and how they sign in under <strong>Sign-in</strong>. The first user is the one thing that stays on the CLI "
+      + "and how they sign in under <strong>SSO</strong>. The first user is the one thing that stays on the CLI "
       + "(<code>python -m culprit users add &lt;name&gt;</code>) — someone must exist before anyone can sign in to create anyone.";
     readySlot(slots.nodes, section({
       title: "Nodes and access", meta: `${list.filter((n) => n.online).length} of ${list.length} online`, body: kvs(rows), foot,

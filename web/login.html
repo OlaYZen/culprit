@@ -73,7 +73,7 @@
   const go = document.getElementById("go");
   const sso = document.getElementById("sso");
 
-  // A sign-in provider (Settings > Sign-in) shows up as a second way in. The
+  // A sign-in provider (Settings > SSO) shows up as a second way in. The
   // link is a plain navigation: the round-trip leaves this page for the
   // provider and comes back through the server, never through script.
   fetch("/api/auth").then((r) => r.json()).then((auth) => {
