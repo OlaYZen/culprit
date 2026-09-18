@@ -13,8 +13,8 @@
  *   saves. Booleans are switches everywhere, one control for one idea;
  *   they wait for Save like every other field on the page, which the
  *   Save bar in view makes plain.
- * - Pages that perform actions rather than edit settings (Account, Users,
- *   Expected findings) have no Save bar; each action is a plain button next
+ * - Pages that perform actions rather than edit settings (Account with its
+ *   API keys, Users, Expected findings) have no Save bar; each action is a plain button next
  *   to its inputs with its own inline result. The primary button on any
  *   page is therefore always the Save bar, or absent.
  * - **Unsaved changes are visible.** As soon as a field differs from what
@@ -182,7 +182,7 @@ export function createSettings() {
     behaviour: el("div"), info: el("div.cols.cols--2"),
     deploy: el("div"), autoUpdate: el("div"),
     sampling: el("div.stack"),
-    account: el("div"), users: el("div"),
+    account: el("div"), keys: el("div"), users: el("div"), allKeys: el("div"),
     signin: el("div"), signinCheck: el("div"),
     trust: el("div"), nodes: el("div"),
     notify: el("div"), delivery: el("div"),
@@ -194,8 +194,8 @@ export function createSettings() {
     general: [slots.behaviour, slots.info],
     deployment: [slots.deploy, slots.autoUpdate],
     sampling: [slots.sampling],
-    account: [slots.account],
-    users: [slots.users],
+    account: [slots.account, slots.keys],
+    users: [slots.users, slots.allKeys],
     signin: [slots.signin, slots.signinCheck],
     network: [slots.trust, slots.nodes],
     notifications: [slots.notify, slots.delivery],
@@ -427,7 +427,9 @@ export function createSettings() {
       pendingSlot(slots.sampling, el("div", { style: { display: "contents" } }, GROUPS.map((g) => skeletonSection(g.title, g.fields.length))));
     }
     pendingSlot(slots.account, skeletonSection("Account", 4));
+    pendingSlot(slots.keys, skeletonSection("API keys", 4));
     pendingSlot(slots.users, skeletonSection("Users", 4));
+    pendingSlot(slots.allKeys, skeletonSection("API keys, all accounts", 3));
     pendingSlot(slots.signin, skeletonSection("Sign in with a provider", 6));
     pendingSlot(slots.signinCheck, skeletonSection("Redirect URI and check", 3));
     pendingSlot(slots.trust, skeletonSection("Network trust", 5));
@@ -450,7 +452,9 @@ export function createSettings() {
       renderAutoUpdate();
       renderSampling();
       renderAccount();
+      renderKeys();
       renderUsers();
+      renderAllKeys();
       renderSignin();
       renderTrust();
       renderNodes();
@@ -961,6 +965,206 @@ export function createSettings() {
     }));
   }
 
+  /* ── API keys ────────────────────────────────────────────────────── */
+  const KEY_EXPIRY = [
+    { value: "", label: "Never" },
+    { value: "30", label: "30 days" },
+    { value: "90", label: "90 days" },
+    { value: "365", label: "1 year" },
+  ];
+
+  /** What a key may do, said once: its cap, and the owner's role when that
+   *  is what actually limits it (a demoted owner demotes their keys). */
+  function keyAccess(key) {
+    const cell = el("div.formrow", { style: { gap: "6px", flexWrap: "wrap" } }, [pill(key.role, key.role === "admin" ? "warn" : null)]);
+    if (key.effective_role !== key.role) cell.append(pill(`acts as ${key.effective_role}`, "info"));
+    return cell;
+  }
+
+  function keyExpiry(key) {
+    if (key.expired) return pill("expired", "crit");
+    return el("span.faint", { text: key.expires_at ? fmt.dateTime(key.expires_at) : "never" });
+  }
+
+  function keyUsed(key) {
+    return el("span.faint", {
+      text: key.last_used ? fmt.ago(key.last_used) : "never",
+      title: key.last_addr ? `from ${key.last_addr}` : "",
+    });
+  }
+
+  /** The signed-in account's keys: a standing credential for scripts, which
+   *  is why making one asks for the password and the token is shown once.
+   *  Like the account form, never rebuilt under someone typing. */
+  async function renderKeys(force = false) {
+    if (!force && slots.keys.contains(document.activeElement)) return;
+    const auth = store.state.auth || {};
+    if (!auth.enabled || !auth.username) {
+      readySlot(slots.keys, []);
+      return;
+    }
+    let payload;
+    try {
+      payload = await api("/api/account/keys");
+    } catch (error) {
+      readySlot(slots.keys, section({ title: "API keys", body: emptyState("Could not load", error.message) }));
+      return;
+    }
+    const keys = payload.keys || [];
+    const roles = ROLE_OPTIONS.filter((o) => (payload.roles || []).includes(o.value));
+
+    const rowResult = el("div.result");
+    const minted = el("div");
+    let list;
+    if (keys.length) {
+      const table = el("table.tbl.tbl--tight");
+      table.innerHTML = "<thead><tr><th>Name</th><th>Key</th><th>Access</th><th>Created</th><th>Last used</th><th>Expires</th><th></th></tr></thead>";
+      const tbody = el("tbody");
+      for (const key of keys) {
+        const revoke = el("button.btn.btn--sm", { type: "button", title: "Stop accepting this key" }, ["Revoke"]);
+        revoke.addEventListener("click", () => {
+          confirmAction({
+            title: `Revoke ${key.name}?`,
+            message: "Whatever uses this key gets 401 from its next request. A key cannot be restored — make a new one instead.",
+            confirmLabel: "Revoke", danger: true,
+            onConfirm: async () => {
+              await api(`/api/account/keys/${encodeURIComponent(key.id)}`, { method: "DELETE" });
+              renderKeys(true);
+              renderAllKeys();
+              return `Key '${key.name}' revoked.`;
+            },
+          });
+        });
+        tbody.append(el("tr", {}, [
+          el("td", { text: key.name }),
+          el("td", {}, [pill(`${key.prefix}…`, null, { mono: true })]),
+          el("td", {}, [keyAccess(key)]),
+          el("td.faint", { text: fmt.dateTime(key.created_at) }),
+          el("td", {}, [keyUsed(key)]),
+          el("td", {}, [keyExpiry(key)]),
+          el("td.n", {}, [revoke]),
+        ]));
+      }
+      table.append(tbody);
+      list = el("div.tblwrap", {}, [table]);
+    } else {
+      list = el("div.faint.small", { text: "No keys yet. A key lets a script read this dashboard's API (or act, with a higher role) without your password." });
+    }
+
+    const nameInput = el("input", { type: "text", id: "key-new-name", autocomplete: "off", spellcheck: "false", maxlength: "64", placeholder: "what will use it — grafana, backup check" });
+    const pwInput = el("input", { type: "password", id: "key-new-pw", autocomplete: "current-password" });
+    let role = "viewer";
+    let expiry = "";
+    const roleSeg = segmented({ label: "Access", options: roles, value: role, onChange: (v) => { role = v; } });
+    const expirySeg = segmented({ label: "Expires", options: KEY_EXPIRY, value: expiry, onChange: (v) => { expiry = v; } });
+    const addResult = el("div.result");
+    const addBtn = el("button.btn", { type: "button" }, ["Create key"]);
+    addBtn.addEventListener("click", async () => {
+      const name = nameInput.value.trim();
+      if (!name) { inlineResult(addResult, "Name the key after what will use it.", "error"); nameInput.focus(); return; }
+      if (payload.needs_password && !pwInput.value) { inlineResult(addResult, "Enter your current password to confirm.", "error"); pwInput.focus(); return; }
+      setBusy(addBtn, true, "Creating…");
+      addResult.replaceChildren();
+      try {
+        const made = await api("/api/account/keys", {
+          method: "POST",
+          body: JSON.stringify({ name, role, expires_days: expiry ? Number(expiry) : null, current_password: pwInput.value }),
+        });
+        // Re-render the list first, then put the token where the new list
+        // cannot wipe it: it exists on screen exactly once.
+        await renderKeys(true);
+        showMinted(made);
+        return;
+      } catch (error) {
+        inlineResult(addResult, error.message, "error");
+      }
+      setBusy(addBtn, false, "Create key");
+    });
+
+    const form = [fieldRow({ id: nameInput.id, label: "Name", input: nameInput })];
+    if (payload.needs_password) form.push(fieldRow({ id: pwInput.id, label: "Current password", unit: "to confirm", input: pwInput }));
+
+    readySlot(slots.keys, section({
+      title: "API keys", meta: `${keys.length} of ${payload.limit}`,
+      body: el("div", {}, [
+        minted,
+        list,
+        el("div.formrow", { style: { marginTop: "8px" } }, [rowResult]),
+        subhead("Create a key"),
+        el("div.cols.cols--2", {}, form),
+        el("div.formrow", { style: { marginTop: "12px", flexWrap: "wrap" } }, [roleSeg, expirySeg, addBtn, addResult]),
+      ]),
+      foot: "A key acts as you, limited to the access you give it and never more than your own role — change your role and your "
+          + "keys follow. Keys keep working when you change your password, so revoke the ones you no longer use. A key cannot "
+          + "create or revoke keys or change this account. Every endpoint is described in docs/API.md and at /api/docs.",
+    }));
+    slots.keys.showMinted = (made) => {
+      render(minted, el("div", { style: { marginBottom: "14px" } }, [
+        note("warn", "<strong>Copy this now.</strong> The key is shown only this once — the server keeps a hash, not the key, "
+          + "so it cannot be displayed again. Losing it means revoking it and creating another."),
+        subhead(`Key for ${made.key.name}`),
+        codeRow(made.token, "Copy key"),
+        subhead("Try it"),
+        codeRow(`curl -H "Authorization: Bearer ${made.token}" ${location.origin}/api/nodes`, "Copy command"),
+      ]));
+    };
+  }
+  function showMinted(made) { slots.keys.showMinted?.(made); renderAllKeys(); }
+
+  /** Every account's keys, for the admin: who holds a standing credential,
+   *  how much it may do, and whether anything still uses it. */
+  async function renderAllKeys() {
+    if (!canAdminister()) { readySlot(slots.allKeys, []); return; }
+    let keys;
+    try {
+      keys = (await api("/api/keys")).keys || [];
+    } catch (error) {
+      readySlot(slots.allKeys, section({ title: "API keys, all accounts", body: emptyState("Could not load", error.message) }));
+      return;
+    }
+    if (!keys.length) {
+      readySlot(slots.allKeys, section({
+        title: "API keys, all accounts",
+        body: el("div.faint.small", { text: "Nobody has created an API key. People make their own under Settings › Account." }),
+      }));
+      return;
+    }
+    const table = el("table.tbl.tbl--tight");
+    table.innerHTML = "<thead><tr><th>Owner</th><th>Name</th><th>Key</th><th>Access</th><th>Last used</th><th>Expires</th><th></th></tr></thead>";
+    const tbody = el("tbody");
+    for (const key of keys) {
+      const revoke = el("button.btn.btn--sm", { type: "button", title: "Stop accepting this key" }, ["Revoke"]);
+      revoke.addEventListener("click", () => {
+        confirmAction({
+          title: `Revoke ${key.username}'s key ${key.name}?`,
+          message: "Whatever uses this key gets 401 from its next request. It cannot be restored; its owner can create another.",
+          confirmLabel: "Revoke", danger: true,
+          onConfirm: async () => {
+            await api(`/api/keys/${encodeURIComponent(key.id)}`, { method: "DELETE" });
+            renderAllKeys();
+            renderKeys(true);
+            return `Key '${key.name}' revoked.`;
+          },
+        });
+      });
+      tbody.append(el("tr", {}, [
+        el("td", { text: key.username }),
+        el("td", { text: key.name }),
+        el("td", {}, [pill(`${key.prefix}…`, null, { mono: true })]),
+        el("td", {}, [keyAccess(key)]),
+        el("td", {}, [keyUsed(key)]),
+        el("td", {}, [keyExpiry(key)]),
+        el("td.n", {}, [revoke]),
+      ]));
+    }
+    table.append(tbody);
+    readySlot(slots.allKeys, section({
+      title: "API keys, all accounts", meta: `${keys.length} key${keys.length === 1 ? "" : "s"}`,
+      body: el("div.tblwrap", {}, [table]),
+      foot: "Removing a user removes their keys with them; demoting a user limits their keys to the new role at once.",
+    }));
+  }
+
   /* ── Users ───────────────────────────────────────────────────────── */
   /** Manage *other* accounts. Admin-only, both here (the tab still renders
    *  for every role, honestly, rather than vanishing) and on the server --
@@ -1020,6 +1224,7 @@ export function createSettings() {
           try {
             await api(`/api/users/${encodeURIComponent(user.username)}/role`, { method: "PUT", body: JSON.stringify({ role }) });
             inlineResult(rowResult, `${user.username} is now ${role}.`, "ok");
+            renderAllKeys();
             if (isSelf) renderUsers(); // our own role changed -- re-render to reflect it everywhere
           } catch (error) {
             seg.setValue(user.role);
@@ -1040,6 +1245,7 @@ export function createSettings() {
           onConfirm: async () => {
             await api(`/api/users/${encodeURIComponent(user.username)}`, { method: "DELETE" });
             renderUsers();
+            renderAllKeys();
             return `User '${user.username}' removed.`;
           },
         });
