@@ -32,9 +32,16 @@ from typing import Any, Iterable, Sequence
 
 log = logging.getLogger("culprit.db")
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 ROLES = ("viewer", "operator", "admin")
+
+# What every API key starts with. Agent tokens are `<name>.<secret>` and an
+# agent name may not contain '.', but it may well begin with "ck_" -- the two
+# never meet anyway: agent tokens are read only on the ingest path, keys only
+# on the session-gated ones. The prefix is for people and secret scanners.
+API_KEY_PREFIX = "ck_"
+MAX_API_KEYS_PER_USER = 25
 
 # The host machine's own data is node 'local'; agent nodes use their enrolled
 # name. Kept as a plain column (not a separate DB per node) so cross-node
@@ -293,6 +300,28 @@ CREATE TABLE IF NOT EXISTS identities (
 );
 
 CREATE INDEX IF NOT EXISTS idx_identities_email ON identities(provider, email);
+
+-- API keys: a person's standing credential for scripts (`Authorization:
+-- Bearer ck_<id>.<secret>`). Like an agent token, only the SHA-256 of the
+-- secret is stored and the plaintext exists once, in the response that
+-- minted it. A key belongs to a user and carries a role *cap*: what it may
+-- do is the lower of this role and the owner's current one (auth.py), so
+-- demoting a person demotes their keys and the foreign key removes them
+-- with the account. `expires_at` NULL means no expiry.
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          TEXT PRIMARY KEY,   -- public half of the token, 12 hex
+    username    TEXT NOT NULL REFERENCES users(username)
+                ON DELETE CASCADE ON UPDATE CASCADE,
+    name        TEXT NOT NULL,      -- the owner's label ("grafana", "backup check")
+    token_hash  TEXT NOT NULL,
+    role        TEXT NOT NULL,      -- viewer | operator | admin (a cap)
+    created_at  REAL NOT NULL,
+    expires_at  REAL,
+    last_used   REAL,
+    last_addr   TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(username);
 
 -- Enrolled agent nodes. Only the SHA-256 of each token is stored -- the
 -- plaintext token is shown exactly once, at enrollment, and cannot be
@@ -1484,6 +1513,84 @@ class History:
         rows = self._query("SELECT value FROM meta WHERE key = 'session_secret'")
         return bytes.fromhex(rows[0]["value"]) if rows else secret
 
+    # -------------------------------------------------------------- API keys
+    def add_api_key(self, username: str, name: str, role: str,
+                    expires_at: float | None = None) -> tuple[str, str] | None:
+        """Mint a key for a user: (id, token), the only time the token exists
+        in plaintext. None when the user does not exist (the foreign key
+        refuses the row) or the role is unknown."""
+        if role not in ROLES:
+            return None
+        key_id = secrets.token_hex(6)
+        secret = secrets.token_urlsafe(32)
+        written = self._execute(
+            "INSERT INTO api_keys (id, username, name, token_hash, role, "
+            "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (key_id, username, name,
+             hashlib.sha256(secret.encode()).hexdigest(), role, time.time(),
+             expires_at))
+        if not written:
+            return None
+        return key_id, f"{API_KEY_PREFIX}{key_id}.{secret}"
+
+    def list_api_keys(self, username: str | None = None) -> list[dict[str, Any]]:
+        """One user's keys, or everyone's (the admin's list) -- never the
+        hash. `owner_role` rides along so a reader can state the effective
+        role (the lower of the two) without a second query."""
+        sql = ("SELECT k.id, k.username, k.name, k.role, k.created_at, "
+               "k.expires_at, k.last_used, k.last_addr, u.role AS owner_role "
+               "FROM api_keys k JOIN users u ON u.username = k.username")
+        if username is None:
+            rows = self._query(sql + " ORDER BY k.username, k.created_at")
+        else:
+            rows = self._query(sql + " WHERE k.username = ? ORDER BY k.created_at",
+                               (username,))
+        return [dict(row) for row in rows]
+
+    def count_api_keys(self, username: str) -> int:
+        rows = self._query(
+            "SELECT COUNT(*) AS n FROM api_keys WHERE username = ?", (username,))
+        return int(rows[0]["n"]) if rows else 0
+
+    def remove_api_key(self, key_id: str, username: str | None = None) -> bool:
+        """Revoke a key. With `username`, only when it is that user's -- the
+        self-service route must not be a way to revoke someone else's."""
+        if username is None:
+            return self._execute("DELETE FROM api_keys WHERE id = ?", (key_id,)) > 0
+        return self._execute(
+            "DELETE FROM api_keys WHERE id = ? AND username = ?",
+            (key_id, username)) > 0
+
+    def verify_api_key(self, token: str) -> dict[str, Any] | None:
+        """'ck_<id>.<secret>' -> {id, name, username, role, owner_role}, or
+        None. Constant-time hash comparison; an expired key fails exactly
+        like an unknown one. The join is the revocation: a key whose owner
+        is gone has no row to return."""
+        if not token.startswith(API_KEY_PREFIX):
+            return None
+        key_id, dot, secret = token[len(API_KEY_PREFIX):].partition(".")
+        if not dot or not key_id or not secret:
+            return None
+        rows = self._query(
+            "SELECT k.id, k.name, k.username, k.role, k.token_hash, "
+            "k.expires_at, u.role AS owner_role FROM api_keys k "
+            "JOIN users u ON u.username = k.username WHERE k.id = ?", (key_id,))
+        digest = hashlib.sha256(secret.encode()).hexdigest()
+        if not rows:
+            hmac.compare_digest(digest, digest)  # equalise timing
+            return None
+        row = rows[0]
+        if not hmac.compare_digest(digest, row["token_hash"]):
+            return None
+        if row["expires_at"] is not None and row["expires_at"] < time.time():
+            return None
+        return {"id": row["id"], "name": row["name"], "username": row["username"],
+                "role": row["role"], "owner_role": row["owner_role"]}
+
+    def touch_api_key(self, key_id: str, addr: str | None) -> None:
+        self._execute("UPDATE api_keys SET last_used = ?, last_addr = ? "
+                      "WHERE id = ?", (time.time(), addr, key_id))
+
     # ---------------------------------------------------------------- agents
     def add_agent(self, name: str) -> str:
         """Enroll an agent and return its token -- the only time it exists in
@@ -1625,6 +1732,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # v11: the runs of each timer's service (a new table only).
         # v12: the Prognosis's wear rows (a new table only).
         # v13: linked sign-in identities (a new table only).
+        # v14: API keys (a new table only).
         for column in ("pinned_version TEXT", "pinned_ref TEXT", "platform TEXT",
                        "intermittent INTEGER NOT NULL DEFAULT 0"):
             try:
