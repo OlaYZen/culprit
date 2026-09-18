@@ -14,6 +14,10 @@ multi-node setup depends on:
     python -m culprit agents add <name>      # enroll an agent, prints its
                                              # token exactly once
     python -m culprit agents list|revoke|remove
+    python -m culprit keys add <user> <label> [--role R] [--expires-days N]
+                                             # API key for scripts, printed once
+    python -m culprit keys list [<user>]
+    python -m culprit keys revoke <id>
 
 The agent is a separate, self-contained bundle in `culprit-agent/` (its own copy
 of the runnable package + agent.sh); `python -m culprit.agent` runs only from
@@ -177,6 +181,74 @@ def _cmd_agents(args: argparse.Namespace) -> int:
         history.close()
 
 
+def _cmd_keys(args: argparse.Namespace) -> int:
+    from .auth import ROLE_RANK
+    from .db import MAX_API_KEYS_PER_USER
+
+    history = _open_history()
+    try:
+        if args.action == "add":
+            owner_role = history.user_role(args.name)
+            if owner_role is None:
+                print(f"no such user '{args.name}'", file=sys.stderr)
+                return 1
+            label = " ".join((args.value or "").split())
+            if not (1 <= len(label) <= 64) or not label.isprintable():
+                print("error: the label must be 1-64 printable characters",
+                      file=sys.stderr)
+                return 1
+            role = args.role or "viewer"
+            if ROLE_RANK[role] > ROLE_RANK.get(owner_role, -1):
+                print(f"error: '{args.name}' is {owner_role}; a key cannot be "
+                      "given more access than its owner has", file=sys.stderr)
+                return 1
+            if history.count_api_keys(args.name) >= MAX_API_KEYS_PER_USER:
+                print(f"error: '{args.name}' already has {MAX_API_KEYS_PER_USER} "
+                      "keys; revoke one first", file=sys.stderr)
+                return 1
+            expires = (time.time() + args.expires_days * 86400
+                       if args.expires_days else None)
+            minted = history.add_api_key(args.name, label, role, expires)
+            if minted is None:
+                print("error: could not store the key", file=sys.stderr)
+                return 1
+            print(f"key '{label}' for {args.name} ({role}"
+                  + (f", expires in {args.expires_days} days" if expires else "")
+                  + "). Its token (shown ONCE -- only a hash is stored):\n")
+            print(f"  {minted[1]}\n")
+            print("use it as:  curl -H 'Authorization: Bearer <token>' "
+                  "http://<this-host>:8787/api/nodes")
+        elif args.action == "revoke":
+            if history.remove_api_key(args.name):
+                print(f"key {args.name} revoked (a running server stops "
+                      "accepting it at once).")
+            else:
+                print(f"no such key '{args.name}' -- `keys list` shows the ids",
+                      file=sys.stderr)
+                return 1
+        else:
+            keys = history.list_api_keys(args.name)
+            if not keys:
+                print("no API keys" + (f" for '{args.name}'" if args.name else "")
+                      + ". Mint one with: python -m culprit keys add <user> <label>")
+            now = time.time()
+            for key in keys:
+                used = (time.strftime("%Y-%m-%d %H:%M", time.localtime(key["last_used"]))
+                        if key["last_used"] else "never")
+                if key["expires_at"] is None:
+                    expiry = "no expiry"
+                elif key["expires_at"] < now:
+                    expiry = "EXPIRED"
+                else:
+                    expiry = "expires " + time.strftime(
+                        "%Y-%m-%d", time.localtime(key["expires_at"]))
+                print(f"  {key['id']}  {key['username']:<16} {key['role']:<8} "
+                      f"{key['name']:<24} last used {used}  {expiry}")
+        return 0
+    finally:
+        history.close()
+
+
 def _serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -291,7 +363,27 @@ def main(argv: list[str] | None = None) -> int:
     agents.add_argument("action", choices=("add", "list", "revoke", "remove"))
     agents.add_argument("name", nargs="?", default=None)
 
+    keys = subparsers.add_parser("keys", help="manage API keys")
+    keys.add_argument("action", choices=("add", "list", "revoke"))
+    keys.add_argument("name", nargs="?", default=None,
+                      help="the owning user ('add', 'list') or the key id ('revoke')")
+    keys.add_argument("value", nargs="?", default=None,
+                      help="a label for the key, for 'keys add <user> <label>'")
+    keys.add_argument("--role", choices=("viewer", "operator", "admin"),
+                      default=None, help="the key's role cap (default: viewer)")
+    keys.add_argument("--expires-days", type=int, default=None,
+                      help="days until the key stops working (default: never)")
+
     args = parser.parse_args(argv)
+
+    if args.command == "keys":
+        if args.action == "add" and not (args.name and args.value):
+            parser.error("'keys add' needs a user and a label")
+        if args.action == "revoke" and not args.name:
+            parser.error("'keys revoke' needs a key id")
+        if args.expires_days is not None and not (1 <= args.expires_days <= 3650):
+            parser.error("--expires-days must be 1-3650")
+        return _cmd_keys(args)
 
     if args.command in ("users", "agents"):
         if args.action in ("add", "remove", "revoke") and not args.name:

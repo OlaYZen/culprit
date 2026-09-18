@@ -31,9 +31,9 @@ from . import __version__
 from . import config as config_module
 from . import oidc
 from . import trust
-from .auth import SESSION_COOKIE, Auth, ensure_default_user
+from .auth import ROLE_RANK, SESSION_COOKIE, Auth, ensure_default_user
 from .coroner import Coroner
-from .db import LOCAL_NODE, ROLES, History
+from .db import API_KEY_PREFIX, LOCAL_NODE, MAX_API_KEYS_PER_USER, ROLES, History
 from .expect import Expectations
 from .fleetmap import FleetMap
 from .expect import validate as validate_expectation
@@ -253,6 +253,29 @@ app = FastAPI(
 )
 
 
+def _openapi() -> dict[str, Any]:
+    """The generated schema plus the two ways in, so /api/docs gets an
+    Authorize button that takes an API key. Documentation only: the gate is
+    the middleware, not a FastAPI security dependency."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+
+    schema = get_openapi(title=app.title, version=app.version,
+                         description=app.description, routes=app.routes)
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "apiKey": {"type": "http", "scheme": "bearer", "bearerFormat": "ck_<id>.<secret>",
+                   "description": "An API key from Settings > Account (docs/API.md)."},
+        "session": {"type": "apiKey", "in": "cookie", "name": SESSION_COOKIE},
+    }
+    schema["security"] = [{"apiKey": []}, {"session": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _openapi  # type: ignore[method-assign]
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_error(request: Request,  # noqa: ANN201
                            exc: RequestValidationError):
@@ -276,6 +299,8 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
 
     * Agent reports carry a bearer token, checked in their endpoint (it needs
       the body anyway); the middleware only routes them past the session gate.
+    * A gated request is a person's session cookie or a person's API key
+      (`_identify`); downstream, both are a user and a role.
     * With no users in the database, auth is off -- but __main__ refuses to
       bind a non-loopback address in that state, so "off" can only ever mean
       "off on localhost".
@@ -301,7 +326,7 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
     gate = auth.gate(request.url.path)
     response = None
     if gate == "session":
-        user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
+        user, role, key = _identify(request)
         if user is None:
             if request.url.path.startswith("/api/"):
                 response = JSONResponse({"detail": "authentication required"},
@@ -310,10 +335,41 @@ async def auth_middleware(request: Request, call_next):  # noqa: ANN001, ANN201
                 response = RedirectResponse("/login", status_code=303)
         else:
             request.state.user = user
-            request.state.role = auth.role_of(user)
+            request.state.role = role
+            request.state.api_key = key
+            if key is not None and request.method not in ("GET", "HEAD", "OPTIONS"):
+                # The handlers log "by <user>"; this is the line that says it
+                # was that user's script, and which one.
+                log.info("api key %s ('%s', %s) -> %s %s", key["id"], key["name"],
+                         user, request.method, request.url.path)
     if response is None:
         response = await call_next(request)
     return _harden(request, response)
+
+
+def _identify(request: Request) -> tuple[str | None, str | None, dict[str, Any] | None]:
+    """(user, role, api key or None) for a request, or (None, None, None).
+
+    A request that presents an API key is judged by the key alone, even when
+    a session cookie rides along: the header is the deliberate credential
+    (someone trying a viewer key from /api/docs in a signed-in browser must
+    see what the key can do, not what they can), and a wrong key must fail
+    loudly rather than fall through to a cookie. Nothing a browser sends on
+    its own carries this header, so it is no cross-site vector. Any other
+    bearer -- an agent token, say -- is not a key and is simply not looked at
+    here."""
+    assert auth is not None
+    authorization = request.headers.get("authorization") or ""
+    if authorization.startswith(f"Bearer {API_KEY_PREFIX}"):
+        addr = request.client.host if request.client else None
+        key = auth.verify_api_key(authorization, addr)
+        if key is None:
+            return None, None, None
+        return key["username"], key["role"], key
+    user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
+    if user is None:
+        return None, None, None
+    return user, auth.role_of(user), None
 
 
 _refusals_logged: dict[tuple[str, str], float] = {}
@@ -359,6 +415,35 @@ def require_role(minimum: str):
             raise HTTPException(403, f"requires {minimum} access")
     _dep.minimum_role = minimum  # read by tools/check_role_matrix.py
     return _dep
+
+
+def require_session():
+    """A route dependency: 403 for a request that arrived on an API key.
+
+    For the routes that mint, list or revoke credentials -- the account's
+    password, name and provider link, and the keys themselves. A key is a
+    credential for *using* the dashboard's data and actions; letting it
+    create more of itself would turn one leaked key into a standing
+    foothold that survives its own revocation. Declared on the route like
+    `require_role` and tagged `.session_only` for the same reason: whether a
+    key may call a route is a property of the route, readable off
+    `app.routes` (tools/check_security.py and docs/API.md's generator do)."""
+    async def _dep(request: Request) -> None:
+        if getattr(request.state, "api_key", None) is not None:
+            raise HTTPException(403, "not available to an API key -- sign in "
+                                     "with a session for this")
+    _dep.session_only = True
+    return _dep
+
+
+def _actor(request: Request) -> str | None:
+    """Who to record an action under: the user, and the key when it was a
+    script of theirs -- "who ended this process?" deserves the true answer."""
+    user = getattr(request.state, "user", None)
+    key = getattr(request.state, "api_key", None)
+    if user and key:
+        return f"{user} (key: {key['name']})"
+    return user
 
 
 def _harden(request: Request, response):  # noqa: ANN001, ANN201
@@ -436,9 +521,12 @@ async def api_logout() -> JSONResponse:
 @app.get("/api/auth", summary="Whether auth is on, and who is signed in")
 async def api_auth(request: Request) -> dict[str, Any]:
     assert auth is not None
-    user = auth.verify_session(request.cookies.get(SESSION_COOKIE))
-    role = auth.role_of(user) if user else None
+    # Public, so the gate has not run: identify here. With a key this is the
+    # script's "who am I, and what may I do" -- `role` is the effective one.
+    user, role, key = _identify(request)
     return {"enabled": auth.enabled, "username": user, "role": role,
+            "via": ("api_key" if key else "session") if user else None,
+            "api_key": {"id": key["id"], "name": key["name"]} if key else None,
             "providers": _providers()}
 
 
@@ -549,7 +637,8 @@ async def api_account(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/account/oidc/link", summary="Start linking the signed-in "
-                                            "account to the provider")
+                                            "account to the provider",
+          dependencies=[Depends(require_session())])
 async def api_account_oidc_link(
     request: Request,
     current_password: str = Body(..., embed=True),
@@ -584,7 +673,8 @@ async def api_account_oidc_link(
 
 
 @app.delete("/api/account/oidc", summary="Disconnect the signed-in account "
-                                         "from the provider")
+                                         "from the provider",
+            dependencies=[Depends(require_session())])
 async def api_account_oidc_unlink(
     request: Request,
     current_password: str = Body(..., embed=True),
@@ -608,7 +698,8 @@ async def api_account_oidc_unlink(
     return {"ok": True, "username": user}
 
 
-@app.post("/api/account/password", summary="Change the signed-in user's password")
+@app.post("/api/account/password", summary="Change the signed-in user's password",
+          dependencies=[Depends(require_session())])
 async def api_account_password(
     request: Request,
     current_password: str = Body(..., embed=True),
@@ -642,7 +733,8 @@ async def api_account_password(
     return response
 
 
-@app.post("/api/account/username", summary="Rename the signed-in user")
+@app.post("/api/account/username", summary="Rename the signed-in user",
+          dependencies=[Depends(require_session())])
 async def api_account_username(
     request: Request,
     new_username: str = Body(..., embed=True),
@@ -679,6 +771,133 @@ async def api_account_username(
         max_age=7 * 24 * 3600, path="/",
     )
     return response
+
+
+# ------------------------------------------------------------------ API keys
+# A person's standing credential for scripts: `Authorization: Bearer ck_...`
+# on any gated route, acting as its owner under a role cap (auth.py). Every
+# route here is session-only (require_session): a key cannot list, mint or
+# revoke keys. The token is in the response to the request that minted it,
+# once, like an agent's.
+_KEY_ID = re.compile(r"^[0-9a-f]{12}$")
+MAX_KEY_DAYS = 3650
+
+
+def _key_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A stored key as the API shows it: `prefix` is the part of the token a
+    person can match against the one in their script, `effective_role` what
+    the key can actually do right now (the lower of its cap and its owner's
+    role), `expired` so nobody has to compare clocks."""
+    cap, owner = row["role"], row.get("owner_role")
+    effective = cap if ROLE_RANK.get(cap, -1) <= ROLE_RANK.get(owner, -1) else owner
+    expires = row.get("expires_at")
+    return {
+        "id": row["id"], "prefix": f"{API_KEY_PREFIX}{row['id']}",
+        "name": row["name"], "username": row["username"],
+        "role": cap, "effective_role": effective,
+        "created_at": row["created_at"], "expires_at": expires,
+        "expired": expires is not None and expires < time.time(),
+        "last_used": row.get("last_used"), "last_addr": row.get("last_addr"),
+    }
+
+
+@app.get("/api/account/keys", summary="The signed-in account's API keys",
+         dependencies=[Depends(require_session())])
+async def api_account_keys(request: Request) -> dict[str, Any]:
+    assert history is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    role = getattr(request.state, "role", None)
+    return {
+        "keys": [_key_row(row) for row in history.list_api_keys(user)],
+        "limit": MAX_API_KEYS_PER_USER,
+        # The caps this account may hand out: its own role and below.
+        "roles": [r for r in ROLES if ROLE_RANK[r] <= ROLE_RANK.get(role, -1)],
+        "needs_password": history.has_password(user),
+    }
+
+
+@app.post("/api/account/keys", summary="Mint an API key; returns its token ONCE",
+          dependencies=[Depends(require_session())])
+async def api_account_key_create(
+    request: Request,
+    name: str = Body(..., embed=True, max_length=256),
+    role: str = Body("viewer", embed=True, max_length=16),
+    expires_days: int | None = Body(None, embed=True),
+    current_password: str = Body("", embed=True, max_length=1024),
+) -> dict[str, Any]:
+    """The key acts as this account, capped at `role` (never above the
+    account's own). Re-proves the password like every other credential
+    change here -- a key outlives the session that made it, so a borrowed
+    browser must not be able to leave one behind. An account that has no
+    password (a provider created it) has nothing further to prove."""
+    assert history is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    name = " ".join(name.split())
+    if not (1 <= len(name) <= 64) or not name.isprintable():
+        raise HTTPException(422, "name must be 1-64 printable characters")
+    if role not in ROLES:
+        raise HTTPException(422, f"role must be one of {', '.join(ROLES)}")
+    own = getattr(request.state, "role", None)
+    if ROLE_RANK[role] > ROLE_RANK.get(own, -1):
+        raise HTTPException(403, f"your account is {own}; a key cannot be "
+                                 "given more access than its owner has")
+    if expires_days is not None and not (1 <= expires_days <= MAX_KEY_DAYS):
+        raise HTTPException(422, f"expires_days must be 1-{MAX_KEY_DAYS}, or "
+                                 "null for a key that does not expire")
+    if history.has_password(user):
+        if not await asyncio.get_running_loop().run_in_executor(
+                None, history.verify_user, user, current_password):
+            raise HTTPException(403, "current password is incorrect")
+    if history.count_api_keys(user) >= MAX_API_KEYS_PER_USER:
+        raise HTTPException(409, f"too many keys ({MAX_API_KEYS_PER_USER}); "
+                                 "revoke one first")
+    expires_at = time.time() + expires_days * 86400 if expires_days else None
+    minted = history.add_api_key(user, name, role, expires_at)
+    if minted is None:
+        raise HTTPException(500, "could not store the key")
+    key_id, token = minted
+    log.info("api key %s ('%s', %s) minted by %s", key_id, name, role, user)
+    row = next(r for r in history.list_api_keys(user) if r["id"] == key_id)
+    return {"ok": True, "key": _key_row(row), "token": token,
+            "header": f"Authorization: Bearer {token}",
+            "note": "this token is shown once; only its hash is stored"}
+
+
+@app.delete("/api/account/keys/{key_id}", summary="Revoke one of your API keys",
+            dependencies=[Depends(require_session())])
+async def api_account_key_delete(key_id: str, request: Request) -> dict[str, Any]:
+    assert history is not None and auth is not None
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "not signed in")
+    # Someone else's id answers exactly like a made-up one.
+    if not _KEY_ID.match(key_id) or not history.remove_api_key(key_id, user):
+        raise HTTPException(404, "no such key")
+    auth.forget_api_key(key_id)
+    log.info("api key %s revoked by %s", key_id, user)
+    return {"ok": True, "id": key_id}
+
+
+@app.get("/api/keys", summary="Every account's API keys",
+         dependencies=[Depends(require_role("admin")), Depends(require_session())])
+async def api_keys(request: Request) -> dict[str, Any]:
+    assert history is not None
+    return {"keys": [_key_row(row) for row in history.list_api_keys()]}
+
+
+@app.delete("/api/keys/{key_id}", summary="Revoke any account's API key",
+            dependencies=[Depends(require_role("admin")), Depends(require_session())])
+async def api_key_delete(key_id: str, request: Request) -> dict[str, Any]:
+    assert history is not None and auth is not None
+    if not _KEY_ID.match(key_id) or not history.remove_api_key(key_id):
+        raise HTTPException(404, "no such key")
+    auth.forget_api_key(key_id)
+    log.info("api key %s revoked by %s", key_id, getattr(request.state, "user", "?"))
+    return {"ok": True, "id": key_id}
 
 
 # --------------------------------------------------------------------- users
@@ -919,7 +1138,7 @@ async def _verified_action(request: Request, name: str, action: str,
             name, action, int(payload.get("pid") or 0) or None,
             str(result.get("name") or "") or None,
             str(result.get("unit") or "") or None, result, baseline,
-            getattr(request.state, "user", None))
+            _actor(request))
     except Exception:  # noqa: BLE001 -- the action succeeded; say so regardless
         log.exception("could not start verdict watch")
         verify_id = None
@@ -1056,10 +1275,10 @@ async def api_node_unit_action(
     result = dict(result) if isinstance(result, dict) else {"result": result}
     try:
         verify_id = (verifier.start_pulse(name, verb, unit, result, pulse_baseline,
-                                          getattr(request.state, "user", None))
+                                          _actor(request))
                      if from_pulse else
                      verifier.start_outage(name, verb, unit, result, baseline,
-                                           getattr(request.state, "user", None)))
+                                           _actor(request)))
     except Exception:  # noqa: BLE001 -- the action succeeded; say so regardless
         log.exception("could not start outage verdict watch")
         verify_id = None
